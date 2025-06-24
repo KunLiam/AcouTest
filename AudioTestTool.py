@@ -7,12 +7,13 @@ import time
 import sys
 import shutil
 import pygame  # 用于本地音频播放
+import re  # 用于解析设备列表
 
 class AudioTestTool:
     def __init__(self, root):
         self.root = root
         self.root.title("音频测试工具")
-        self.root.geometry("650x550")
+        self.root.geometry("650x580")  # 增加高度以适应设备选择区域
         self.root.resizable(False, False)
         
         # 设置样式
@@ -20,18 +21,19 @@ class AudioTestTool:
         self.style.configure("TButton", font=("Arial", 12), padding=10)
         self.style.configure("TLabel", font=("Arial", 12))
         self.style.configure("Header.TLabel", font=("Arial", 14, "bold"))
+        self.style.configure("Device.TLabel", font=("Arial", 10))
+        self.style.configure("Refresh.TButton", font=("Arial", 10), padding=5)
         
         # 创建目录结构
         self.ensure_directories()
-        
-        # 检查ADB连接
-        self.check_adb_connection()
         
         # 初始化变量
         self.selected_audio_file = None
         self.local_audio_file = None
         self.file_extension = ""
         self.debug_info = ""
+        self.devices = []  # 存储检测到的设备列表
+        self.selected_device = None  # 当前选择的设备
         
         # 初始化pygame混音器
         try:
@@ -39,7 +41,11 @@ class AudioTestTool:
         except Exception as e:
             print(f"初始化pygame混音器失败: {str(e)}")
         
+        # 创建界面
         self.create_widgets()
+        
+        # 检查ADB设备
+        self.refresh_devices()
         
     def ensure_directories(self):
         """确保必要的目录结构存在"""
@@ -51,46 +57,62 @@ class AudioTestTool:
         if not os.path.exists("audio"):
             os.makedirs("audio")
     
-    def check_adb_connection(self):
-        """检查ADB连接状态"""
-        try:
-            result = subprocess.run("adb devices", shell=True, capture_output=True, text=True)
-            if "device" not in result.stdout and "emulator" not in result.stdout:
-                messagebox.showerror("连接错误", "未检测到已连接的Android设备，请确保设备已连接并启用USB调试。")
-                sys.exit(1)
-        except Exception as e:
-            messagebox.showerror("错误", f"检查ADB连接时出错:\n{str(e)}")
-            sys.exit(1)
-        
     def create_widgets(self):
-        # 标题
-        header = ttk.Label(self.root, text="音频测试工具", style="Header.TLabel")
-        header.pack(pady=20)
+        # 标题和设备选择区域
+        header_frame = ttk.Frame(self.root)
+        header_frame.pack(fill="x", padx=20, pady=10)
+        
+        # 左侧标题
+        header = ttk.Label(header_frame, text="音频测试工具", style="Header.TLabel")
+        header.pack(side="left", pady=10)
+        
+        # 右侧设备选择
+        device_frame = ttk.Frame(header_frame)
+        device_frame.pack(side="right", pady=10)
+        
+        ttk.Label(device_frame, text="设备:", style="Device.TLabel").pack(side="left", padx=5)
+        
+        # 设备下拉菜单
+        self.device_var = tk.StringVar()
+        self.device_combo = ttk.Combobox(device_frame, textvariable=self.device_var, width=30, state="readonly")
+        self.device_combo.pack(side="left", padx=5)
+        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
+        
+        # 刷新按钮
+        refresh_button = ttk.Button(device_frame, text="刷新", style="Refresh.TButton", 
+                                  command=self.refresh_devices)
+        refresh_button.pack(side="left", padx=5)
+        
+        # 设备状态标签
+        self.device_status_var = tk.StringVar(value="未检测到设备")
+        device_status = ttk.Label(self.root, textvariable=self.device_status_var, 
+                                foreground="red", anchor="center")
+        device_status.pack(fill="x", padx=20)
         
         # 创建主框架
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill="both", expand=True, padx=20, pady=10)
         
         # 创建选项卡
-        tab_control = ttk.Notebook(main_frame)
+        self.tab_control = ttk.Notebook(main_frame)
         
         # 10通道测试选项卡
-        loopback_tab = ttk.Frame(tab_control)
-        tab_control.add(loopback_tab, text="10通道测试")
+        loopback_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(loopback_tab, text="10通道测试")
         
         # 麦克风测试选项卡
-        mic_tab = ttk.Frame(tab_control)
-        tab_control.add(mic_tab, text="麦克风测试")
+        mic_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(mic_tab, text="麦克风测试")
         
         # 多声道测试选项卡
-        multichannel_tab = ttk.Frame(tab_control)
-        tab_control.add(multichannel_tab, text="多声道测试")
+        multichannel_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(multichannel_tab, text="多声道测试")
         
         # 本地播放选项卡
-        local_playback_tab = ttk.Frame(tab_control)
-        tab_control.add(local_playback_tab, text="本地播放")
+        local_playback_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(local_playback_tab, text="本地播放")
         
-        tab_control.pack(expand=1, fill="both")
+        self.tab_control.pack(expand=1, fill="both")
         
         # 10通道测试内容
         self.setup_loopback_tab(loopback_tab)
@@ -108,6 +130,103 @@ class AudioTestTool:
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief="sunken", anchor="w")
         status_bar.pack(side="bottom", fill="x")
+    
+    def refresh_devices(self):
+        """刷新ADB设备列表"""
+        try:
+            self.status_var.set("正在检测设备...")
+            result = subprocess.run("adb devices", shell=True, capture_output=True, text=True)
+            
+            # 解析设备列表
+            lines = result.stdout.strip().split('\n')
+            self.devices = []
+            
+            if len(lines) > 1:  # 第一行是标题
+                for line in lines[1:]:
+                    if line.strip():
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            device_id = parts[0].strip()
+                            status = parts[1].strip()
+                            if status == "device":  # 只添加已授权的设备
+                                self.devices.append(device_id)
+            
+            # 更新设备下拉菜单
+            if self.devices:
+                self.device_combo['values'] = self.devices
+                self.device_combo.current(0)  # 默认选择第一个设备
+                self.selected_device = self.devices[0]
+                self.device_status_var.set(f"已连接设备: {len(self.devices)}个")
+                for widget in self.root.winfo_children():
+                    if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
+                        widget.configure(foreground="green")
+                        break
+                self.status_var.set("设备已连接，可以开始测试")
+            else:
+                self.device_combo['values'] = ["无可用设备"]
+                self.device_combo.current(0)
+                self.selected_device = None
+                self.device_status_var.set("未检测到已授权的Android设备")
+                for widget in self.root.winfo_children():
+                    if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
+                        widget.configure(foreground="red")
+                        break
+                self.status_var.set("请连接Android设备并启用USB调试")
+                
+                # 提示用户连接设备
+                messagebox.showwarning("设备未连接", "未检测到已授权的Android设备\n请确保设备已连接并启用USB调试")
+        
+        except Exception as e:
+            self.status_var.set(f"检测设备出错: {str(e)}")
+            messagebox.showerror("错误", f"检测ADB设备时出错:\n{str(e)}")
+    
+    def on_device_selected(self, event):
+        """当用户选择设备时触发"""
+        selected = self.device_var.get()
+        if selected in self.devices:
+            self.selected_device = selected
+            self.status_var.set(f"已选择设备: {selected}")
+            
+            # 获取设备信息
+            try:
+                # 获取设备型号
+                model_result = subprocess.run(f"adb -s {selected} shell getprop ro.product.model", 
+                                           shell=True, capture_output=True, text=True)
+                model = model_result.stdout.strip()
+                
+                # 获取Android版本
+                version_result = subprocess.run(f"adb -s {selected} shell getprop ro.build.version.release", 
+                                             shell=True, capture_output=True, text=True)
+                version = version_result.stdout.strip()
+                
+                self.device_status_var.set(f"已选择: {model} (Android {version})")
+                for widget in self.root.winfo_children():
+                    if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
+                        widget.configure(foreground="green")
+                        break
+            except:
+                self.device_status_var.set(f"已选择: {selected}")
+        else:
+            self.selected_device = None
+            self.device_status_var.set("未选择有效设备")
+            for widget in self.root.winfo_children():
+                if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
+                    widget.configure(foreground="red")
+                    break
+    
+    def get_adb_command(self, cmd):
+        """获取带有设备指定的ADB命令"""
+        if self.selected_device:
+            return f"adb -s {self.selected_device} {cmd}"
+        else:
+            return f"adb {cmd}"
+    
+    def check_device_selected(self):
+        """检查是否已选择设备"""
+        if not self.selected_device:
+            messagebox.showerror("错误", "未选择设备，请先选择一个设备")
+            return False
+        return True
     
     def setup_loopback_tab(self, parent):
         """设置10通道测试选项卡"""
@@ -197,30 +316,6 @@ class AudioTestTool:
         spacer = ttk.Frame(frame, height=20)
         spacer.pack()
     
-    def browse_audio_file(self):
-        """浏览并选择音频文件"""
-        filetypes = [
-            ("音频文件", "*.wav;*.mp3;*.flac;*.ogg"),
-            ("WAV文件", "*.wav"),
-            ("MP3文件", "*.mp3"),
-            ("所有文件", "*.*")
-        ]
-        
-        filename = filedialog.askopenfilename(
-            title="选择音频文件",
-            filetypes=filetypes
-        )
-        
-        if filename:
-            self.selected_audio_file = filename
-            # 显示文件名而不是完整路径
-            display_name = os.path.basename(filename)
-            if len(display_name) > 30:
-                display_name = display_name[:27] + "..."
-            self.file_path_var.set(display_name)
-            # 自动选择自定义文件选项
-            self.audio_source_var.set("custom")
-    
     def setup_mic_tab(self, parent):
         """设置麦克风测试选项卡"""
         frame = ttk.Frame(parent, padding=10)
@@ -228,29 +323,33 @@ class AudioTestTool:
         
         # 说明
         desc = ttk.Label(frame, 
-                        text="测试麦克风是否正常工作\n录制麦克风输入并保存为WAV文件")
+                        text="录制麦克风输入并保存为WAV文件\n用于测试麦克风功能")
         desc.pack(pady=10)
         
         # 参数设置
         params_frame = ttk.LabelFrame(frame, text="参数设置")
         params_frame.pack(fill="x", pady=10, padx=5)
         
-        # 麦克风类型
-        mic_type_frame = ttk.Frame(params_frame)
-        mic_type_frame.pack(fill="x", pady=5)
-        ttk.Label(mic_type_frame, text="麦克风类型:").pack(side="left", padx=5)
+        # 麦克风数量
+        mic_frame = ttk.Frame(params_frame)
+        mic_frame.pack(fill="x", pady=5)
+        ttk.Label(mic_frame, text="麦克风数量:").pack(side="left", padx=5)
         self.mic_var = tk.StringVar(value="2")
-        ttk.Radiobutton(mic_type_frame, text="2-mic", variable=self.mic_var, value="2").pack(side="left", padx=20)
-        ttk.Radiobutton(mic_type_frame, text="4-mic", variable=self.mic_var, value="4").pack(side="left", padx=20)
+        mic_combo = ttk.Combobox(mic_frame, textvariable=self.mic_var, 
+                               values=["2", "4"], width=5, state="readonly")
+        mic_combo.pack(side="left", padx=5)
+        
+        # PCM设备
+        pcm_frame = ttk.Frame(params_frame)
+        pcm_frame.pack(fill="x", pady=5)
+        ttk.Label(pcm_frame, text="PCM设备:").pack(side="left", padx=5)
+        self.mic_pcm_var = tk.StringVar(value="0")
+        ttk.Entry(pcm_frame, textvariable=self.mic_pcm_var, width=5).pack(side="left", padx=5)
         
         # 设备ID
         device_frame = ttk.Frame(params_frame)
         device_frame.pack(fill="x", pady=5)
-        ttk.Label(device_frame, text="PCM设备:").pack(side="left", padx=5)
-        self.mic_pcm_var = tk.StringVar(value="0")
-        ttk.Entry(device_frame, textvariable=self.mic_pcm_var, width=5).pack(side="left", padx=5)
-        
-        ttk.Label(device_frame, text="设备ID:").pack(side="left", padx=15)
+        ttk.Label(device_frame, text="设备ID:").pack(side="left", padx=5)
         self.mic_device_var = tk.StringVar(value="3")
         ttk.Entry(device_frame, textvariable=self.mic_device_var, width=5).pack(side="left", padx=5)
         
@@ -368,6 +467,24 @@ class AudioTestTool:
                                 command=self.show_debug_info, width=15)
         debug_button.pack(pady=5)
     
+    def browse_audio_file(self):
+        """浏览并选择音频文件"""
+        filetypes = [
+            ("音频文件", "*.wav;*.mp3;*.flac;*.ogg"),
+            ("WAV文件", "*.wav"),
+            ("所有文件", "*.*")
+        ]
+        
+        filename = filedialog.askopenfilename(
+            title="选择音频文件",
+            filetypes=filetypes
+        )
+        
+        if filename:
+            self.selected_audio_file = filename
+            self.file_path_var.set(os.path.basename(filename))
+            self.audio_source_var.set("custom")
+    
     def browse_local_audio_file(self):
         """浏览并选择本地音频文件"""
         filetypes = [
@@ -390,11 +507,198 @@ class AudioTestTool:
             if len(display_name) > 40:
                 display_name = display_name[:37] + "..."
             self.local_file_path_var.set(display_name)
-            self.playback_status_var.set("已选择文件，准备播放")
+    
+    def run_loopback_test(self):
+        """运行10通道测试"""
+        if not self.check_device_selected():
+            return
             
-            # 记录文件类型
-            _, ext = os.path.splitext(filename)
-            self.file_extension = ext.lower()
+        device = self.loopback_device_var.get()
+        channels = self.loopback_channel_var.get()
+        rate = self.loopback_rate_var.get()
+        audio_source = self.audio_source_var.get()
+        
+        # 检查自定义音频文件
+        if audio_source == "custom" and not self.selected_audio_file:
+            messagebox.showerror("错误", "请先选择自定义音频文件")
+            return
+        
+        self.status_var.set("正在执行10通道测试...")
+        
+        # 在新线程中运行测试，避免GUI冻结
+        threading.Thread(target=self._loopback_test_thread, 
+                        args=(device, channels, rate, audio_source), 
+                        daemon=True).start()
+    
+    def _loopback_test_thread(self, device, channels, rate, audio_source):
+        try:
+            # 准备工作
+            subprocess.run(self.get_adb_command("root"), shell=True)
+            
+            # 根据选择的音频源处理
+            if audio_source == "default":
+                # 使用默认7.1声道测试音频
+                audio_file = "audio/Nums_7dot1_16_48000.wav"
+                if not os.path.exists(audio_file):
+                    raise FileNotFoundError(f"默认测试音频文件不存在: {audio_file}")
+                
+                subprocess.run(self.get_adb_command(f"push {audio_file} /sdcard/test_audio.wav"), shell=True)
+                remote_audio_file = "/sdcard/test_audio.wav"
+            else:
+                # 使用自定义音频文件
+                # 获取文件扩展名
+                _, ext = os.path.splitext(self.selected_audio_file)
+                remote_filename = f"test_audio{ext}"
+                
+                self.root.after(0, lambda: self.status_var.set("正在推送自定义音频文件到设备..."))
+                subprocess.run(self.get_adb_command(f"push \"{self.selected_audio_file}\" /sdcard/{remote_filename}"), shell=True)
+                remote_audio_file = f"/sdcard/{remote_filename}"
+            
+            # 重启audioserver
+            for _ in range(3):
+                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
+            
+            # 开始录制
+            filename = f"test_{channels}ch.wav"
+            record_cmd = self.get_adb_command(f"shell tinycap /sdcard/{filename} -d {device} -c {channels} -r {rate} -p 480")
+            record_process = subprocess.Popen(record_cmd, shell=True)
+            
+            # 等待录制启动
+            time.sleep(2)
+            
+            # 播放音频
+            self.root.after(0, lambda: self.status_var.set("正在播放音频..."))
+            
+            # 根据文件类型选择播放方式
+            if remote_audio_file.endswith('.wav'):
+                # 使用tinyplay播放WAV文件
+                play_cmd = self.get_adb_command(f"shell tinyplay {remote_audio_file} -d 0")
+                subprocess.run(play_cmd, shell=True)
+            else:
+                # 对于其他格式，尝试使用系统媒体播放器
+                play_cmd = self.get_adb_command(f"shell am start -a android.intent.action.VIEW -d file://{remote_audio_file} -t audio/*")
+                subprocess.run(play_cmd, shell=True)
+                
+                # 等待一段时间让音频播放完成
+                self.root.after(0, lambda: self.status_var.set("正在播放音频，请等待..."))
+                time.sleep(30)  # 假设音频不超过30秒
+            
+            # 提示用户停止录制
+            self.root.after(0, lambda: self.status_var.set("播放完成，请点击确定停止录制"))
+            messagebox.showinfo("操作提示", "播放已完成，点击确定停止录制")
+            
+            # 停止录制
+            subprocess.run(self.get_adb_command("shell pkill -f tinycap"), shell=True)
+            record_process.terminate()
+            
+            # 拉取录制文件
+            self.root.after(0, lambda: self.status_var.set("正在拉取录制文件..."))
+            subprocess.run(self.get_adb_command(f"pull /sdcard/{filename} test/"), shell=True)
+            
+            self.root.after(0, lambda: self.status_var.set(f"{channels}通道测试完成，文件已保存为test/{filename}"))
+            
+            # 移除播放提示，直接显示完成信息
+            messagebox.showinfo("测试完成", f"{channels}通道测试完成，文件已保存为test/{filename}")
+            
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
+            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
+    
+    def run_mic_test(self):
+        """运行麦克风测试"""
+        if not self.check_device_selected():
+            return
+            
+        mic_count = self.mic_var.get()
+        pcm_device = self.mic_pcm_var.get()
+        device_id = self.mic_device_var.get()
+        rate = self.mic_rate_var.get()
+        
+        self.status_var.set(f"正在执行{mic_count}mic测试...")
+        
+        # 在新线程中运行测试，避免GUI冻结
+        threading.Thread(target=self._mic_test_thread, 
+                        args=(mic_count, pcm_device, device_id, rate), 
+                        daemon=True).start()
+    
+    def _mic_test_thread(self, mic_count, pcm_device, device_id, rate):
+        try:
+            # 准备工作
+            subprocess.run(self.get_adb_command("root"), shell=True)
+            
+            # 开始录制
+            filename = f"test_{mic_count}mic.wav"
+            record_cmd = self.get_adb_command(f"shell tinycap /sdcard/{filename} -D {pcm_device} -d {device_id} -c {mic_count} -r {rate}")
+            
+            # 显示完整命令以便调试
+            print(f"执行命令: {record_cmd}")
+            self.root.after(0, lambda: self.status_var.set(f"执行命令: {record_cmd}"))
+            
+            # 启动录制进程
+            record_process = subprocess.Popen(record_cmd, shell=True)
+            
+            # 提示用户
+            self.root.after(0, lambda: self.status_var.set(f"正在录制{mic_count}mic音频，请对着麦克风说话..."))
+            messagebox.showinfo("操作提示", f"正在录制{mic_count}mic音频，请对着麦克风说话...\n完成后点击确定停止录制")
+            
+            # 停止录制
+            subprocess.run(self.get_adb_command("shell pkill -f tinycap"), shell=True)
+            record_process.terminate()
+            
+            # 拉取录制文件
+            self.root.after(0, lambda: self.status_var.set("正在拉取录制文件..."))
+            subprocess.run(self.get_adb_command(f"pull /sdcard/{filename} test/"), shell=True)
+            
+            self.root.after(0, lambda: self.status_var.set(f"{mic_count}mic测试完成，文件已保存为test/{filename}"))
+            
+            # 移除播放提示，直接显示完成信息
+            messagebox.showinfo("测试完成", f"{mic_count}mic测试完成，文件已保存为test/{filename}")
+            
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
+            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
+    
+    def run_multichannel_test(self):
+        """运行多声道测试"""
+        if not self.check_device_selected():
+            return
+            
+        rate = self.multi_rate_var.get()
+        bit = self.multi_bit_var.get()
+        
+        self.status_var.set("正在执行多声道测试...")
+        
+        # 在新线程中运行测试，避免GUI冻结
+        threading.Thread(target=self._multichannel_test_thread, 
+                        args=(rate, bit), 
+                        daemon=True).start()
+    
+    def _multichannel_test_thread(self, rate, bit):
+        try:
+            # 准备工作
+            subprocess.run(self.get_adb_command("root"), shell=True)
+            subprocess.run(self.get_adb_command("push audio/Nums_7dot1_16_48000.wav /sdcard/"), shell=True)
+            
+            # 重启audioserver
+            for _ in range(3):
+                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
+            
+            # 播放音频
+            self.root.after(0, lambda: self.status_var.set("正在播放多声道音频..."))
+            play_cmd = self.get_adb_command(f"shell tinyplay /sdcard/Nums_7dot1_16_48000.wav -r {rate} -b {bit}")
+            
+            # 显示命令以便调试
+            print(f"执行命令: {play_cmd}")
+            
+            # 执行播放命令
+            subprocess.run(play_cmd, shell=True)
+            
+            self.root.after(0, lambda: self.status_var.set("多声道测试完成"))
+            messagebox.showinfo("测试完成", "多声道测试完成")
+            
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
+            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
     
     def play_local_audio(self):
         """播放本地音频文件"""
@@ -408,6 +712,10 @@ class AudioTestTool:
         
         # 获取播放方式
         playback_mode = self.playback_mode_var.get()
+        
+        # 如果选择设备播放，检查设备是否已选择
+        if playback_mode == "device" and not self.check_device_selected():
+            return
         
         try:
             # 停止当前播放
@@ -425,13 +733,13 @@ class AudioTestTool:
                 self.playback_status_var.set("正在准备通过Android设备播放...")
                 
                 # 创建专用目录
-                subprocess.run("adb shell mkdir -p /sdcard/HPlayerFiles", shell=True)
+                subprocess.run(self.get_adb_command("shell mkdir -p /sdcard/HPlayerFiles"), shell=True)
                 
                 # 推送文件到设备的专用目录
                 self.status_var.set("正在推送文件到Android设备...")
                 file_basename = os.path.basename(self.local_audio_file)
                 remote_path = f"/sdcard/HPlayerFiles/{file_basename}"
-                push_cmd = f"adb push \"{self.local_audio_file}\" \"{remote_path}\""
+                push_cmd = self.get_adb_command(f"push \"{self.local_audio_file}\" \"{remote_path}\"")
                 
                 # 执行推送命令
                 result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
@@ -440,7 +748,7 @@ class AudioTestTool:
                 
                 # 确保媒体库更新
                 self.status_var.set("正在更新媒体库...")
-                scan_cmd = f"adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote_path}"
+                scan_cmd = self.get_adb_command(f"shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote_path}")
                 subprocess.run(scan_cmd, shell=True)
                 
                 # 等待媒体扫描完成
@@ -448,7 +756,7 @@ class AudioTestTool:
                 
                 # 启动HPlayer
                 self.status_var.set("正在启动HPlayer...")
-                launch_cmd = "adb shell am start -n com.nes.seihplayer/.component.activity.SplashActivity"
+                launch_cmd = self.get_adb_command("shell am start -n com.nes.seihplayer/.component.activity.SplashActivity")
                 subprocess.run(launch_cmd, shell=True)
                 
                 # 提示用户在HPlayer中找到并播放文件
@@ -501,38 +809,17 @@ class AudioTestTool:
             self.playback_status_var.set("播放出错")
             messagebox.showerror("错误", f"播放音频时出错:\n{str(e)}")
     
-    def show_debug_info(self):
-        """显示调试信息"""
-        if hasattr(self, 'debug_info'):
-            messagebox.showinfo("调试信息", self.debug_info)
-        else:
-            messagebox.showinfo("调试信息", "尚无调试信息")
-    
-    def _monitor_playback(self):
-        """监控音频播放状态"""
-        try:
-            while pygame.mixer.music.get_busy():
-                time.sleep(0.5)
-            
-            # 播放结束
-            if not pygame.mixer.music.get_busy():
-                self.root.after(0, lambda: self.playback_status_var.set("播放完成"))
-                self.root.after(0, lambda: self.status_var.set("就绪"))
-        except Exception as e:
-            # 忽略监控过程中的错误
-            pass
-    
     def stop_local_audio(self):
         """停止播放本地音频"""
         playback_mode = self.playback_mode_var.get()
         
         try:
             # 停止Android设备上的播放
-            if playback_mode == "device":
+            if playback_mode == "device" and self.selected_device:
                 # 尝试停止媒体播放
-                subprocess.run("adb shell input keyevent KEYCODE_MEDIA_STOP", shell=True)
+                subprocess.run(self.get_adb_command("shell input keyevent KEYCODE_MEDIA_STOP"), shell=True)
                 # 或者尝试按返回键退出播放器
-                subprocess.run("adb shell input keyevent KEYCODE_BACK", shell=True)
+                subprocess.run(self.get_adb_command("shell input keyevent KEYCODE_BACK"), shell=True)
                 
                 self.playback_status_var.set("已尝试停止Android设备上的播放")
                 self.status_var.set("就绪")
@@ -556,192 +843,28 @@ class AudioTestTool:
             # 忽略音量调整过程中的错误
             pass
     
-    def run_loopback_test(self):
-        """运行10通道测试"""
-        device = self.loopback_device_var.get()
-        channels = self.loopback_channel_var.get()
-        rate = self.loopback_rate_var.get()
-        audio_source = self.audio_source_var.get()
-        
-        # 检查自定义文件是否已选择
-        if audio_source == "custom" and (not self.selected_audio_file or not os.path.exists(self.selected_audio_file)):
-            messagebox.showerror("错误", "请先选择有效的音频文件")
-            return
-        
-        self.status_var.set(f"正在执行{channels}通道测试...")
-        
-        # 在新线程中运行测试，避免GUI冻结
-        threading.Thread(target=self._loopback_test_thread, 
-                        args=(device, channels, rate, audio_source), 
-                        daemon=True).start()
-    
-    def _loopback_test_thread(self, device, channels, rate, audio_source):
+    def _monitor_playback(self):
+        """监控音频播放状态"""
         try:
-            # 准备工作
-            subprocess.run("adb root", shell=True)
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.5)
             
-            # 根据选择的音频源处理
-            if audio_source == "default":
-                # 使用默认7.1声道测试音频
-                audio_file = "audio/Nums_7dot1_16_48000.wav"
-                if not os.path.exists(audio_file):
-                    raise FileNotFoundError(f"默认测试音频文件不存在: {audio_file}")
-                
-                subprocess.run(f"adb push {audio_file} /sdcard/test_audio.wav", shell=True)
-                remote_audio_file = "/sdcard/test_audio.wav"
-            else:
-                # 使用自定义音频文件
-                # 获取文件扩展名
-                _, ext = os.path.splitext(self.selected_audio_file)
-                remote_filename = f"test_audio{ext}"
-                
-                self.root.after(0, lambda: self.status_var.set("正在推送自定义音频文件到设备..."))
-                subprocess.run(f"adb push \"{self.selected_audio_file}\" /sdcard/{remote_filename}", shell=True)
-                remote_audio_file = f"/sdcard/{remote_filename}"
-            
-            # 重启audioserver
-            for _ in range(3):
-                subprocess.run("adb shell killall audioserver", shell=True)
-            
-            # 开始录制
-            filename = f"test_{channels}ch.wav"
-            record_cmd = f"adb shell tinycap /sdcard/{filename} -d {device} -c {channels} -r {rate} -p 480"
-            record_process = subprocess.Popen(record_cmd, shell=True)
-            
-            # 等待录制启动
-            time.sleep(2)
-            
-            # 播放音频
-            self.root.after(0, lambda: self.status_var.set("正在播放音频..."))
-            
-            # 根据文件类型选择播放方式
-            if remote_audio_file.endswith('.wav'):
-                # 使用tinyplay播放WAV文件
-                play_cmd = f"adb shell tinyplay {remote_audio_file} -d 0"
-                subprocess.run(play_cmd, shell=True)
-            else:
-                # 对于其他格式，尝试使用系统媒体播放器
-                play_cmd = f"adb shell am start -a android.intent.action.VIEW -d file://{remote_audio_file} -t audio/*"
-                subprocess.run(play_cmd, shell=True)
-                
-                # 等待一段时间让音频播放完成
-                self.root.after(0, lambda: self.status_var.set("正在播放音频，请等待..."))
-                time.sleep(30)  # 假设音频不超过30秒
-            
-            # 提示用户停止录制
-            self.root.after(0, lambda: self.status_var.set("播放完成，请点击确定停止录制"))
-            messagebox.showinfo("操作提示", "播放已完成，点击确定停止录制")
-            
-            # 停止录制
-            subprocess.run("adb shell pkill -f tinycap", shell=True)
-            record_process.terminate()
-            
-            # 拉取录制文件
-            self.root.after(0, lambda: self.status_var.set("正在拉取录制文件..."))
-            subprocess.run(f"adb pull /sdcard/{filename} test/", shell=True)
-            
-            self.root.after(0, lambda: self.status_var.set(f"{channels}通道测试完成，文件已保存为test/{filename}"))
-            
-            # 询问是否播放录制文件
-            if messagebox.askyesno("测试完成", f"{channels}通道测试完成，文件已保存为test/{filename}\n\n是否播放录制文件?"):
-                os.startfile(f"test/{filename}")
-            
+            # 播放结束
+            if not pygame.mixer.music.get_busy():
+                self.root.after(0, lambda: self.playback_status_var.set("播放完成"))
+                self.root.after(0, lambda: self.status_var.set("就绪"))
         except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
-            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
+            # 忽略监控过程中的错误
+            pass
     
-    def run_mic_test(self):
-        """运行麦克风测试"""
-        mic_count = self.mic_var.get()
-        pcm_device = self.mic_pcm_var.get()
-        device_id = self.mic_device_var.get()
-        rate = self.mic_rate_var.get()
-        
-        self.status_var.set(f"正在执行{mic_count}mic测试...")
-        
-        # 在新线程中运行测试，避免GUI冻结
-        threading.Thread(target=self._mic_test_thread, 
-                        args=(mic_count, pcm_device, device_id, rate), 
-                        daemon=True).start()
-    
-    def _mic_test_thread(self, mic_count, pcm_device, device_id, rate):
-        try:
-            # 准备工作
-            subprocess.run("adb root", shell=True)
-            
-            # 开始录制
-            filename = f"test_{mic_count}mic.wav"
-            record_cmd = f"adb shell tinycap /sdcard/{filename} -D {pcm_device} -d {device_id} -c {mic_count} -r {rate}"
-            
-            # 显示完整命令以便调试
-            print(f"执行命令: {record_cmd}")
-            self.root.after(0, lambda: self.status_var.set(f"执行命令: {record_cmd}"))
-            
-            # 启动录制进程
-            record_process = subprocess.Popen(record_cmd, shell=True)
-            
-            # 提示用户
-            self.root.after(0, lambda: self.status_var.set(f"正在录制{mic_count}mic音频，请对着麦克风说话..."))
-            messagebox.showinfo("操作提示", f"正在录制{mic_count}mic音频，请对着麦克风说话...\n完成后点击确定停止录制")
-            
-            # 停止录制
-            subprocess.run("adb shell pkill -f tinycap", shell=True)
-            record_process.terminate()
-            
-            # 拉取录制文件
-            self.root.after(0, lambda: self.status_var.set("正在拉取录制文件..."))
-            subprocess.run(f"adb pull /sdcard/{filename} test/", shell=True)
-            
-            self.root.after(0, lambda: self.status_var.set(f"{mic_count}mic测试完成，文件已保存为test/{filename}"))
-            
-            # 询问是否播放录制文件
-            if messagebox.askyesno("测试完成", f"{mic_count}mic测试完成，文件已保存为test/{filename}\n\n是否播放录制文件?"):
-                os.startfile(f"test/{filename}")
-            
-        except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
-            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
-    
-    def run_multichannel_test(self):
-        """运行多声道测试"""
-        rate = self.multi_rate_var.get()
-        bit = self.multi_bit_var.get()
-        
-        self.status_var.set("正在执行多声道测试...")
-        
-        # 在新线程中运行测试，避免GUI冻结
-        threading.Thread(target=self._multichannel_test_thread, 
-                        args=(rate, bit), 
-                        daemon=True).start()
-    
-    def _multichannel_test_thread(self, rate, bit):
-        try:
-            # 准备工作
-            subprocess.run("adb root", shell=True)
-            subprocess.run("adb push audio/Nums_7dot1_16_48000.wav /sdcard/", shell=True)
-            
-            # 重启audioserver
-            for _ in range(3):
-                subprocess.run("adb shell killall audioserver", shell=True)
-            
-            # 播放音频
-            self.root.after(0, lambda: self.status_var.set("正在播放多声道音频..."))
-            play_cmd = f"adb shell tinyplay /sdcard/Nums_7dot1_16_48000.wav -r {rate} -b {bit}"
-            
-            # 显示命令以便调试
-            print(f"执行命令: {play_cmd}")
-            
-            # 执行播放命令
-            subprocess.run(play_cmd, shell=True)
-            
-            self.root.after(0, lambda: self.status_var.set("多声道测试完成"))
-            messagebox.showinfo("测试完成", "多声道测试完成")
-            
-        except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
-            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
+    def show_debug_info(self):
+        """显示调试信息"""
+        if hasattr(self, 'debug_info'):
+            messagebox.showinfo("调试信息", self.debug_info)
+        else:
+            messagebox.showinfo("调试信息", "尚无调试信息")
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = AudioTestTool(root)
-    root.mainloop() 
+    root.mainloop()
