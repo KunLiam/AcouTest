@@ -13,7 +13,7 @@ import platform
 class AudioTestTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("音频测试小助手V1.2")
+        self.root.title("音频测试小助手V1.3")
         self.root.geometry("750x650")  # 增加宽度从650到750
         self.root.resizable(False, False)
         
@@ -123,13 +123,25 @@ class AudioTestTool:
         local_playback_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(local_playback_tab, text="本地播放")
         
-        # 扫频测试选项卡
+        # mic扫频测试选项卡
         sweep_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(sweep_tab, text="扫频测试")
+        self.tab_control.add(sweep_tab, text="mic扫频测试")
+        
+        # 喇叭测试选项卡
+        speaker_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(speaker_tab, text="喇叭测试")
         
         # HAL 录音选项卡
         hal_recording_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(hal_recording_tab, text="HAL 录音")
+        
+        # Logcat选项卡
+        logcat_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(logcat_tab, text="Logcat")
+        
+        # 截图选项卡
+        screenshot_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(screenshot_tab, text="截图")
         
         self.tab_control.pack(expand=1, fill="both")
         
@@ -145,18 +157,33 @@ class AudioTestTool:
         # 本地播放内容
         self.setup_local_playback_tab(local_playback_tab)
         
-        # 扫频测试内容
+        # mic扫频测试内容
         self.setup_sweep_tab(sweep_tab)
+        
+        # 喇叭测试内容
+        self.setup_speaker_tab(speaker_tab)
         
         # HAL 录音内容
         self.setup_hal_recording_tab(hal_recording_tab)
         
-        # 状态栏
-        status_frame = ttk.Frame(self.root)
-        status_frame.pack(fill="x", padx=20, pady=5)
+        # Logcat内容
+        self.setup_logcat_tab(logcat_tab)
         
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor="w")
-        status_label.pack(fill="x")
+        # 截图内容
+        self.setup_screenshot_tab(screenshot_tab)
+        
+        # 屏幕录制选项卡
+        self.setup_screenrecord_tab(screenshot_tab)
+        
+        # 状态栏
+        status_bar = ttk.Frame(self.root)
+        status_bar.pack(fill="x", side="bottom", padx=20, pady=5)
+        
+        status_label = ttk.Label(status_bar, textvariable=self.status_var, font=("Arial", 9))
+        status_label.pack(side="left")
+        
+        version_label = ttk.Label(status_bar, text="V1.2", font=("Arial", 9))
+        version_label.pack(side="right")
     
     def refresh_devices(self):
         """刷新设备列表"""
@@ -554,101 +581,194 @@ class AudioTestTool:
     
     def setup_sweep_tab(self, parent):
         """设置扫频测试选项卡"""
-        frame = ttk.Frame(parent, padding=10)
+        frame = ttk.Frame(parent, padding=5)
         frame.pack(fill="both", expand=True)
         
-        # 说明
-        desc = ttk.Label(frame, 
-                        text="播放扫频音频文件\n用于测试设备的频率响应")
-        desc.pack(pady=10)
+        # 创建上下两栏布局
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill="x", pady=5)
         
-        # 文件选择区域
-        file_frame = ttk.LabelFrame(frame, text="扫频音频文件")
-        file_frame.pack(fill="x", pady=10, padx=5)
+        bottom_frame = ttk.Frame(frame)
+        bottom_frame.pack(fill="both", expand=True, pady=5)
         
-        # 预设文件目录
-        preset_dir_frame = ttk.Frame(file_frame)
-        preset_dir_frame.pack(fill="x", pady=5, padx=5)
+        # 上部 - 控制区域
+        control_frame = ttk.LabelFrame(top_frame, text="扫频控制", padding=5)
+        control_frame.pack(fill="x", expand=True)
         
-        ttk.Label(preset_dir_frame, text="预设文件目录:").pack(side="left", padx=5)
-        self.sweep_dir_var = tk.StringVar(value="audio/20Hz-20KHz_0dB_Test_Signal")
-        dir_entry = ttk.Entry(preset_dir_frame, textvariable=self.sweep_dir_var, width=30)
-        dir_entry.pack(side="left", padx=5, fill="x", expand=True)
+        # 扫频文件选择
+        file_frame = ttk.Frame(control_frame)
+        file_frame.pack(fill="x", pady=2)
         
-        browse_dir_button = ttk.Button(preset_dir_frame, text="浏览...", 
-                                     command=self.browse_sweep_dir, width=10)
-        browse_dir_button.pack(side="left", padx=5)
+        # 扫频类型选择
+        self.sweep_type_var = tk.StringVar(value="elephant")
+        ttk.Radiobutton(file_frame, text="大象扫频文件", variable=self.sweep_type_var, 
+                      value="elephant", command=self.update_sweep_file_options, 
+                      style="Small.TCheckbutton").pack(side="left", padx=10)
+        ttk.Radiobutton(file_frame, text="自定义扫频文件", variable=self.sweep_type_var, 
+                      value="custom", command=self.update_sweep_file_options, 
+                      style="Small.TCheckbutton").pack(side="left", padx=10)
         
-        # 文件列表
-        list_frame = ttk.Frame(file_frame)
-        list_frame.pack(fill="both", expand=True, pady=5, padx=5)
+        # 批量测试选项
+        self.sweep_batch_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(file_frame, text="批量测试所有文件", variable=self.sweep_batch_var,
+                      style="Small.TCheckbutton").pack(side="right", padx=10)
         
-        # 添加滚动条
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
+        # 扫频文件下拉框
+        file_select_frame = ttk.Frame(control_frame)
+        file_select_frame.pack(fill="x", pady=2)
         
-        # 文件列表框
-        self.sweep_files_listbox = tk.Listbox(list_frame, selectmode="extended", 
-                                            yscrollcommand=scrollbar.set, height=8)
-        self.sweep_files_listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.sweep_files_listbox.yview)
+        ttk.Label(file_select_frame, text="扫频文件:", font=("Arial", 9)).pack(side="left", padx=2)
         
-        # 刷新按钮
-        refresh_button = ttk.Button(file_frame, text="刷新文件列表", 
-                                  command=self.refresh_sweep_files, width=15)
-        refresh_button.pack(pady=5)
+        self.sweep_file_var = tk.StringVar()
+        self.sweep_file_combobox = ttk.Combobox(file_select_frame, textvariable=self.sweep_file_var, 
+                                              width=40, state="readonly")
+        self.sweep_file_combobox.pack(side="left", fill="x", expand=True, padx=2)
         
-        # 自定义文件选项
-        custom_frame = ttk.LabelFrame(frame, text="自定义扫频文件")
-        custom_frame.pack(fill="x", pady=10, padx=5)
+        # 添加自定义文件按钮
+        self.add_custom_sweep_button = ttk.Button(file_select_frame, text="添加文件", 
+                                               command=self.add_custom_sweep_file, width=10, 
+                                               style="Small.TButton", state="disabled")
+        self.add_custom_sweep_button.pack(side="right", padx=2)
         
-        custom_file_frame = ttk.Frame(custom_frame)
-        custom_file_frame.pack(fill="x", pady=5, padx=5)
+        # 播放设置
+        playback_frame = ttk.LabelFrame(control_frame, text="播放设置", padding=5)
+        playback_frame.pack(fill="x", pady=5)
         
-        ttk.Label(custom_file_frame, text="文件路径:").pack(side="left", padx=5)
-        self.custom_sweep_file_var = tk.StringVar(value="未选择文件")
-        file_entry = ttk.Entry(custom_file_frame, textvariable=self.custom_sweep_file_var, width=30)
-        file_entry.pack(side="left", padx=5, fill="x", expand=True)
+        # 播放设备选择
+        device_frame = ttk.Frame(playback_frame)
+        device_frame.pack(fill="x", pady=2)
         
-        browse_file_button = ttk.Button(custom_file_frame, text="浏览...", 
-                                      command=self.browse_sweep_file, width=10)
-        browse_file_button.pack(side="left", padx=5)
+        ttk.Label(device_frame, text="播放设备:", font=("Arial", 9)).pack(side="left", padx=2)
         
-        # 播放控制区域
-        control_frame = ttk.LabelFrame(frame, text="播放控制")
-        control_frame.pack(fill="x", pady=10, padx=5)
+        # 播放设备下拉菜单 - 使用PCM设备号
+        self.sweep_playback_device_var = tk.StringVar(value="0")
+        playback_device_combobox = ttk.Combobox(device_frame, textvariable=self.sweep_playback_device_var, 
+                                          width=5, values=["0", "1", "2", "3", "4", "5"])
+        playback_device_combobox.pack(side="left", padx=2)
         
-        # 播放选项
-        option_frame = ttk.Frame(control_frame)
-        option_frame.pack(fill="x", pady=5, padx=5)
+        # 播放卡号
+        ttk.Label(device_frame, text="卡号:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_playback_card_var = tk.StringVar(value="0")
+        ttk.Combobox(device_frame, textvariable=self.sweep_playback_card_var, 
+               width=5, values=["0", "1", "2"]).pack(side="left", padx=2)
         
-        # 播放模式
-        self.sweep_mode_var = tk.StringVar(value="preset")
-        ttk.Radiobutton(option_frame, text="播放预设文件", 
-                       variable=self.sweep_mode_var, value="preset").pack(anchor="w", padx=5, pady=2)
-        ttk.Radiobutton(option_frame, text="播放自定义文件", 
-                       variable=self.sweep_mode_var, value="custom").pack(anchor="w", padx=5, pady=2)
+        # 播放参数
+        param_frame = ttk.Frame(playback_frame)
+        param_frame.pack(fill="x", pady=2)
         
-        # 按钮区域
+        ttk.Label(param_frame, text="采样率:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_playback_rate_var = tk.StringVar(value="48000")
+        ttk.Entry(param_frame, textvariable=self.sweep_playback_rate_var, 
+                font=("Arial", 9), width=8).pack(side="left", padx=2)
+        
+        ttk.Label(param_frame, text="通道数:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_playback_channels_var = tk.StringVar(value="4")
+        ttk.Entry(param_frame, textvariable=self.sweep_playback_channels_var, 
+                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        
+        ttk.Label(param_frame, text="位深:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_playback_bits_var = tk.StringVar(value="16")
+        ttk.Entry(param_frame, textvariable=self.sweep_playback_bits_var, 
+                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        
+        # 录制设置
+        recording_frame = ttk.LabelFrame(control_frame, text="录制设置", padding=5)
+        recording_frame.pack(fill="x", pady=5)
+        
+        # 录制设备选择
+        rec_device_frame = ttk.Frame(recording_frame)
+        rec_device_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(rec_device_frame, text="录制设备:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 录制设备下拉菜单 - 使用PCM设备号
+        self.sweep_recording_device_var = tk.StringVar(value="6")  # 默认使用LOOPBACK-A设备
+        recording_device_combobox = ttk.Combobox(rec_device_frame, textvariable=self.sweep_recording_device_var, 
+                                           width=5, values=["0", "1", "2", "3", "4", "5", "6"])
+        recording_device_combobox.pack(side="left", padx=2)
+        
+        # 录制卡号
+        ttk.Label(rec_device_frame, text="卡号:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_recording_card_var = tk.StringVar(value="0")
+        ttk.Combobox(rec_device_frame, textvariable=self.sweep_recording_card_var, 
+               width=5, values=["0", "1", "2"]).pack(side="left", padx=2)
+        
+        # 录制参数
+        rec_param_frame = ttk.Frame(recording_frame)
+        rec_param_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(rec_param_frame, text="采样率:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_recording_rate_var = tk.StringVar(value="48000")
+        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_rate_var, 
+                font=("Arial", 9), width=8).pack(side="left", padx=2)
+        
+        ttk.Label(rec_param_frame, text="通道数:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_recording_channels_var = tk.StringVar(value="10")
+        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_channels_var, 
+                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        
+        ttk.Label(rec_param_frame, text="位深:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_recording_bits_var = tk.StringVar(value="16")
+        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_bits_var, 
+                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        
+        ttk.Label(rec_param_frame, text="时长(秒):", font=("Arial", 9)).pack(side="left", padx=2)
+        self.sweep_recording_duration_var = tk.StringVar(value="10")  # 增加默认录制时长
+        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_duration_var, 
+                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        
+        # 保存路径设置
+        save_path_frame = ttk.Frame(control_frame)
+        save_path_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 设置默认保存路径为当前目录下的sweep_recordings文件夹
+        default_save_path = os.path.join(os.getcwd(), "sweep_recordings")
+        if not os.path.exists(default_save_path):
+            os.makedirs(default_save_path, exist_ok=True)
+        
+        self.sweep_save_path_var = tk.StringVar(value=default_save_path)
+        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.sweep_save_path_var, font=("Arial", 9))
+        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
+        
+        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
+                                      command=self.browse_sweep_save_path, width=5, style="Small.TButton")
+        browse_save_button.pack(side="right", padx=2)
+        
+        # 操作按钮
         button_frame = ttk.Frame(control_frame)
-        button_frame.pack(fill="x", pady=10)
+        button_frame.pack(fill="x", pady=5)
         
-        # 播放按钮
-        play_button = ttk.Button(button_frame, text="播放选中文件", 
-                               command=self.play_sweep_audio, width=15)
-        play_button.pack(side="left", padx=10, expand=True)
+        self.start_sweep_button = ttk.Button(button_frame, text="开始扫频测试", 
+                                          command=self.start_sweep_test, width=15, style="TButton")
+        self.start_sweep_button.pack(side="left", padx=5)
         
-        stop_button = ttk.Button(button_frame, text="停止播放", 
-                               command=self.stop_sweep_audio, width=15)
-        stop_button.pack(side="left", padx=10, expand=True)
+        self.stop_sweep_button = ttk.Button(button_frame, text="停止测试", 
+                                         command=self.stop_sweep_test, width=15, style="TButton", state="disabled")
+        self.stop_sweep_button.pack(side="left", padx=5)
         
-        # 状态显示
+        self.open_sweep_folder_button = ttk.Button(button_frame, text="打开文件夹", 
+                                                command=self.open_sweep_folder, width=15, style="TButton")
+        self.open_sweep_folder_button.pack(side="right", padx=5)
+        
+        # 下部 - 信息区域
+        info_frame = ttk.LabelFrame(bottom_frame, text="测试信息", padding=5)
+        info_frame.pack(fill="both", expand=True)
+        
+        # 信息文本框
+        self.sweep_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
+        self.sweep_info_text.pack(fill="both", expand=True, pady=2)
+        self.sweep_info_text.insert("1.0", "扫频测试信息将显示在这里...\n")
+        self.sweep_info_text.config(state="disabled")
+        
+        # 底部状态显示
         self.sweep_status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(frame, textvariable=self.sweep_status_var)
-        status_label.pack(pady=10)
+        status_label = ttk.Label(frame, textvariable=self.sweep_status_var, font=("Arial", 9))
+        status_label.pack(pady=2)
         
-        # 初始刷新文件列表
-        self.refresh_sweep_files()
+        # 初始化扫频文件列表
+        self.update_sweep_file_options()
     
     def setup_hal_recording_tab(self, parent):
         """设置 HAL 录音选项卡"""
@@ -1010,6 +1130,163 @@ class AudioTestTool:
         # 初始刷新文件列表
         self.refresh_custom_files()
 
+    def setup_screenshot_tab(self, parent):
+        """设置截图功能选项卡"""
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill="both", expand=True)
+        
+        # 创建上下两栏布局
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill="x", pady=5)
+        
+        bottom_frame = ttk.Frame(frame)
+        bottom_frame.pack(fill="both", expand=True, pady=5)
+        
+        # 上部 - 控制区域
+        control_frame = ttk.LabelFrame(top_frame, text="截图控制", padding=5)
+        control_frame.pack(fill="x", expand=True)
+        
+        # 保存路径设置
+        save_path_frame = ttk.Frame(control_frame)
+        save_path_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 设置默认保存路径为当前目录下的screenshots文件夹
+        default_save_path = os.path.join(os.getcwd(), "screenshots")
+        if not os.path.exists(default_save_path):
+            os.makedirs(default_save_path, exist_ok=True)
+        
+        self.screenshot_save_path_var = tk.StringVar(value=default_save_path)
+        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.screenshot_save_path_var, font=("Arial", 9))
+        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
+        
+        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
+                                      command=self.browse_screenshot_save_path, width=5, style="Small.TButton")
+        browse_save_button.pack(side="right", padx=2)
+        
+        # 截图按钮
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(fill="x", pady=5)
+        
+        self.screenshot_button = ttk.Button(button_frame, text="截取屏幕", 
+                                     command=self.take_screenshot, width=15, style="TButton")
+        self.screenshot_button.pack(side="left", padx=5)
+        
+        self.open_folder_button = ttk.Button(button_frame, text="打开文件夹", 
+                                      command=self.open_screenshot_folder, width=15, style="TButton")
+        self.open_folder_button.pack(side="right", padx=5)
+        
+        # 下部 - 信息区域
+        info_frame = ttk.LabelFrame(bottom_frame, text="截图信息", padding=5)
+        info_frame.pack(fill="both", expand=True)
+        
+        # 信息文本框
+        self.screenshot_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
+        self.screenshot_info_text.pack(fill="both", expand=True, pady=2)
+        self.screenshot_info_text.insert("1.0", "截图信息将显示在这里...\n")
+        self.screenshot_info_text.config(state="disabled")
+        
+        # 底部状态显示
+        self.screenshot_status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(frame, textvariable=self.screenshot_status_var, font=("Arial", 9))
+        status_label.pack(pady=2)
+    
+    def setup_screenrecord_tab(self, parent):
+        """设置屏幕录制选项卡"""
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill="both", expand=True)
+        
+        # 创建上下两栏布局
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill="x", pady=5)
+        
+        bottom_frame = ttk.Frame(frame)
+        bottom_frame.pack(fill="both", expand=True, pady=5)
+        
+        # 上部 - 控制区域
+        control_frame = ttk.LabelFrame(top_frame, text="录制控制", padding=5)
+        control_frame.pack(fill="x", expand=True)
+        
+        # 保存路径设置
+        save_path_frame = ttk.Frame(control_frame)
+        save_path_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 设置默认保存路径为当前目录下的screenrecords文件夹
+        default_save_path = os.path.join(os.getcwd(), "screenrecords")
+        if not os.path.exists(default_save_path):
+            os.makedirs(default_save_path, exist_ok=True)
+        
+        self.screenrecord_save_path_var = tk.StringVar(value=default_save_path)
+        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.screenrecord_save_path_var, font=("Arial", 9))
+        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
+        
+        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
+                                      command=self.browse_screenrecord_save_path, width=5, style="Small.TButton")
+        browse_save_button.pack(side="right", padx=2)
+        
+        # 录制方式选择
+        method_frame = ttk.Frame(control_frame)
+        method_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(method_frame, text="录制方式:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        self.screenrecord_method_var = tk.StringVar(value="adb")
+        ttk.Radiobutton(method_frame, text="ADB命令", variable=self.screenrecord_method_var, 
+                      value="adb", style="Small.TCheckbutton").pack(side="left", padx=10)
+        ttk.Radiobutton(method_frame, text="系统录屏", variable=self.screenrecord_method_var, 
+                      value="system", style="Small.TCheckbutton").pack(side="left", padx=10)
+        
+        # 录制按钮
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(fill="x", pady=5)
+        
+        self.start_record_button = ttk.Button(button_frame, text="开始录制", 
+                                           command=self.start_screenrecord, width=15, style="TButton")
+        self.start_record_button.pack(side="left", padx=5)
+        
+        self.stop_record_button = ttk.Button(button_frame, text="停止录制", 
+                                          command=self.stop_screenrecord, width=15, style="TButton", state="disabled")
+        self.stop_record_button.pack(side="left", padx=5)
+        
+        self.open_record_folder_button = ttk.Button(button_frame, text="打开文件夹", 
+                                                 command=self.open_screenrecord_folder, width=15, style="TButton")
+        self.open_record_folder_button.pack(side="right", padx=5)
+        
+        # 提示信息
+        tip_frame = ttk.Frame(control_frame)
+        tip_frame.pack(fill="x", pady=2)
+        
+        tip_text = "提示: 如果ADB录制方式不工作，请尝试系统录屏方式。系统录屏需要在设备上手动确认。"
+        ttk.Label(tip_frame, text=tip_text, font=("Arial", 9), foreground="blue").pack(pady=2)
+        
+        # 下部 - 信息区域
+        info_frame = ttk.LabelFrame(bottom_frame, text="录制信息", padding=5)
+        info_frame.pack(fill="both", expand=True)
+        
+        # 信息文本框
+        self.screenrecord_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
+        self.screenrecord_info_text.pack(fill="both", expand=True, pady=2)
+        self.screenrecord_info_text.insert("1.0", "录制信息将显示在这里...\n")
+        self.screenrecord_info_text.config(state="disabled")
+        
+        # 录制状态显示
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(status_frame, text="状态:", font=("Arial", 9)).pack(side="left", padx=2)
+        self.screenrecord_status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(status_frame, textvariable=self.screenrecord_status_var, font=("Arial", 9))
+        status_label.pack(side="left", padx=2)
+        
+        # 录制时间显示
+        self.screenrecord_time_var = tk.StringVar(value="00:00")
+        time_label = ttk.Label(status_frame, textvariable=self.screenrecord_time_var, font=("Arial", 9))
+        time_label.pack(side="right", padx=2)
+        ttk.Label(status_frame, text="录制时间:", font=("Arial", 9)).pack(side="right", padx=2)
+    
     def run_mic_test(self):
         """运行麦克风测试"""
         if not self.check_device_selected():
@@ -1620,7 +1897,7 @@ class AudioTestTool:
         dialog.grab_set()  # 模态对话框
         
         # 添加说明
-        ttk.Label(dialog, text="请输入设备IP地址和端口 (例如: 192.168.1.100:5555)", 
+        ttk.Label(dialog, text="请输入设备IP地址和端口 (例如: 192.168.10.41:5555)", 
                  wraplength=350).pack(pady=10, padx=20)
         
         # 输入框
@@ -3480,6 +3757,1818 @@ class AudioTestTool:
             self.update_info_text(f"确保目录存在时出错: {str(e)}")
             messagebox.showerror("错误", f"确保录音目录存在时出错:\n{str(e)}")
             return False
+
+    def setup_screenshot_tab(self, parent):
+        """设置截图功能选项卡"""
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill="both", expand=True)
+        
+        # 创建上下两栏布局
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill="x", pady=5)
+        
+        bottom_frame = ttk.Frame(frame)
+        bottom_frame.pack(fill="both", expand=True, pady=5)
+        
+        # 上部 - 控制区域
+        control_frame = ttk.LabelFrame(top_frame, text="截图控制", padding=5)
+        control_frame.pack(fill="x", expand=True)
+        
+        # 保存路径设置
+        save_path_frame = ttk.Frame(control_frame)
+        save_path_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 设置默认保存路径为当前目录下的screenshots文件夹
+        default_save_path = os.path.join(os.getcwd(), "screenshots")
+        if not os.path.exists(default_save_path):
+            os.makedirs(default_save_path, exist_ok=True)
+        
+        self.screenshot_save_path_var = tk.StringVar(value=default_save_path)
+        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.screenshot_save_path_var, font=("Arial", 9))
+        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
+        
+        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
+                                      command=self.browse_screenshot_save_path, width=5, style="Small.TButton")
+        browse_save_button.pack(side="right", padx=2)
+        
+        # 截图按钮
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(fill="x", pady=5)
+        
+        self.screenshot_button = ttk.Button(button_frame, text="截取屏幕", 
+                                     command=self.take_screenshot, width=15, style="TButton")
+        self.screenshot_button.pack(side="left", padx=5)
+        
+        self.open_folder_button = ttk.Button(button_frame, text="打开文件夹", 
+                                      command=self.open_screenshot_folder, width=15, style="TButton")
+        self.open_folder_button.pack(side="right", padx=5)
+        
+        # 下部 - 信息区域
+        info_frame = ttk.LabelFrame(bottom_frame, text="截图信息", padding=5)
+        info_frame.pack(fill="both", expand=True)
+        
+        # 信息文本框
+        self.screenshot_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
+        self.screenshot_info_text.pack(fill="both", expand=True, pady=2)
+        self.screenshot_info_text.insert("1.0", "截图信息将显示在这里...\n")
+        self.screenshot_info_text.config(state="disabled")
+        
+        # 底部状态显示
+        self.screenshot_status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(frame, textvariable=self.screenshot_status_var, font=("Arial", 9))
+        status_label.pack(pady=2)
+    
+    def take_screenshot(self):
+        """截取设备屏幕"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            self.screenshot_status_var.set("正在截取屏幕...")
+            self.update_screenshot_info("正在截取屏幕...")
+            
+            # 获取时间戳
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            # 确保保存目录存在
+            save_dir = self.screenshot_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "screenshots")
+            
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 截图文件名
+            filename = f"screenshot_{timestamp}.png"
+            device_path = f"/sdcard/{filename}"
+            local_path = os.path.join(save_dir, filename)
+            
+            # 在设备上截图
+            screencap_cmd = self.get_adb_command(f"shell screencap -p {device_path}")
+            result = subprocess.run(screencap_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"截图失败: {result.stderr}")
+            
+            # 拉取截图到本地
+            pull_cmd = self.get_adb_command(f"pull {device_path} \"{local_path}\"")
+            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"拉取截图失败: {result.stderr}")
+            
+            # 删除设备上的临时文件
+            rm_cmd = self.get_adb_command(f"shell rm {device_path}")
+            subprocess.run(rm_cmd, shell=True)
+            
+            self.screenshot_status_var.set(f"截图已保存: {filename}")
+            self.update_screenshot_info(f"截图已保存: {local_path}")
+            
+            # 打开截图文件夹
+            self.open_screenshot_folder()
+            
+        except Exception as e:
+            self.screenshot_status_var.set(f"截图出错: {str(e)}")
+            self.update_screenshot_info(f"截图出错: {str(e)}")
+            messagebox.showerror("错误", f"截图时出错:\n{str(e)}")
+
+    def open_screenshot_folder(self):
+        """打开截图保存文件夹"""
+        save_dir = self.screenshot_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = os.path.join(os.getcwd(), "screenshots")
+        
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.screenshot_status_var.set(f"打开文件夹出错: {str(e)}")
+            self.update_screenshot_info(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def browse_screenshot_save_path(self):
+        """浏览截图保存路径"""
+        folder = filedialog.askdirectory(initialdir=self.screenshot_save_path_var.get())
+        if folder:
+            self.screenshot_save_path_var.set(folder)
+            self.update_screenshot_info(f"已设置保存路径: {folder}")
+
+    def update_screenshot_info(self, message):
+        """更新截图信息文本框"""
+        self.screenshot_info_text.config(state="normal")
+        self.screenshot_info_text.insert("end", message + "\n")
+        self.screenshot_info_text.see("end")  # 滚动到底部
+        self.screenshot_info_text.config(state="disabled")
+
+    def browse_screenrecord_save_path(self):
+        """浏览屏幕录制保存路径"""
+        folder = filedialog.askdirectory(initialdir=self.screenrecord_save_path_var.get())
+        if folder:
+            self.screenrecord_save_path_var.set(folder)
+            self.update_screenrecord_info(f"已设置保存路径: {folder}")
+
+    def update_screenrecord_info(self, message):
+        """更新屏幕录制信息文本框"""
+        self.screenrecord_info_text.config(state="normal")
+        self.screenrecord_info_text.insert("end", message + "\n")
+        self.screenrecord_info_text.see("end")  # 滚动到底部
+        self.screenrecord_info_text.config(state="disabled")
+
+    def start_screenrecord(self):
+        """开始屏幕录制"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            # 获取保存路径
+            save_dir = self.screenrecord_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "screenrecords")
+            
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 获取Android版本
+            version_cmd = self.get_adb_command("shell getprop ro.build.version.release")
+            version_result = subprocess.run(version_cmd, shell=True, capture_output=True, text=True)
+            
+            android_version = "unknown"
+            if version_result.returncode == 0:
+                android_version = version_result.stdout.strip()
+                self.update_screenrecord_info(f"检测到Android版本: {android_version}")
+            
+            # 更新状态
+            self.screenrecord_status_var.set("正在准备录制...")
+            self.update_screenrecord_info("正在准备录制屏幕...")
+            
+            # 禁用开始按钮，启用停止按钮
+            self.start_record_button.config(state="disabled")
+            self.stop_record_button.config(state="normal")
+            
+            # 获取时间戳
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.screenrecord_filename = f"screenrecord_{timestamp}.mp4"
+            
+            # 使用UI自动化方式启动系统录屏
+            self.update_screenrecord_info("尝试使用系统录屏功能...")
+            
+            # 方法1: 使用快速设置面板
+            try:
+                # 下拉通知栏两次以显示快速设置
+                subprocess.run(self.get_adb_command("shell cmd statusbar expand-settings"), shell=True)
+                time.sleep(1)
+                
+                # 查找并点击"屏幕录制"图标 (不同设备可能位置不同)
+                # 这里我们尝试模拟在快速设置面板中滑动和点击
+                # 注意: 这种方法高度依赖于设备UI布局，可能需要针对特定设备调整
+                
+                # 在快速设置面板中滑动查找屏幕录制按钮
+                for i in range(3):  # 尝试滑动几次
+                    # 点击可能的屏幕录制按钮位置
+                    tap_cmd = self.get_adb_command("shell input tap 500 500")  # 示例坐标，需要调整
+                    subprocess.run(tap_cmd, shell=True)
+                    time.sleep(1)
+                    
+                    # 检查是否出现录制确认对话框
+                    # 如果出现，点击开始录制按钮
+                    tap_cmd = self.get_adb_command("shell input tap 500 700")  # 示例坐标，需要调整
+                    subprocess.run(tap_cmd, shell=True)
+                    time.sleep(1)
+                    
+                    # 如果没有找到，尝试滑动查找
+                    swipe_cmd = self.get_adb_command("shell input swipe 500 500 200 500")
+                    subprocess.run(swipe_cmd, shell=True)
+                    time.sleep(1)
+                
+                self.update_screenrecord_info("已尝试启动系统录屏，请在设备上确认")
+                
+            except Exception as e:
+                self.update_screenrecord_info(f"使用系统录屏失败: {str(e)}")
+                
+                # 回退到传统方法
+                self.update_screenrecord_info("尝试使用adb screenrecord命令...")
+                
+                # 设置录制文件路径
+                self.device_video_path = f"/sdcard/{self.screenrecord_filename}"
+                
+                # 获取录制时长
+                try:
+                    duration = int(self.screenrecord_duration_var.get().strip())
+                    if duration < 0:
+                        duration = 0
+                    elif duration > 180:  # Android默认最大180秒
+                        duration = 180
+                        self.screenrecord_duration_var.set("180")
+                except ValueError:
+                    duration = 180
+                    self.screenrecord_duration_var.set("180")
+                
+                # 构建录制命令
+                cmd = self.get_adb_command(f"shell screenrecord {self.device_video_path}")
+                if duration > 0:
+                    cmd = self.get_adb_command(f"shell screenrecord --time-limit {duration} {self.device_video_path}")
+                
+                self.update_screenrecord_info(f"执行命令: {cmd}")
+                
+                # 启动录制进程
+                self.screenrecord_process = subprocess.Popen(cmd, shell=True)
+            
+            # 记录开始时间
+            self.screenrecord_start_time = time.time()
+            
+            # 启动计时器
+            self.update_screenrecord_timer()
+            
+            # 更新状态
+            self.screenrecord_status_var.set("正在录制...")
+            self.update_screenrecord_info("录制已开始，请在设备上操作")
+            
+        except Exception as e:
+            self.screenrecord_status_var.set(f"录制出错: {str(e)}")
+            self.update_screenrecord_info(f"录制出错: {str(e)}")
+            messagebox.showerror("错误", f"开始录制时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
+            self.start_record_button.config(state="normal")
+            self.stop_record_button.config(state="disabled")
+
+    def update_screenrecord_timer(self):
+        """更新录制时间"""
+        if hasattr(self, 'screenrecord_process') and self.screenrecord_process.poll() is None:
+            # 计算已录制时间
+            elapsed = time.time() - self.screenrecord_start_time
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            
+            # 更新时间显示
+            self.screenrecord_time_var.set(f"{minutes:02d}:{seconds:02d}")
+            
+            # 每秒更新一次
+            self.root.after(1000, self.update_screenrecord_timer)
+        else:
+            # 如果进程已结束，停止计时器
+            if hasattr(self, 'screenrecord_process') and self.screenrecord_process.poll() is not None:
+                self.stop_screenrecord()
+
+    def stop_screenrecord(self):
+        """停止屏幕录制"""
+        try:
+            self.update_screenrecord_info("正在停止录制...")
+            
+            # 尝试停止系统录屏
+            try:
+                # 点击状态栏中的录制通知
+                subprocess.run(self.get_adb_command("shell cmd statusbar expand"), shell=True)
+                time.sleep(1)
+                
+                # 点击停止按钮 (坐标需要根据设备调整)
+                tap_cmd = self.get_adb_command("shell input tap 500 300")  # 示例坐标
+                subprocess.run(tap_cmd, shell=True)
+                time.sleep(1)
+                
+                # 如果出现保存对话框，点击保存
+                tap_cmd = self.get_adb_command("shell input tap 500 700")  # 示例坐标
+                subprocess.run(tap_cmd, shell=True)
+                time.sleep(2)
+                
+                self.update_screenrecord_info("已尝试停止系统录屏，请在设备上确认")
+                
+            except Exception as e:
+                self.update_screenrecord_info(f"停止系统录屏失败: {str(e)}")
+                
+                # 如果有传统录制进程，尝试停止它
+                if hasattr(self, 'screenrecord_process') and self.screenrecord_process.poll() is None:
+                    # 尝试多种方法停止录制进程
+                    methods_tried = 0
+                    max_methods = 3
+                    
+                    # 方法1: 使用按键事件发送CTRL+C
+                    if methods_tried < max_methods and self.screenrecord_process.poll() is None:
+                        methods_tried += 1
+                        self.update_screenrecord_info("尝试方法1: 发送按键事件...")
+                        try:
+                            stop_cmd = self.get_adb_command("shell input keyevent KEYCODE_CTRL_LEFT KEYCODE_C")
+                            subprocess.run(stop_cmd, shell=True, timeout=2)
+                            
+                            # 等待进程结束
+                            for i in range(3):  # 等待3秒
+                                if self.screenrecord_process.poll() is not None:
+                                    self.update_screenrecord_info("方法1成功: 进程已终止")
+                                    break
+                                time.sleep(1)
+                        except:
+                            self.update_screenrecord_info("方法1失败")
+                    
+                    # 方法2: 使用killall命令
+                    if methods_tried < max_methods and self.screenrecord_process.poll() is None:
+                        methods_tried += 1
+                        self.update_screenrecord_info("尝试方法2: 使用killall命令...")
+                        try:
+                            kill_cmd = self.get_adb_command("shell killall screenrecord")
+                            subprocess.run(kill_cmd, shell=True, timeout=2)
+                            
+                            # 等待进程结束
+                            for i in range(3):  # 等待3秒
+                                if self.screenrecord_process.poll() is not None:
+                                    self.update_screenrecord_info("方法2成功: 进程已终止")
+                                    break
+                                time.sleep(1)
+                        except:
+                            self.update_screenrecord_info("方法2失败")
+                    
+                    # 方法3: 强制终止本地进程
+                    if methods_tried < max_methods and self.screenrecord_process.poll() is None:
+                        methods_tried += 1
+                        self.update_screenrecord_info("尝试方法3: 强制终止本地进程...")
+                        try:
+                            if platform.system() == "Windows":
+                                subprocess.run(f"taskkill /F /PID {self.screenrecord_process.pid}", shell=True)
+                            else:
+                                import signal
+                                os.kill(self.screenrecord_process.pid, signal.SIGTERM)
+                            
+                            # 等待进程结束
+                            for i in range(3):  # 等待3秒
+                                if self.screenrecord_process.poll() is not None:
+                                    self.update_screenrecord_info("方法3成功: 进程已终止")
+                                    break
+                                time.sleep(1)
+                        except:
+                            self.update_screenrecord_info("方法3失败")
+            
+            # 等待一段时间，让设备保存录制文件
+            self.update_screenrecord_info("等待设备保存录制文件...")
+            time.sleep(3)
+            
+            # 查找最近创建的视频文件
+            self.update_screenrecord_info("查找录制文件...")
+            find_cmd = self.get_adb_command("shell find /sdcard -name \"*.mp4\" -mtime -1")
+            find_result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
+            
+            if find_result.returncode == 0 and find_result.stdout.strip():
+                # 找到了最近创建的视频文件
+                found_files = find_result.stdout.strip().split('\n')
+                
+                # 显示找到的文件
+                self.update_screenrecord_info(f"找到 {len(found_files)} 个最近创建的视频文件:")
+                for i, file in enumerate(found_files):
+                    self.update_screenrecord_info(f"{i+1}. {file}")
+                
+                # 使用最近的文件
+                self.device_video_path = found_files[0]
+                self.screenrecord_filename = os.path.basename(self.device_video_path)
+                self.update_screenrecord_info(f"选择文件: {self.device_video_path}")
+                
+                # 获取文件大小
+                size_cmd = self.get_adb_command(f"shell stat -c %s {self.device_video_path}")
+                size_result = subprocess.run(size_cmd, shell=True, capture_output=True, text=True)
+                
+                if size_result.returncode == 0:
+                    try:
+                        file_size = int(size_result.stdout.strip())
+                        self.update_screenrecord_info(f"文件大小: {file_size/1024/1024:.2f} MB")
+                    except:
+                        self.update_screenrecord_info("无法获取文件大小")
+                
+                # 拉取视频文件
+                save_dir = self.screenrecord_save_path_var.get().strip()
+                if not save_dir:
+                    save_dir = os.path.join(os.getcwd(), "screenrecords")
+                
+                os.makedirs(save_dir, exist_ok=True)
+                local_path = os.path.join(save_dir, self.screenrecord_filename)
+                
+                self.update_screenrecord_info(f"正在从设备拉取视频: {self.device_video_path}")
+                pull_cmd = self.get_adb_command(f"pull {self.device_video_path} \"{local_path}\"")
+                pull_result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+                
+                if pull_result.returncode == 0:
+                    self.update_screenrecord_info(f"视频已保存到: {local_path}")
+                    
+                    # 打开视频文件夹
+                    self.open_screenrecord_folder()
+                else:
+                    self.update_screenrecord_info(f"拉取视频失败: {pull_result.stderr}")
+            else:
+                self.update_screenrecord_info("未找到最近创建的视频文件")
+            
+            # 恢复按钮状态
+            self.start_record_button.config(state="normal")
+            self.stop_record_button.config(state="disabled")
+            
+            # 更新状态
+            self.screenrecord_status_var.set("录制已停止")
+            
+        except Exception as e:
+            self.screenrecord_status_var.set(f"停止录制出错: {str(e)}")
+            self.update_screenrecord_info(f"停止录制出错: {str(e)}")
+            messagebox.showerror("错误", f"停止录制时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
+            self.start_record_button.config(state="normal")
+            self.stop_record_button.config(state="disabled")
+
+    def open_screenrecord_folder(self):
+        """打开屏幕录制保存文件夹"""
+        save_dir = self.screenrecord_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = os.path.join(os.getcwd(), "screenrecords")
+        
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.screenrecord_status_var.set(f"打开文件夹出错: {str(e)}")
+            self.update_screenrecord_info(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def update_sweep_file_options(self):
+        """更新扫频文件选项"""
+        sweep_type = self.sweep_type_var.get()
+        
+        # 清空当前选项
+        self.sweep_file_combobox['values'] = []
+        self.sweep_file_var.set("")
+        
+        # 根据选择的类型更新文件列表
+        if sweep_type == "elephant":
+            # 禁用添加文件按钮
+            self.add_custom_sweep_button.config(state="disabled")
+            
+            # 查找audio目录下的大象扫频文件
+            elephant_dir = os.path.join(os.getcwd(), "audio", "elephant")
+            if not os.path.exists(elephant_dir):
+                os.makedirs(elephant_dir, exist_ok=True)
+            
+            # 获取所有wav文件
+            elephant_files = [f for f in os.listdir(elephant_dir) if f.lower().endswith('.wav')]
+            
+            if elephant_files:
+                self.sweep_file_combobox['values'] = elephant_files
+                self.sweep_file_var.set(elephant_files[0])
+                self.update_sweep_info(f"已加载 {len(elephant_files)} 个大象扫频文件")
+            else:
+                self.update_sweep_info("未找到大象扫频文件，请在audio/elephant目录中添加.wav文件")
+        
+        else:  # custom
+            # 启用添加文件按钮
+            self.add_custom_sweep_button.config(state="normal")
+            
+            # 查找audio目录下的自定义扫频文件
+            custom_dir = os.path.join(os.getcwd(), "audio", "custom")
+            if not os.path.exists(custom_dir):
+                os.makedirs(custom_dir, exist_ok=True)
+            
+            # 获取所有音频文件
+            custom_files = [f for f in os.listdir(custom_dir) if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg'))]
+            
+            if custom_files:
+                self.sweep_file_combobox['values'] = custom_files
+                self.sweep_file_var.set(custom_files[0])
+                self.update_sweep_info(f"已加载 {len(custom_files)} 个自定义扫频文件")
+            else:
+                self.update_sweep_info("未找到自定义扫频文件，请点击'添加文件'按钮添加")
+
+    def update_sweep_info(self, message):
+        """更新扫频测试信息文本框"""
+        self.sweep_info_text.config(state="normal")
+        self.sweep_info_text.insert("end", f"{message}\n")
+        self.sweep_info_text.see("end")
+        self.sweep_info_text.config(state="disabled")
+        self.root.update()
+
+    def add_custom_sweep_file(self):
+        """添加自定义扫频文件"""
+        file_types = [
+            ('音频文件', '*.wav;*.mp3;*.flac;*.ogg'),
+            ('WAV文件', '*.wav'),
+            ('MP3文件', '*.mp3'),
+            ('FLAC文件', '*.flac'),
+            ('OGG文件', '*.ogg'),
+            ('所有文件', '*.*')
+        ]
+        
+        files = filedialog.askopenfilenames(
+            title="选择扫频音频文件",
+            filetypes=file_types
+        )
+        
+        if not files:
+            return
+        
+        # 确保自定义目录存在
+        custom_dir = os.path.join(os.getcwd(), "audio", "custom")
+        if not os.path.exists(custom_dir):
+            os.makedirs(custom_dir, exist_ok=True)
+        
+        # 复制文件到自定义目录
+        copied_files = []
+        for file in files:
+            filename = os.path.basename(file)
+            dest_path = os.path.join(custom_dir, filename)
+            
+            try:
+                shutil.copy2(file, dest_path)
+                copied_files.append(filename)
+            except Exception as e:
+                self.update_sweep_info(f"复制文件 {filename} 失败: {str(e)}")
+        
+        if copied_files:
+            self.update_sweep_info(f"已添加 {len(copied_files)} 个自定义扫频文件")
+            
+            # 更新文件列表
+            self.update_sweep_file_options()
+
+    def browse_sweep_save_path(self):
+        """浏览扫频测试保存路径"""
+        folder = filedialog.askdirectory(initialdir=self.sweep_save_path_var.get())
+        if folder:
+            self.sweep_save_path_var.set(folder)
+            self.update_sweep_info(f"已设置保存路径: {folder}")
+
+    def start_sweep_test(self):
+        """开始扫频测试"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            # 获取选择的扫频文件
+            sweep_type = self.sweep_type_var.get()
+            sweep_file = self.sweep_file_var.get()
+            
+            if not sweep_file:
+                messagebox.showerror("错误", "请选择扫频文件")
+                return
+            
+            # 确定源文件路径
+            if sweep_type == "elephant":
+                source_path = os.path.join(os.getcwd(), "audio", "elephant", sweep_file)
+            else:  # custom
+                source_path = os.path.join(os.getcwd(), "audio", "custom", sweep_file)
+            
+            if not os.path.exists(source_path):
+                messagebox.showerror("错误", f"文件不存在: {source_path}")
+                return
+            
+            # 获取保存路径
+            save_dir = self.sweep_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "sweep_recordings")
+            
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 更新状态
+            self.sweep_status_var.set("正在准备测试...")
+            self.update_sweep_info("正在准备扫频测试...")
+            
+            # 禁用开始按钮，启用停止按钮
+            self.start_sweep_button.config(state="disabled")
+            self.stop_sweep_button.config(state="normal")
+            
+            # 准备工作 - 与Loopback测试相同
+            subprocess.run(self.get_adb_command("root"), shell=True)
+            
+            # 重启audioserver - 与Loopback测试相同
+            for _ in range(3):
+                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
+            
+            # 获取时间戳
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            # 设置设备上的临时文件路径 - 直接使用原始文件名
+            device_audio_path = f"/sdcard/{sweep_file}"
+            
+            # 推送音频文件到设备
+            self.update_sweep_info(f"正在推送音频文件: {sweep_file}")
+            push_cmd = self.get_adb_command(f"push \"{source_path}\" {device_audio_path}")
+            result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"推送音频文件失败: {result.stderr}")
+            
+            # 设置录制文件名
+            file_base_name = os.path.splitext(sweep_file)[0]  # 获取不带扩展名的文件名
+            recording_filename = f"{file_base_name}_recording_{timestamp}.wav"
+            device_recording_path = f"/sdcard/{recording_filename}"
+            
+            # 获取录制参数
+            recording_device = self.sweep_recording_device_var.get().strip()
+            recording_channels = self.sweep_recording_channels_var.get().strip()
+            recording_rate = self.sweep_recording_rate_var.get().strip()
+            recording_bits = self.sweep_recording_bits_var.get().strip()
+            recording_duration = self.sweep_recording_duration_var.get().strip()
+            
+            # 开始录制
+            self.update_sweep_info("开始录制...")
+            self.sweep_status_var.set("正在录制...")
+            
+            # 使用与Loopback测试完全相同的命令格式
+            tinycap_cmd = f"shell tinycap {device_recording_path} -d {recording_device} -c {recording_channels} -r {recording_rate} -b {recording_bits} -p 480"
+            tinycap_full_cmd = self.get_adb_command(tinycap_cmd)
+            self.update_sweep_info(f"执行命令: {tinycap_full_cmd}")
+            self.tinycap_process = subprocess.Popen(tinycap_full_cmd, shell=True)
+            
+            # 等待录制启动
+            time.sleep(2)
+            
+            # 播放音频
+            self.update_sweep_info("开始播放音频...")
+            playback_device = self.sweep_playback_device_var.get().strip()
+            tinyplay_cmd = f"shell tinyplay {device_audio_path} -d {playback_device}"
+            tinyplay_full_cmd = self.get_adb_command(tinyplay_cmd)
+            self.update_sweep_info(f"执行命令: {tinyplay_full_cmd}")
+            self.tinyplay_process = subprocess.Popen(tinyplay_full_cmd, shell=True)
+            
+            # 启动监控线程
+            self.sweep_monitor_thread = threading.Thread(target=self.monitor_sweep_test, 
+                                                      args=(device_recording_path, save_dir, recording_filename, sweep_file, float(recording_duration), device_audio_path))
+            self.sweep_monitor_thread.daemon = True
+            self.sweep_monitor_thread.start()
+            
+        except Exception as e:
+            self.sweep_status_var.set(f"测试出错: {str(e)}")
+            self.update_sweep_info(f"测试出错: {str(e)}")
+            messagebox.showerror("错误", f"开始扫频测试时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+
+    def stop_sweep_test(self):
+        """停止扫频测试"""
+        try:
+            self.update_sweep_info("正在停止测试...")
+            
+            # 停止播放进程
+            if hasattr(self, 'tinyplay_process') and self.tinyplay_process.poll() is None:
+                # 使用killall命令停止tinyplay
+                kill_cmd = self.get_adb_command("shell killall tinyplay")
+                subprocess.run(kill_cmd, shell=True)
+                
+                # 等待进程结束
+                for i in range(5):
+                    if self.tinyplay_process.poll() is not None:
+                        break
+                    time.sleep(0.5)
+                
+                # 如果进程仍在运行，强制终止
+                if self.tinyplay_process.poll() is None:
+                    if platform.system() == "Windows":
+                        subprocess.run(f"taskkill /F /PID {self.tinyplay_process.pid}", shell=True)
+                    else:
+                        import signal
+                        os.kill(self.tinyplay_process.pid, signal.SIGTERM)
+                
+                self.update_sweep_info("已停止播放")
+            
+            # 停止录制进程
+            if hasattr(self, 'tinycap_process') and self.tinycap_process.poll() is None:
+                # 使用killall命令停止tinycap
+                kill_cmd = self.get_adb_command("shell killall tinycap")
+                subprocess.run(kill_cmd, shell=True)
+                
+                # 等待进程结束
+                for i in range(5):
+                    if self.tinycap_process.poll() is not None:
+                        break
+                    time.sleep(0.5)
+                
+                # 如果进程仍在运行，强制终止
+                if self.tinycap_process.poll() is None:
+                    if platform.system() == "Windows":
+                        subprocess.run(f"taskkill /F /PID {self.tinycap_process.pid}", shell=True)
+                    else:
+                        import signal
+                        os.kill(self.tinycap_process.pid, signal.SIGTERM)
+                
+                self.update_sweep_info("已停止录制")
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+            
+            # 更新状态
+            self.sweep_status_var.set("测试已停止")
+            self.update_sweep_info("扫频测试已手动停止")
+            
+        except Exception as e:
+            self.sweep_status_var.set(f"停止测试出错: {str(e)}")
+            self.update_sweep_info(f"停止测试出错: {str(e)}")
+            messagebox.showerror("错误", f"停止扫频测试时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+
+    def monitor_sweep_test(self, device_recording_path, save_dir, recording_filename, original_filename, recording_duration, device_audio_path):
+        """监控扫频测试进程"""
+        try:
+            # 等待播放进程结束
+            if hasattr(self, 'tinyplay_process'):
+                self.update_sweep_info("等待播放完成...")
+                self.tinyplay_process.wait()
+                self.update_sweep_info("播放已完成")
+            
+            # 等待一段时间确保录制完整
+            time.sleep(2)
+            
+            # 停止录制进程
+            if hasattr(self, 'tinycap_process') and self.tinycap_process.poll() is None:
+                self.update_sweep_info("正在停止录制...")
+                
+                # 使用killall命令停止tinycap
+                kill_cmd = self.get_adb_command("shell killall tinycap")
+                subprocess.run(kill_cmd, shell=True)
+                
+                # 等待进程结束
+                for i in range(5):
+                    if self.tinycap_process.poll() is not None:
+                        break
+                    time.sleep(1)
+                
+                self.update_sweep_info("录制已停止")
+            
+            # 等待一段时间确保文件写入完成
+            time.sleep(2)
+            
+            # 拉取录制文件
+            self.update_sweep_info("正在获取录制文件...")
+            local_path = os.path.join(save_dir, recording_filename)
+            
+            pull_cmd = self.get_adb_command(f"pull {device_recording_path} \"{local_path}\"")
+            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                self.update_sweep_info(f"拉取录制文件失败: {result.stderr}")
+                
+                # 尝试查找可能的录制文件
+                find_cmd = self.get_adb_command("shell find /data/local/tmp -name \"*.wav\" -mtime -1")
+                find_result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
+                
+                if find_result.stdout.strip():
+                    found_files = find_result.stdout.strip().split("\n")
+                    self.update_sweep_info(f"找到可能的录制文件: {found_files}")
+                    
+                    # 使用第一个找到的文件
+                    if found_files:
+                        device_recording_path = found_files[0]
+                        self.update_sweep_info(f"尝试使用文件: {device_recording_path}")
+                        
+                        # 再次尝试拉取
+                        pull_cmd = self.get_adb_command(f"pull {device_recording_path} \"{local_path}\"")
+                        result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+                        
+                        if result.returncode != 0:
+                            self.update_sweep_info(f"再次拉取录制文件失败: {result.stderr}")
+                            return
+                else:
+                    self.update_sweep_info("未找到任何最近创建的WAV文件")
+                    return
+            
+            # 检查文件大小
+            if os.path.exists(local_path):
+                file_size = os.path.getsize(local_path)
+                self.update_sweep_info(f"录制文件大小: {file_size/1024:.2f} KB")
+                
+                if file_size < 1000:  # 小于1KB的文件可能是空的
+                    self.update_sweep_info("警告: 录制文件可能为空或损坏")
+            
+            # 删除设备上的临时文件
+            self.update_sweep_info("正在清理临时文件...")
+            rm_cmd = self.get_adb_command(f"shell rm {device_recording_path}")
+            subprocess.run(rm_cmd, shell=True)
+            
+            rm_audio_cmd = self.get_adb_command(f"shell rm {device_audio_path}")
+            subprocess.run(rm_audio_cmd, shell=True)
+            
+            # 更新状态
+            self.sweep_status_var.set("测试完成")
+            self.update_sweep_info(f"扫频测试完成，录制文件已保存到: {local_path}")
+            
+            # 如果是批量测试模式，检查是否有更多文件需要测试
+            if self.sweep_batch_var.get():
+                # 获取当前文件列表
+                if self.sweep_type_var.get() == "elephant":
+                    files_dir = os.path.join(os.getcwd(), "audio", "elephant")
+                else:
+                    files_dir = os.path.join(os.getcwd(), "audio", "custom")
+                
+                audio_files = [f for f in os.listdir(files_dir) if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg'))]
+                
+                # 找到当前文件的索引
+                try:
+                    current_index = audio_files.index(original_filename)
+                    
+                    # 如果还有下一个文件
+                    if current_index < len(audio_files) - 1:
+                        next_file = audio_files[current_index + 1]
+                        self.update_sweep_info(f"准备测试下一个文件: {next_file}")
+                        
+                        # 设置下一个文件
+                        self.sweep_file_var.set(next_file)
+                        
+                        # 等待一段时间后开始下一个测试
+                        time.sleep(2)
+                        
+                        # 启动下一个测试
+                        self.root.after(1000, self.start_sweep_test)
+                        return
+                    else:
+                        self.update_sweep_info("所有文件测试完成")
+                except ValueError:
+                    pass  # 如果找不到当前文件，就不继续测试
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+            
+        except Exception as e:
+            self.sweep_status_var.set(f"监控测试出错: {str(e)}")
+            self.update_sweep_info(f"监控测试出错: {str(e)}")
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+
+    def open_sweep_folder(self):
+        """打开扫频测试保存文件夹"""
+        save_dir = self.sweep_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = os.path.join(os.getcwd(), "sweep_recordings")
+        
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.sweep_status_var.set(f"打开文件夹出错: {str(e)}")
+            self.update_sweep_info(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def setup_speaker_tab(self, parent):
+        """设置喇叭测试选项卡"""
+        # 创建框架
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 创建标题
+        ttk.Label(frame, text="喇叭测试", style="Header.TLabel").pack(pady=10)
+        
+        # 创建说明
+        ttk.Label(frame, text="此功能将打开系统喇叭测试工具，并可以选择使用默认或自定义的测试音频文件。", 
+                 wraplength=600).pack(pady=10)
+        
+        # 音频文件选择区域
+        audio_frame = ttk.LabelFrame(frame, text="测试音频")
+        audio_frame.pack(fill="x", padx=10, pady=10)
+        
+        # 音频源选择
+        source_frame = ttk.Frame(audio_frame)
+        source_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.speaker_audio_source = tk.StringVar(value="default")
+        
+        # 默认音频选项
+        default_radio = ttk.Radiobutton(source_frame, text="使用默认测试音频", 
+                                  variable=self.speaker_audio_source, value="default",
+                                  command=self.update_speaker_audio_source)
+        default_radio.pack(anchor="w", padx=5, pady=5)
+        
+        # 自定义音频选项
+        custom_radio = ttk.Radiobutton(source_frame, text="使用自定义音频文件", 
+                                 variable=self.speaker_audio_source, value="custom",
+                                 command=self.update_speaker_audio_source)
+        custom_radio.pack(anchor="w", padx=5, pady=5)
+        
+        # 自定义音频选择框架
+        custom_audio_frame = ttk.Frame(audio_frame)
+        custom_audio_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(custom_audio_frame, text="音频文件:").pack(side="left", padx=5)
+        
+        self.speaker_audio_var = tk.StringVar()
+        self.speaker_audio_entry = ttk.Entry(custom_audio_frame, textvariable=self.speaker_audio_var, width=40)
+        self.speaker_audio_entry.pack(side="left", padx=5)
+        self.speaker_audio_entry.config(state="disabled")
+        
+        self.speaker_browse_button = ttk.Button(custom_audio_frame, text="浏览", 
+                                         command=self.browse_speaker_audio,
+                                         style="Small.TButton")
+        self.speaker_browse_button.pack(side="left", padx=5)
+        self.speaker_browse_button.config(state="disabled")
+        
+        # 默认音频文件状态
+        default_status_frame = ttk.Frame(audio_frame)
+        default_status_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.default_audio_status_var = tk.StringVar()
+        self.check_default_audio_file()  # 检查默认音频文件是否存在
+        
+        default_status_label = ttk.Label(default_status_frame, textvariable=self.default_audio_status_var,
+                                       foreground="blue")
+        default_status_label.pack(anchor="w", padx=5)
+        
+        # 添加默认音频文件按钮
+        self.add_default_audio_button = ttk.Button(default_status_frame, text="添加默认音频文件", 
+                                                command=self.add_default_audio_file,
+                                                style="Small.TButton")
+        self.add_default_audio_button.pack(side="left", padx=5)
+        if os.path.exists(os.path.join(os.getcwd(), "audio", "speaker", "test.wav")):
+            self.add_default_audio_button.config(state="disabled")
+        
+        # 状态显示
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.speaker_status_var = tk.StringVar(value="就绪")
+        status_label = ttk.Label(status_frame, textvariable=self.speaker_status_var)
+        status_label.pack(side="left", padx=5)
+        
+        # 操作按钮
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(pady=20)
+        
+        self.start_speaker_button = ttk.Button(button_frame, text="启动喇叭测试", 
+                                            command=self.start_speaker_test)
+        self.start_speaker_button.pack(side="left", padx=10)
+
+    def check_default_audio_file(self):
+        """检查默认音频文件是否存在"""
+        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+        if os.path.exists(default_audio_path):
+            self.default_audio_status_var.set("默认音频文件已存在")
+            if hasattr(self, 'add_default_audio_button'):
+                self.add_default_audio_button.config(state="disabled")
+        else:
+            self.default_audio_status_var.set("默认音频文件不存在，请添加默认音频文件或使用自定义音频")
+            if hasattr(self, 'add_default_audio_button'):
+                self.add_default_audio_button.config(state="normal")
+
+    def add_default_audio_file(self):
+        """添加默认音频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择默认音频文件",
+            filetypes=[("WAV文件", "*.wav")]
+        )
+        if file_path:
+            # 确保目录存在
+            speaker_dir = os.path.join(os.getcwd(), "audio", "speaker")
+            if not os.path.exists(speaker_dir):
+                os.makedirs(speaker_dir, exist_ok=True)
+            
+            # 复制文件
+            try:
+                shutil.copy(file_path, os.path.join(speaker_dir, "test.wav"))
+                messagebox.showinfo("成功", "默认音频文件已添加")
+                self.check_default_audio_file()
+            except Exception as e:
+                messagebox.showerror("错误", f"添加默认音频文件失败:\n{str(e)}")
+
+    def update_speaker_audio_source(self):
+        """更新喇叭测试音频源"""
+        if self.speaker_audio_source.get() == "default":
+            self.speaker_audio_entry.config(state="disabled")
+            self.speaker_browse_button.config(state="disabled")
+        else:  # custom
+            self.speaker_audio_entry.config(state="normal")
+            self.speaker_browse_button.config(state="normal")
+
+    def browse_speaker_audio(self):
+        """浏览选择喇叭测试音频文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择音频文件",
+            filetypes=[("音频文件", "*.wav *.mp3 *.ogg *.flac")]
+        )
+        if file_path:
+            self.speaker_audio_var.set(file_path)
+
+    def start_speaker_test(self):
+        """启动喇叭测试"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            self.speaker_status_var.set("正在准备喇叭测试...")
+            
+            # 确定要推送的音频文件
+            if self.speaker_audio_source.get() == "default":
+                # 使用默认测试音频
+                audio_file = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+                if not os.path.exists(audio_file):
+                    messagebox.showerror("错误", "默认测试音频文件不存在，请先添加默认音频文件或选择使用自定义音频")
+                    self.speaker_status_var.set("错误: 默认测试音频文件不存在")
+                    return
+            else:  # custom
+                # 使用自定义音频
+                audio_file = self.speaker_audio_var.get().strip()
+                if not audio_file or not os.path.exists(audio_file):
+                    messagebox.showerror("错误", "请选择有效的音频文件")
+                    self.speaker_status_var.set("错误: 请选择有效的音频文件")
+                    return
+            
+            # 推送音频文件到设备
+            self.speaker_status_var.set("正在推送音频文件...")
+            push_cmd = self.get_adb_command(f"push \"{audio_file}\" /sdcard/test.wav")
+            result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"推送音频文件失败: {result.stderr}")
+            
+            # 启动喇叭测试应用
+            self.speaker_status_var.set("正在启动喇叭测试应用...")
+            launch_cmd = self.get_adb_command("shell am start -n com.nes.sound/.component.activity.SoundLocateActivity")
+            result = subprocess.run(launch_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"启动喇叭测试应用失败: {result.stderr}")
+            
+            self.speaker_status_var.set("喇叭测试已启动")
+            
+        except Exception as e:
+            self.speaker_status_var.set(f"测试出错: {str(e)}")
+            messagebox.showerror("错误", f"启动喇叭测试时出错:\n{str(e)}")
+
+    def setup_logcat_tab(self, parent):
+        """设置Logcat选项卡"""
+        # 创建框架
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 创建标题
+        ttk.Label(frame, text="音频日志控制", style="Header.TLabel").pack(pady=10)
+        
+        # 左右分栏布局
+        main_frame = ttk.Frame(frame)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 左侧属性管理区域 - 设置宽度为40%
+        left_frame = ttk.Frame(main_frame, width=320)
+        left_frame.pack(side="left", fill="both", padx=5, pady=5)
+        left_frame.pack_propagate(False)  # 防止子组件改变frame大小
+        
+        # 右侧日志控制区域 - 设置宽度为60%
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+        
+        # 左侧 - 属性管理
+        props_frame = ttk.LabelFrame(left_frame, text="logcat属性管理")
+        props_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # 属性输入区域
+        input_frame = ttk.Frame(props_frame)
+        input_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(input_frame, text="属性:", font=("Arial", 9)).pack(side="left", padx=5)
+        self.logcat_prop_var = tk.StringVar()
+        prop_entry = ttk.Entry(input_frame, textvariable=self.logcat_prop_var, width=20)
+        prop_entry.pack(side="left", padx=5, fill="x", expand=True)
+        
+        add_button = ttk.Button(input_frame, text="添加", 
+                              command=self.add_logcat_prop, style="Small.TButton",
+                              width=4)
+        add_button.pack(side="left", padx=5)
+        
+        # 属性列表区域 - 使用Canvas和Scrollbar
+        canvas_frame = ttk.Frame(props_frame)
+        canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # 创建Canvas和Scrollbar
+        self.logcat_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.logcat_canvas.yview)
+        self.logcat_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side="right", fill="y")
+        self.logcat_canvas.pack(side="left", fill="both", expand=True)
+        
+        # 创建属性列表框架
+        self.logcat_props_frame = ttk.Frame(self.logcat_canvas)
+        self.logcat_canvas_window = self.logcat_canvas.create_window((0, 0), window=self.logcat_props_frame, anchor="nw")
+        
+        # 配置Canvas滚动
+        self.logcat_props_frame.bind("<Configure>", lambda e: self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all")))
+        self.logcat_canvas.bind("<Configure>", self.resize_logcat_props_frame)
+        
+        # 定义默认属性列表
+        self.logcat_props = [
+            {"name": "sys.droidlogic.audio.debug", "debug_value": "1", "normal_value": "0"},
+            {"name": "vendor.media.audio.hal.debug", "debug_value": "4096", "normal_value": "0"},
+            {"name": "media.audio.hal.debug", "debug_value": "4096", "normal_value": "0"},
+            {"name": "vendor.media.audiohal.debug", "debug_value": "4096", "normal_value": "0"},
+            {"name": "vendor.media.audiohal.hwsync", "debug_value": "1", "normal_value": "0"},
+            {"name": "vendor.media.c2.audio.decoder.debug", "debug_value": "1", "normal_value": "0"},
+            {"name": "vendor.media.omx.audio.dump", "debug_value": "1", "normal_value": "0"},
+            {"name": "vendor.media.droidaudio.debug", "debug_value": "1", "normal_value": "0"},
+            {"name": "log.tag.APM_AudioPolicyManager", "debug_value": "V", "normal_value": "D"}
+        ]
+        
+        # 创建属性列表
+        self.logcat_props_vars = []
+        self.logcat_prop_frames = []
+        
+        # 添加默认属性到列表
+        for prop in self.logcat_props:
+            self.add_prop_to_list(prop["name"])
+        
+        # 右侧 - 日志控制
+        control_frame = ttk.LabelFrame(right_frame, text="日志控制")
+        control_frame.pack(fill="both", expand=False, padx=5, pady=5)
+        
+        # 日志保存路径
+        path_frame = ttk.Frame(control_frame)
+        path_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        self.logcat_save_path_var = tk.StringVar(value=os.path.join(os.getcwd(), "logcat"))
+        path_entry = ttk.Entry(path_frame, textvariable=self.logcat_save_path_var)
+        path_entry.pack(side="left", padx=2, fill="x", expand=True)
+        
+        browse_button = ttk.Button(path_frame, text="浏览", 
+                                 command=self.browse_logcat_save_path,
+                                 style="Small.TButton", width=4)
+        browse_button.pack(side="left", padx=2)
+        
+        # 自动停止时间
+        auto_stop_frame = ttk.Frame(control_frame)
+        auto_stop_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(auto_stop_frame, text="自动停止(秒):", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        self.logcat_auto_stop_var = tk.StringVar(value="0")
+        auto_stop_entry = ttk.Entry(auto_stop_frame, textvariable=self.logcat_auto_stop_var, width=5)
+        auto_stop_entry.pack(side="left", padx=2)
+        
+        ttk.Label(auto_stop_frame, text="(0表示不自动停止)", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 日志过滤器
+        filter_frame = ttk.Frame(control_frame)
+        filter_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(filter_frame, text="日志过滤:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        self.logcat_filter_var = tk.StringVar(value="*:V")
+        filter_entry = ttk.Entry(filter_frame, textvariable=self.logcat_filter_var)
+        filter_entry.pack(side="left", padx=2, fill="x", expand=True)
+        
+        # 操作按钮
+        button_frame = ttk.Frame(control_frame)
+        button_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.enable_debug_button = ttk.Button(button_frame, text="放开打印", 
+                                            command=self.enable_logcat_debug,
+                                            style="Small.TButton")
+        self.enable_debug_button.pack(side="left", padx=5)
+        
+        self.disable_debug_button = ttk.Button(button_frame, text="停止打印", 
+                                             command=self.disable_logcat_debug,
+                                             style="Small.TButton")
+        self.disable_debug_button.pack(side="left", padx=5)
+        self.disable_debug_button.config(state="disabled")
+        
+        # 日志抓取按钮
+        capture_frame = ttk.Frame(control_frame)
+        capture_frame.pack(fill="x", padx=5, pady=5)
+        
+        self.start_capture_button = ttk.Button(capture_frame, text="开始抓取", 
+                                             command=self.start_logcat_capture,
+                                             style="Small.TButton")
+        self.start_capture_button.pack(side="left", padx=5)
+        
+        self.stop_capture_button = ttk.Button(capture_frame, text="停止抓取", 
+                                            command=self.stop_logcat_capture,
+                                            style="Small.TButton")
+        self.stop_capture_button.pack(side="left", padx=5)
+        self.stop_capture_button.config(state="disabled")
+        
+        open_folder_button = ttk.Button(capture_frame, text="打开文件夹", 
+                                      command=self.open_logcat_folder,
+                                      style="Small.TButton")
+        open_folder_button.pack(side="left", padx=5)
+        
+        # 状态显示
+        status_frame = ttk.LabelFrame(right_frame, text="日志信息")
+        status_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # 创建文本框用于显示状态
+        self.logcat_status_text = tk.Text(status_frame, height=10, width=40, font=("Arial", 9))
+        self.logcat_status_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self.logcat_status_text.config(state="disabled")
+        
+        # 初始状态信息
+        self.update_logcat_status("就绪")
+
+    def resize_logcat_props_frame(self, event):
+        """调整属性列表框架大小"""
+        self.logcat_canvas.itemconfig(self.logcat_canvas_window, width=event.width)
+
+    def update_logcat_status(self, message):
+        """更新日志状态信息"""
+        self.logcat_status_text.config(state="normal")
+        self.logcat_status_text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
+        self.logcat_status_text.see(tk.END)
+        self.logcat_status_text.config(state="disabled")
+
+    def add_logcat_prop(self):
+        """添加日志属性"""
+        prop_name = self.logcat_prop_var.get().strip()
+        if not prop_name:
+            messagebox.showerror("错误", "请输入属性名")
+            return
+        
+        # 检查是否已存在
+        for prop in self.logcat_props_vars:
+            if prop["name"] == prop_name:
+                messagebox.showerror("错误", f"属性 {prop_name} 已存在")
+                return
+        
+        # 添加到列表
+        self.add_prop_to_list(prop_name)
+        
+        # 清空输入框
+        self.logcat_prop_var.set("")
+        
+        self.update_logcat_status(f"已添加属性: {prop_name}")
+
+    def add_prop_to_list(self, prop_name):
+        """将属性添加到列表显示"""
+        # 创建属性框架
+        prop_frame = ttk.Frame(self.logcat_props_frame)
+        prop_frame.pack(fill="x", padx=2, pady=1)
+        
+        # 复选框
+        var = tk.BooleanVar(value=True)
+        check = ttk.Checkbutton(prop_frame, variable=var, text="")
+        check.pack(side="left", padx=1)
+        
+        # 属性名标签 - 使用更小的字体
+        prop_label = ttk.Label(prop_frame, text=prop_name, font=("Arial", 9))
+        prop_label.pack(side="left", padx=2, fill="x", expand=True)
+        
+        # 删除按钮
+        delete_button = ttk.Button(prop_frame, text="×", width=1,
+                                 command=lambda p=prop_name, f=prop_frame: self.remove_logcat_prop(p, f),
+                                 style="Delete.TButton")
+        delete_button.pack(side="right", padx=1)
+        
+        # 保存属性信息
+        self.logcat_props_vars.append({
+            "name": prop_name,
+            "var": var,
+            "frame": prop_frame
+        })
+        
+        # 更新Canvas滚动区域
+        self.logcat_props_frame.update_idletasks()
+        self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
+
+    def remove_logcat_prop(self, prop_name, frame):
+        """从列表中移除属性"""
+        # 从UI中移除
+        frame.destroy()
+        
+        # 从数据中移除
+        for i, prop in enumerate(self.logcat_props_vars):
+            if prop["name"] == prop_name:
+                self.logcat_props_vars.pop(i)
+                break
+        
+        # 更新Canvas滚动区域
+        self.logcat_props_frame.update_idletasks()
+        self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
+        
+        self.update_logcat_status(f"已移除属性: {prop_name}")
+
+    def enable_logcat_debug(self):
+        """放开日志打印"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            self.update_logcat_status("正在放开日志打印...")
+            
+            # 设置属性
+            for prop in self.logcat_props_vars:
+                if prop["var"].get():
+                    # 查找对应的调试值
+                    debug_value = "1"  # 默认值
+                    for default_prop in self.logcat_props:
+                        if default_prop["name"] == prop["name"]:
+                            debug_value = default_prop["debug_value"]
+                            break
+                    
+                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {debug_value}")
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        raise Exception(f"设置属性 {prop['name']} 失败: {result.stderr}")
+                    
+                    self.update_logcat_status(f"已设置: {prop['name']}={debug_value}")
+            
+            # 更新按钮状态
+            self.enable_debug_button.config(state="disabled")
+            self.disable_debug_button.config(state="normal")
+            
+            self.update_logcat_status("日志打印已放开")
+            
+        except Exception as e:
+            self.update_logcat_status(f"放开日志打印出错: {str(e)}")
+            messagebox.showerror("错误", f"放开日志打印时出错:\n{str(e)}")
+
+    def disable_logcat_debug(self):
+        """停止日志打印"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            self.update_logcat_status("正在停止日志打印...")
+            
+            # 恢复属性
+            for prop in self.logcat_props_vars:
+                if prop["var"].get():
+                    # 查找对应的正常值
+                    normal_value = "0"  # 默认值
+                    for default_prop in self.logcat_props:
+                        if default_prop["name"] == prop["name"]:
+                            normal_value = default_prop["normal_value"]
+                            break
+                    
+                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {normal_value}")
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        raise Exception(f"恢复属性 {prop['name']} 失败: {result.stderr}")
+                    
+                    self.update_logcat_status(f"已恢复: {prop['name']}={normal_value}")
+            
+            # 更新按钮状态
+            self.enable_debug_button.config(state="normal")
+            self.disable_debug_button.config(state="disabled")
+            
+            self.update_logcat_status("日志打印已停止")
+            
+        except Exception as e:
+            self.update_logcat_status(f"停止日志打印出错: {str(e)}")
+            messagebox.showerror("错误", f"停止日志打印时出错:\n{str(e)}")
+
+    def start_logcat_capture(self):
+        """开始抓取日志"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            self.update_logcat_status("正在开始抓取日志...")
+            
+            # 确保保存目录存在
+            save_dir = self.logcat_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "logcat")
+            
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 生成日志文件名
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.log_file_path = os.path.join(save_dir, f"audio_logcat_{timestamp}.txt")
+            
+            # 开始抓取日志
+            filter_str = self.logcat_filter_var.get().strip()
+            if not filter_str:
+                filter_str = "*:V"
+            
+            logcat_cmd = self.get_adb_command(f"logcat -v threadtime {filter_str}")
+            
+            # 打开日志文件
+            self.logcat_file = open(self.log_file_path, "w", encoding="utf-8")
+            
+            # 启动日志进程
+            self.logcat_process = subprocess.Popen(logcat_cmd, shell=True, stdout=self.logcat_file, stderr=subprocess.PIPE, text=True)
+            
+            # 更新按钮状态
+            self.start_capture_button.config(state="disabled")
+            self.stop_capture_button.config(state="normal")
+            
+            self.update_logcat_status(f"正在抓取日志到: {self.log_file_path}")
+            
+            # 检查是否需要自动停止
+            auto_stop_time = self.logcat_auto_stop_var.get().strip()
+            if auto_stop_time and auto_stop_time != "0":
+                try:
+                    seconds = int(auto_stop_time)
+                    if seconds > 0:
+                        self.update_logcat_status(f"将在 {seconds} 秒后自动停止抓取")
+                        self.root.after(seconds * 1000, self.stop_logcat_capture)
+                except ValueError:
+                    self.update_logcat_status("自动停止时间格式无效，将不会自动停止")
+            
+        except Exception as e:
+            self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
+            messagebox.showerror("错误", f"开始抓取日志时出错:\n{str(e)}")
+
+    def stop_logcat_capture(self):
+        """停止抓取日志"""
+        if not hasattr(self, 'logcat_process') or self.logcat_process is None:
+            return
+    
+        try:
+            self.update_logcat_status("正在停止抓取日志...")
+            
+            # 停止日志进程
+            if platform.system() == "Windows":
+                # 使用taskkill强制终止进程树
+                subprocess.run(f"taskkill /F /T /PID {self.logcat_process.pid}", shell=True)
+            else:
+                import signal
+                # 发送SIGTERM信号
+                os.kill(self.logcat_process.pid, signal.SIGTERM)
+                # 等待进程结束
+                try:
+                    self.logcat_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # 如果超时，发送SIGKILL信号强制终止
+                    os.kill(self.logcat_process.pid, signal.SIGKILL)
+            
+            # 关闭日志文件
+            if hasattr(self, 'logcat_file') and self.logcat_file:
+                self.logcat_file.close()
+                self.logcat_file = None
+            
+            # 清理进程引用
+            self.logcat_process = None
+            
+            # 更新按钮状态
+            self.start_capture_button.config(state="normal")
+            self.stop_capture_button.config(state="disabled")
+            
+            self.update_logcat_status("日志抓取已停止")
+            
+            # 询问是否打开日志文件
+            if messagebox.askyesno("完成", "日志抓取已完成，是否打开日志文件夹？"):
+                self.open_logcat_folder()
+            
+        except Exception as e:
+            self.update_logcat_status(f"停止抓取日志出错: {str(e)}")
+            messagebox.showerror("错误", f"停止抓取日志时出错:\n{str(e)}")
+
+    def open_logcat_folder(self):
+        """打开日志保存文件夹"""
+        save_dir = self.logcat_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = os.path.join(os.getcwd(), "logcat")
+    
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+    
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.logcat_status_var.set(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def browse_logcat_save_path(self):
+        """浏览并选择日志保存路径"""
+        folder_path = filedialog.askdirectory(
+            title="选择日志保存路径",
+            initialdir=self.logcat_save_path_var.get()
+        )
+        
+        if folder_path:
+            self.logcat_save_path_var.set(folder_path)
+            self.update_logcat_status(f"已设置日志保存路径: {folder_path}")
+
+    def resize_logcat_props_frame(self, event):
+        """调整属性列表框架大小"""
+        self.logcat_canvas.itemconfig(self.logcat_canvas_window, width=event.width)
+
+    def update_logcat_status(self, message):
+        """更新日志状态信息"""
+        self.logcat_status_text.config(state="normal")
+        self.logcat_status_text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
+        self.logcat_status_text.see(tk.END)
+        self.logcat_status_text.config(state="disabled")
+
+    def add_logcat_prop(self):
+        """添加日志属性"""
+        prop_name = self.logcat_prop_var.get().strip()
+        if not prop_name:
+            messagebox.showerror("错误", "请输入属性名")
+            return
+        
+        # 检查是否已存在
+        for prop in self.logcat_props_vars:
+            if prop["name"] == prop_name:
+                messagebox.showerror("错误", f"属性 {prop_name} 已存在")
+                return
+        
+        # 添加到列表
+        self.add_prop_to_list(prop_name)
+        
+        # 清空输入框
+        self.logcat_prop_var.set("")
+        
+        self.update_logcat_status(f"已添加属性: {prop_name}")
+
+    def add_prop_to_list(self, prop_name):
+        """将属性添加到列表显示"""
+        # 创建属性框架
+        prop_frame = ttk.Frame(self.logcat_props_frame)
+        prop_frame.pack(fill="x", padx=2, pady=1)
+        
+        # 复选框
+        var = tk.BooleanVar(value=True)
+        check = ttk.Checkbutton(prop_frame, variable=var, text="")
+        check.pack(side="left", padx=1)
+        
+        # 属性名标签 - 使用更小的字体
+        prop_label = ttk.Label(prop_frame, text=prop_name, font=("Arial", 9))
+        prop_label.pack(side="left", padx=2, fill="x", expand=True)
+        
+        # 删除按钮
+        delete_button = ttk.Button(prop_frame, text="×", width=1,
+                                 command=lambda p=prop_name, f=prop_frame: self.remove_logcat_prop(p, f),
+                                 style="Delete.TButton")
+        delete_button.pack(side="right", padx=1)
+        
+        # 保存属性信息
+        self.logcat_props_vars.append({
+            "name": prop_name,
+            "var": var,
+            "frame": prop_frame
+        })
+        
+        # 更新Canvas滚动区域
+        self.logcat_props_frame.update_idletasks()
+        self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
+
+    def remove_logcat_prop(self, prop_name, frame):
+        """从列表中移除属性"""
+        # 从UI中移除
+        frame.destroy()
+        
+        # 从数据中移除
+        for i, prop in enumerate(self.logcat_props_vars):
+            if prop["name"] == prop_name:
+                self.logcat_props_vars.pop(i)
+                break
+        
+        # 更新Canvas滚动区域
+        self.logcat_props_frame.update_idletasks()
+        self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
+        
+        self.update_logcat_status(f"已移除属性: {prop_name}")
+
+    def enable_logcat_debug(self):
+        """放开日志打印"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            self.update_logcat_status("正在放开日志打印...")
+            
+            # 设置属性
+            for prop in self.logcat_props_vars:
+                if prop["var"].get():
+                    # 查找对应的调试值
+                    debug_value = "1"  # 默认值
+                    for default_prop in self.logcat_props:
+                        if default_prop["name"] == prop["name"]:
+                            debug_value = default_prop["debug_value"]
+                            break
+                    
+                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {debug_value}")
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        raise Exception(f"设置属性 {prop['name']} 失败: {result.stderr}")
+                    
+                    self.update_logcat_status(f"已设置: {prop['name']}={debug_value}")
+            
+            # 更新按钮状态
+            self.enable_debug_button.config(state="disabled")
+            self.disable_debug_button.config(state="normal")
+            
+            self.update_logcat_status("日志打印已放开")
+            
+        except Exception as e:
+            self.update_logcat_status(f"放开日志打印出错: {str(e)}")
+            messagebox.showerror("错误", f"放开日志打印时出错:\n{str(e)}")
+
+    def disable_logcat_debug(self):
+        """停止日志打印"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            self.update_logcat_status("正在停止日志打印...")
+            
+            # 恢复属性
+            for prop in self.logcat_props_vars:
+                if prop["var"].get():
+                    # 查找对应的正常值
+                    normal_value = "0"  # 默认值
+                    for default_prop in self.logcat_props:
+                        if default_prop["name"] == prop["name"]:
+                            normal_value = default_prop["normal_value"]
+                            break
+                    
+                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {normal_value}")
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        raise Exception(f"恢复属性 {prop['name']} 失败: {result.stderr}")
+                    
+                    self.update_logcat_status(f"已恢复: {prop['name']}={normal_value}")
+            
+            # 更新按钮状态
+            self.enable_debug_button.config(state="normal")
+            self.disable_debug_button.config(state="disabled")
+            
+            self.update_logcat_status("日志打印已停止")
+            
+        except Exception as e:
+            self.update_logcat_status(f"停止日志打印出错: {str(e)}")
+            messagebox.showerror("错误", f"停止日志打印时出错:\n{str(e)}")
+
+    def start_logcat_capture(self):
+        """开始抓取日志"""
+        if not self.check_device_selected():
+            return
+    
+        try:
+            self.update_logcat_status("正在开始抓取日志...")
+            
+            # 确保保存目录存在
+            save_dir = self.logcat_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "logcat")
+            
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 生成日志文件名
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.log_file_path = os.path.join(save_dir, f"audio_logcat_{timestamp}.txt")
+            
+            # 开始抓取日志
+            filter_str = self.logcat_filter_var.get().strip()
+            if not filter_str:
+                filter_str = "*:V"
+            
+            logcat_cmd = self.get_adb_command(f"logcat -v threadtime {filter_str}")
+            
+            # 打开日志文件
+            self.logcat_file = open(self.log_file_path, "w", encoding="utf-8")
+            
+            # 启动日志进程
+            self.logcat_process = subprocess.Popen(logcat_cmd, shell=True, stdout=self.logcat_file, stderr=subprocess.PIPE, text=True)
+            
+            # 更新按钮状态
+            self.start_capture_button.config(state="disabled")
+            self.stop_capture_button.config(state="normal")
+            
+            self.update_logcat_status(f"正在抓取日志到: {self.log_file_path}")
+            
+            # 检查是否需要自动停止
+            auto_stop_time = self.logcat_auto_stop_var.get().strip()
+            if auto_stop_time and auto_stop_time != "0":
+                try:
+                    seconds = int(auto_stop_time)
+                    if seconds > 0:
+                        self.update_logcat_status(f"将在 {seconds} 秒后自动停止抓取")
+                        self.root.after(seconds * 1000, self.stop_logcat_capture)
+                except ValueError:
+                    self.update_logcat_status("自动停止时间格式无效，将不会自动停止")
+            
+        except Exception as e:
+            self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
+            messagebox.showerror("错误", f"开始抓取日志时出错:\n{str(e)}")
+
+    def stop_logcat_capture(self):
+        """停止抓取日志"""
+        if not hasattr(self, 'logcat_process') or self.logcat_process is None:
+            return
+    
+        try:
+            self.update_logcat_status("正在停止抓取日志...")
+            
+            # 停止日志进程
+            if platform.system() == "Windows":
+                # 使用taskkill强制终止进程树
+                subprocess.run(f"taskkill /F /T /PID {self.logcat_process.pid}", shell=True)
+            else:
+                import signal
+                # 发送SIGTERM信号
+                os.kill(self.logcat_process.pid, signal.SIGTERM)
+                # 等待进程结束
+                try:
+                    self.logcat_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # 如果超时，发送SIGKILL信号强制终止
+                    os.kill(self.logcat_process.pid, signal.SIGKILL)
+            
+            # 关闭日志文件
+            if hasattr(self, 'logcat_file') and self.logcat_file:
+                self.logcat_file.close()
+                self.logcat_file = None
+            
+            # 清理进程引用
+            self.logcat_process = None
+            
+            # 更新按钮状态
+            self.start_capture_button.config(state="normal")
+            self.stop_capture_button.config(state="disabled")
+            
+            self.update_logcat_status("日志抓取已停止")
+            
+            # 询问是否打开日志文件
+            if messagebox.askyesno("完成", "日志抓取已完成，是否打开日志文件夹？"):
+                self.open_logcat_folder()
+            
+        except Exception as e:
+            self.update_logcat_status(f"停止抓取日志出错: {str(e)}")
+            messagebox.showerror("错误", f"停止抓取日志时出错:\n{str(e)}")
+
+    def open_logcat_folder(self):
+        """打开日志保存文件夹"""
+        save_dir = self.logcat_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = os.path.join(os.getcwd(), "logcat")
+    
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+    
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.logcat_status_var.set(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
