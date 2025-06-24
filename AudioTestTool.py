@@ -13,8 +13,8 @@ import platform
 class AudioTestTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("音频测试工具")
-        self.root.geometry("650x650")  # 增加高度以适应所有内容
+        self.root.title("音频测试小助手V1.2")
+        self.root.geometry("750x650")  # 增加宽度从650到750
         self.root.resizable(False, False)
         
         # 设置样式
@@ -74,19 +74,20 @@ class AudioTestTool:
         
         # 右侧设备选择
         device_frame = ttk.Frame(header_frame)
-        device_frame.pack(side="right", pady=10)
+        device_frame.pack(side="right", padx=10)
         
-        ttk.Label(device_frame, text="设备:", style="Device.TLabel").pack(side="left", padx=5)
+        ttk.Label(device_frame, text="设备:", font=("Arial", 10)).pack(side="left", padx=5)
         
         # 设备下拉菜单
         self.device_var = tk.StringVar()
-        self.device_combo = ttk.Combobox(device_frame, textvariable=self.device_var, width=30, state="readonly")
-        self.device_combo.pack(side="left", padx=5)
-        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
+        self.device_combobox = ttk.Combobox(device_frame, textvariable=self.device_var, 
+                                          width=30, state="readonly")
+        self.device_combobox.pack(side="left", padx=5)
+        self.device_combobox.bind("<<ComboboxSelected>>", self.on_device_selected)
         
         # 刷新按钮
-        refresh_button = ttk.Button(device_frame, text="刷新", style="Refresh.TButton", 
-                                  command=self.refresh_devices)
+        refresh_button = ttk.Button(device_frame, text="刷新", 
+                                  command=self.refresh_devices, style="Refresh.TButton")
         refresh_button.pack(side="left", padx=5)
         
         # 网络ADB连接按钮
@@ -160,18 +161,16 @@ class AudioTestTool:
     def refresh_devices(self):
         """刷新设备列表"""
         try:
-            self.status_var.set("正在检测设备...")
+            self.status_var.set("正在检查设备...")
             
             # 获取设备列表
-            result = subprocess.run("adb devices", shell=True, capture_output=True, text=True)
+            result = subprocess.run(["adb", "devices"], capture_output=True, text=True)
             
             if result.returncode != 0:
-                self.device_status_var.set("ADB命令执行失败")
-                self.status_var.set("ADB命令执行失败")
-                return
+                raise Exception(f"ADB命令执行失败: {result.stderr}")
             
             # 解析设备列表
-            lines = result.stdout.strip().split('\n')[1:]  # 跳过第一行 "List of devices attached"
+            lines = result.stdout.strip().split('\n')[1:]  # 跳过第一行标题
             self.devices = []
             
             for line in lines:
@@ -182,86 +181,102 @@ class AudioTestTool:
                         status = parts[1].strip()
                         
                         if status == "device":  # 只添加已连接的设备
-                            # 获取设备型号
-                            model_result = subprocess.run(
-                                f"adb -s {device_id} shell getprop ro.product.model", 
-                                shell=True, capture_output=True, text=True
-                            )
-                            
-                            model = model_result.stdout.strip() if model_result.returncode == 0 else "未知型号"
-                            
-                            # 添加到设备列表
-                            device_info = f"{model} ({device_id})"
-                            self.devices.append((device_id, device_info))
+                            try:
+                                # 获取设备型号
+                                model_result = subprocess.run(
+                                    ["adb", "-s", device_id, "shell", "getprop", "ro.product.model"], 
+                                    capture_output=True, text=True
+                                )
+                                
+                                model = model_result.stdout.strip() if model_result.returncode == 0 else "未知型号"
+                                
+                                # 获取设备序列号
+                                sn_result = subprocess.run(
+                                    ["adb", "-s", device_id, "shell", "getprop", "ro.serialno"], 
+                                    capture_output=True, text=True
+                                )
+                                
+                                sn = sn_result.stdout.strip() if sn_result.returncode == 0 else device_id
+                                
+                                self.devices.append({
+                                    "id": device_id,
+                                    "model": model,
+                                    "sn": sn,
+                                    "display_name": f"{model} ({sn})"
+                                })
+                            except Exception as e:
+                                print(f"获取设备信息出错: {str(e)}")
+                                # 添加基本信息
+                                self.devices.append({
+                                    "id": device_id,
+                                    "model": "未知型号",
+                                    "sn": device_id,
+                                    "display_name": f"设备 ({device_id})"
+                                })
             
-            # 更新下拉菜单
-            self.device_combo['values'] = [info for _, info in self.devices]
+            # 更新设备下拉菜单
+            self.device_combobox['values'] = [d["display_name"] for d in self.devices]
             
-            # 更新状态
+            # 更新设备状态
             if self.devices:
                 self.device_status_var.set(f"检测到 {len(self.devices)} 个设备")
-                # 找到设备状态标签并更新颜色
-                for widget in self.root.winfo_children():
-                    if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
-                        widget.configure(foreground="green")
-                        break
+                # 更新设备状态标签颜色为绿色
+                self.update_device_status_color("green")
                 
                 # 如果之前没有选择设备，自动选择第一个
                 if not self.selected_device:
-                    self.device_combo.current(0)
+                    self.device_combobox.current(0)
                     self.on_device_selected(None)
             else:
                 self.device_status_var.set("未检测到设备")
-                # 找到设备状态标签并更新颜色
-                for widget in self.root.winfo_children():
-                    if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
-                        widget.configure(foreground="red")
-                        break
-                self.selected_device = None
+                # 更新设备状态标签颜色为红色
+                self.update_device_status_color("red")
                 
-                # 不再弹出提示框
-                # messagebox.showwarning("设备未连接", "未检测到已授权的Android设备\n请确保设备已连接并启用USB调试")
+                self.selected_device = None
+                if hasattr(self, 'device_combobox'):
+                    self.device_combobox.set("")  # 清空选择
             
-            self.status_var.set("设备检测完成")
+            self.status_var.set("设备检查完成")
             
         except Exception as e:
-            self.device_status_var.set(f"设备检测出错: {str(e)}")
-            # 找到设备状态标签并更新颜色
-            for widget in self.root.winfo_children():
-                if isinstance(widget, ttk.Label) and widget.cget("textvariable") == str(self.device_status_var):
-                    widget.configure(foreground="red")
-                    break
-            self.status_var.set(f"设备检测出错: {str(e)}")
+            self.device_status_var.set("设备检查出错")
+            # 更新设备状态标签颜色为红色
+            self.update_device_status_color("red")
+            
+            self.status_var.set(f"设备检查出错: {str(e)}")
+            print(f"设备检查出错: {str(e)}")  # 打印到控制台以便调试
     
     def on_device_selected(self, event=None):
         """设备选择事件处理"""
-        selected = self.device_var.get()
-        if selected:
-            self.selected_device = selected
-            self.device_status_var.set(f"已选择设备: {selected}")
-            self.device_status_var.config(foreground="green")
-            self.status_var.set(f"已连接到设备: {selected}")
+        if not self.devices:  # 如果没有设备，直接返回
+            return
+            
+        selected_index = self.device_combobox.current()
+        if selected_index >= 0 and selected_index < len(self.devices):
+            selected_device = self.devices[selected_index]
+            self.selected_device = selected_device["id"]  # 保存设备ID
+            self.status_var.set(f"已连接到设备: {selected_device['display_name']}")
+            self.device_status_var.set(f"已选择设备: {selected_device['display_name']}")
+            # 更新设备状态标签颜色为绿色
+            self.update_device_status_color("green")
+            
+            # 自动创建HAL录音目录
+            if hasattr(self, 'hal_dir_var'):
+                # 在后台线程中创建目录，避免阻塞UI
+                threading.Thread(target=self.auto_create_hal_dir, daemon=True).start()
         else:
             self.selected_device = None
+            self.status_var.set("未选择设备")
             self.device_status_var.set("未选择设备")
-            self.device_status_var.config(foreground="red")
+            # 更新设备状态标签颜色为红色
+            self.update_device_status_color("red")
     
     def get_adb_command(self, command):
         """获取带有设备ID的ADB命令"""
-        if not self.selected_device:
-            return f"adb {command}"
+        if self.selected_device:
+            return f"adb -s {self.selected_device} {command}"
         else:
-            # 从设备信息中提取设备ID
-            device_id = None
-            for d_id, d_info in self.devices:
-                if d_info == self.selected_device:
-                    device_id = d_id
-                    break
-            
-            if device_id:
-                return f"adb -s {device_id} {command}"
-            else:
-                return f"adb {command}"
+            return f"adb {command}"
     
     def check_device_selected(self):
         """检查是否已选择设备"""
@@ -646,7 +661,7 @@ class AudioTestTool:
         left_frame.pack_propagate(False)  # 防止被内容压缩
         
         right_frame = ttk.Frame(frame)
-        right_frame.pack(side="left", fill="both", expand=True)  # 改为left而不是right
+        right_frame.pack(side="left", fill="both", expand=True)
         
         # 左侧 - 属性管理区域
         prop_frame = ttk.LabelFrame(left_frame, text="录音属性管理", padding=5)
@@ -705,7 +720,7 @@ class AudioTestTool:
         dir_path_frame.pack(fill="x", pady=2)
         
         ttk.Label(dir_path_frame, text="目录:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.hal_dir_var = tk.StringVar(value="data/vendor/audiohal")
+        self.hal_dir_var = tk.StringVar(value="data/vendor/audiohal")  # 设置默认值
         dir_entry = ttk.Entry(dir_path_frame, textvariable=self.hal_dir_var, font=("Arial", 9))
         dir_entry.pack(side="left", fill="x", expand=True, padx=2)
         
@@ -733,6 +748,25 @@ class AudioTestTool:
         self.hal_duration_var = tk.StringVar(value="0")
         ttk.Entry(duration_frame, textvariable=self.hal_duration_var, width=5, font=("Arial", 9)).pack(side="left", padx=2)
         ttk.Label(duration_frame, text="(0表示不自动停止)", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 保存路径设置
+        save_path_frame = ttk.Frame(control_frame)
+        save_path_frame.pack(fill="x", pady=2)
+        
+        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        
+        # 设置默认保存路径为当前目录下的hal_dump文件夹
+        default_save_path = os.path.join(os.getcwd(), "hal_dump")
+        if not os.path.exists(default_save_path):
+            os.makedirs(default_save_path, exist_ok=True)
+        
+        self.hal_save_path_var = tk.StringVar(value=default_save_path)
+        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.hal_save_path_var, font=("Arial", 9))
+        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
+        
+        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
+                                      command=self.browse_hal_save_path, width=5, style="Small.TButton")
+        browse_save_button.pack(side="right", padx=2)
         
         # 控制按钮
         button_frame = ttk.Frame(control_frame)
@@ -762,61 +796,21 @@ class AudioTestTool:
         self.hal_start_time_var = tk.StringVar(value="-")
         ttk.Label(time_frame, textvariable=self.hal_start_time_var, font=("Arial", 9)).pack(side="left", padx=2)
         
-        # 右侧 - 下部文件管理区域
-        files_frame = ttk.LabelFrame(right_frame, text="文件管理", padding=5)
-        files_frame.pack(fill="both", expand=True, pady=5)
+        # 右侧 - 下部信息区域
+        info_frame = ttk.LabelFrame(right_frame, text="录音信息", padding=5)
+        info_frame.pack(fill="both", expand=True, pady=5)
         
-        # 本地保存路径
-        save_path_frame = ttk.Frame(files_frame)
-        save_path_frame.pack(fill="x", pady=2)
-        
-        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.hal_save_path_var = tk.StringVar(value="test/hal_recordings")
-        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.hal_save_path_var, font=("Arial", 9))
-        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
-        
-        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
-                                      command=self.browse_hal_save_path, width=5, style="Small.TButton")
-        browse_save_button.pack(side="right", padx=2)
-        
-        # 文件列表
-        file_list_frame = ttk.Frame(files_frame)
-        file_list_frame.pack(fill="both", expand=True, pady=5)
-        
-        # 添加滚动条
-        file_scrollbar = ttk.Scrollbar(file_list_frame)
-        file_scrollbar.pack(side="right", fill="y")
-        
-        # 文件列表框
-        self.hal_files_listbox = tk.Listbox(file_list_frame, selectmode="extended", 
-                                      yscrollcommand=file_scrollbar.set, height=6, font=("Arial", 9))
-        self.hal_files_listbox.pack(side="left", fill="both", expand=True)
-        file_scrollbar.config(command=self.hal_files_listbox.yview)
-        
-        # 文件操作按钮
-        file_button_frame = ttk.Frame(files_frame)
-        file_button_frame.pack(fill="x", pady=2)
-        
-        refresh_files_button = ttk.Button(file_button_frame, text="刷新列表", 
-                                        command=self.refresh_hal_files, width=8, style="Small.TButton")
-        refresh_files_button.pack(side="left", padx=2, pady=2)
-        
-        pull_files_button = ttk.Button(file_button_frame, text="拉取文件", 
-                                 command=self.pull_hal_files, width=8, style="Small.TButton")
-        pull_files_button.pack(side="left", padx=2, pady=2)
-        
-        delete_files_button = ttk.Button(file_button_frame, text="删除文件", 
-                                       command=self.delete_hal_files, width=8, style="Small.TButton")
-        delete_files_button.pack(side="left", padx=2, pady=2)
+        # 信息文本框
+        self.hal_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
+        self.hal_info_text.pack(fill="both", expand=True, pady=2)
+        self.hal_info_text.insert("1.0", "录音信息将显示在这里...\n")
+        self.hal_info_text.config(state="disabled")
         
         # 底部状态显示
         self.hal_status_var = tk.StringVar(value="就绪")
         status_label = ttk.Label(frame, textvariable=self.hal_status_var, font=("Arial", 9))
         status_label.pack(pady=2)
-        
-        # 初始刷新文件列表
-        self.refresh_hal_files()
-
+    
     def setup_custom_hal_tab(self, parent):
         """设置自定义 HAL 录音选项卡"""
         frame = ttk.Frame(parent, padding=10)
@@ -1929,14 +1923,12 @@ class AudioTestTool:
         
         directory = self.hal_dir_var.get().strip()
         if not directory:
-            messagebox.showwarning("警告", "请输入录音目录路径")
+            self.update_info_text("警告: 请输入录音目录路径")
             return
         
         try:
             self.hal_status_var.set(f"正在获取文件列表: {directory}...")
-            
-            # 清空列表框
-            self.hal_files_listbox.delete(0, tk.END)
+            self.update_info_text(f"正在获取文件列表: {directory}...")
             
             # 获取文件列表
             ls_cmd = self.get_adb_command(f"shell ls -la {directory}")
@@ -1945,6 +1937,7 @@ class AudioTestTool:
             if result.returncode != 0:
                 if "No such file or directory" in result.stderr:
                     self.hal_status_var.set(f"目录不存在: {directory}")
+                    self.update_info_text(f"目录不存在: {directory}")
                     if messagebox.askyesno("目录不存在", f"目录 {directory} 不存在，是否创建？"):
                         self.create_hal_dir()
                 else:
@@ -1974,18 +1967,21 @@ class AudioTestTool:
                             except:
                                 size_str = size
                             
-                            # 添加到列表框
-                            self.hal_files_listbox.insert(tk.END, f"{filename} ({size_str}) - {date_str}")
-                            files.append(filename)
+                            files.append(f"{filename} ({size_str}) - {date_str}")
                 
-                # 更新状态
+                # 更新状态和信息
                 if files:
                     self.hal_status_var.set(f"找到 {len(files)} 个录音文件")
+                    self.update_info_text(f"找到 {len(files)} 个录音文件:")
+                    for file_info in files:
+                        self.update_info_text(f"  {file_info}")
                 else:
                     self.hal_status_var.set("未找到录音文件")
+                    self.update_info_text("未找到录音文件")
         
         except Exception as e:
             self.hal_status_var.set(f"刷新文件列表出错: {str(e)}")
+            self.update_info_text(f"刷新文件列表出错: {str(e)}")
             messagebox.showerror("错误", f"刷新文件列表时出错:\n{str(e)}")
 
     def pull_hal_files(self):
@@ -2189,56 +2185,71 @@ class AudioTestTool:
             return
         
         try:
-            # 获取录音类型和时长
-            record_type = self.hal_record_type_var.get()
-            duration = int(self.hal_duration_var.get())
+            # 首先确保录音目录存在
+            directory = self.hal_dir_var.get().strip()
+            if not directory:
+                messagebox.showwarning("警告", "请输入录音目录路径")
+                return
             
-            if duration <= 0:
-                messagebox.showerror("错误", "录音时长必须大于0")
+            # 自动创建录音目录
+            self.ensure_hal_dir(directory)
+            
+            # 获取所有选中的属性
+            enabled_props = []
+            for prop, var in self.hal_props.items():
+                if var.get():
+                    enabled_props.append(prop)
+            
+            if not enabled_props:
+                messagebox.showwarning("警告", "请至少选择一个录音属性")
                 return
             
             # 更新状态
-            self.status_var.set("正在准备 HAL 录音...")
-            self.hal_status_var.set("准备中...")
+            self.hal_status_var.set("正在开始录音...")
+            self.hal_recording_status_var.set("正在开始...")
             
             # 禁用开始按钮，启用停止按钮
             self.start_hal_button.config(state="disabled")
             self.stop_hal_button.config(state="normal")
             
-            # 获取 root 权限
-            subprocess.run(self.get_adb_command("root"), shell=True)
-            time.sleep(1)  # 等待 root 权限生效
+            # 设置所有选中的属性为1
+            for prop in enabled_props:
+                set_cmd = self.get_adb_command(f"shell setprop {prop} 1")
+                result = subprocess.run(set_cmd, shell=True, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise Exception(f"设置属性 {prop} 失败: {result.stderr}")
             
-            # 设置 SELinux 为 permissive 模式
-            subprocess.run(self.get_adb_command("shell setenforce 0"), shell=True)
-            
-            # 根据选择的类型设置属性
-            if record_type == "全部" or record_type == "all":
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.indump 1"), shell=True)
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.vpp.dump 1"), shell=True)
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.outdump 1"), shell=True)
-            elif record_type == "输入":
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.indump 1"), shell=True)
-            elif record_type == "输出":
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.outdump 1"), shell=True)
-            elif record_type == "VPP":
-                subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.vpp.dump 1"), shell=True)
+            # 记录开始时间
+            start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.hal_start_time_var.set(start_time)
             
             # 更新状态
-            self.status_var.set(f"HAL 录音已启动，将在 {duration} 秒后自动停止")
-            self.hal_status_var.set("录音中...")
+            self.hal_status_var.set("录音已开始")
+            self.hal_recording_status_var.set("录音中")
+            self.update_info_text(f"录音已开始，时间: {start_time}")
+            self.update_info_text(f"启用的属性: {', '.join(enabled_props)}")
             
-            # 启动定时器自动停止录音
-            self.hal_timer = threading.Timer(duration, self.stop_hal_recording)
-            self.hal_timer.daemon = True
-            self.hal_timer.start()
+            # 如果设置了自动停止时间，启动定时器
+            try:
+                duration = int(self.hal_duration_var.get())
+                if duration > 0:
+                    self.hal_timer = threading.Timer(duration, self.stop_hal_recording)
+                    self.hal_timer.daemon = True
+                    self.hal_timer.start()
+                    self.update_info_text(f"已设置自动停止，时长: {duration}秒")
+            except (ValueError, TypeError):
+                # 如果输入的不是有效数字，忽略自动停止
+                pass
             
         except Exception as e:
-            self.status_var.set(f"启动 HAL 录音出错: {str(e)}")
-            self.hal_status_var.set("启动失败")
+            self.hal_status_var.set(f"开始录音出错: {str(e)}")
+            self.hal_recording_status_var.set("开始失败")
+            self.update_info_text(f"开始录音出错: {str(e)}")
+            messagebox.showerror("错误", f"开始录音时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
             self.start_hal_button.config(state="normal")
             self.stop_hal_button.config(state="disabled")
-            messagebox.showerror("错误", f"启动 HAL 录音时出错:\n{str(e)}")
 
     def stop_hal_recording(self):
         """停止 HAL 录音"""
@@ -2247,8 +2258,8 @@ class AudioTestTool:
         
         try:
             # 更新状态
-            self.status_var.set("正在停止 HAL 录音...")
-            self.hal_status_var.set("正在停止...")
+            self.hal_status_var.set("正在停止 HAL 录音...")
+            self.hal_recording_status_var.set("正在停止...")
             
             # 取消定时器（如果存在）
             if hasattr(self, 'hal_timer') and self.hal_timer:
@@ -2938,13 +2949,7 @@ class AudioTestTool:
         
         try:
             self.hal_status_var.set(f"正在创建目录: {directory}...")
-            
-            # 获取 root 权限
-            subprocess.run(self.get_adb_command("root"), shell=True)
-            time.sleep(1)  # 等待 root 权限生效
-            
-            # 设置 SELinux 为 permissive 模式
-            subprocess.run(self.get_adb_command("shell setenforce 0"), shell=True)
+            self.update_info_text(f"正在创建目录: {directory}...")
             
             # 创建目录
             mkdir_cmd = self.get_adb_command(f"shell mkdir -p {directory}")
@@ -2960,15 +2965,16 @@ class AudioTestTool:
             if result.returncode != 0:
                 raise Exception(f"设置目录权限失败: {result.stderr}")
             
-            self.hal_status_var.set(f"已成功创建目录: {directory}")
-            messagebox.showinfo("成功", f"已成功创建录音目录:\n{directory}")
+            self.hal_status_var.set(f"目录创建成功: {directory}")
+            self.update_info_text(f"目录创建成功: {directory}")
             
             # 刷新文件列表
             self.refresh_hal_files()
             
         except Exception as e:
             self.hal_status_var.set(f"创建目录出错: {str(e)}")
-            messagebox.showerror("错误", f"创建录音目录时出错:\n{str(e)}")
+            self.update_info_text(f"创建目录出错: {str(e)}")
+            messagebox.showerror("错误", f"创建目录时出错:\n{str(e)}")
 
     def check_hal_dir(self):
         """检查自定义录音目录"""
@@ -3256,7 +3262,7 @@ class AudioTestTool:
             messagebox.showerror("错误", f"启动录音时出错:\n{str(e)}")
 
     def stop_hal_recording(self):
-        """停止HAL录音"""
+        """停止HAL录音并自动拉取文件"""
         if not self.check_device_selected():
             return
         
@@ -3285,9 +3291,6 @@ class AudioTestTool:
             self.start_hal_button.config(state="normal")
             self.stop_hal_button.config(state="disabled")
             
-            # 刷新文件列表
-            self.refresh_hal_files()
-            
             # 记录结束时间
             end_time = time.strftime("%Y-%m-%d %H:%M:%S")
             
@@ -3302,9 +3305,9 @@ class AudioTestTool:
             self.hal_status_var.set(f"录音已停止，持续时间: {duration}")
             self.hal_recording_status_var.set("已停止")
             
-            # 询问是否拉取文件
-            if messagebox.askyesno("录音完成", f"录音已完成，持续时间: {duration}\n\n是否立即拉取录音文件？"):
-                self.pull_hal_files()
+            # 自动拉取文件
+            self.update_info_text(f"录音已停止，持续时间: {duration}\n正在拉取录音文件...")
+            self.auto_pull_hal_files()
             
         except Exception as e:
             self.hal_status_var.set(f"停止录音出错: {str(e)}")
@@ -3314,6 +3317,169 @@ class AudioTestTool:
             # 恢复按钮状态
             self.start_hal_button.config(state="normal")
             self.stop_hal_button.config(state="disabled")
+
+    def auto_pull_hal_files(self):
+        """自动拉取HAL录音文件"""
+        if not self.check_device_selected():
+            return
+        
+        # 获取录音目录
+        directory = self.hal_dir_var.get().strip()
+        if not directory:
+            self.update_info_text("错误: 录音目录未设置")
+            return
+        
+        # 获取本地保存路径
+        base_save_dir = self.hal_save_path_var.get().strip()
+        if not base_save_dir:
+            # 如果未设置保存路径，使用当前目录下的hal_dump文件夹
+            base_save_dir = os.path.join(os.getcwd(), "hal_dump")
+            os.makedirs(base_save_dir, exist_ok=True)
+            self.hal_save_path_var.set(base_save_dir)
+        
+        # 创建带时间戳的子文件夹
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(base_save_dir, f"hal_dump_{timestamp}")
+        
+        try:
+            self.hal_status_var.set("正在拉取录音文件...")
+            
+            # 确保目录存在
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # 获取文件列表
+            ls_cmd = self.get_adb_command(f"shell ls -la {directory}")
+            result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"获取文件列表失败: {result.stderr}")
+            
+            # 解析文件列表
+            lines = result.stdout.strip().split('\n')
+            files_to_pull = []
+            
+            for line in lines:
+                if line.endswith('.pcm') or line.endswith('.raw'):
+                    # 提取文件名
+                    parts = line.split()
+                    if len(parts) >= 8:
+                        filename = parts[-1]
+                        files_to_pull.append(filename)
+            
+            if not files_to_pull:
+                self.update_info_text("未找到录音文件")
+                self.hal_status_var.set("未找到录音文件")
+                return
+            
+            # 拉取文件
+            success_count = 0
+            self.update_info_text(f"找到 {len(files_to_pull)} 个录音文件，开始拉取...")
+            
+            for filename in files_to_pull:
+                self.update_info_text(f"正在拉取: {filename}")
+                
+                # 拉取文件
+                pull_cmd = self.get_adb_command(f"pull {directory}/{filename} \"{os.path.join(save_dir, filename)}\"")
+                result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    success_count += 1
+                else:
+                    self.update_info_text(f"拉取失败: {filename}")
+            
+            if success_count > 0:
+                self.hal_status_var.set(f"成功拉取 {success_count} 个录音文件到 {save_dir}")
+                self.update_info_text(f"成功拉取 {success_count} 个录音文件到:\n{save_dir}")
+                
+                # 打开保存目录
+                if platform.system() == "Windows":
+                    os.startfile(save_dir)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.run(["open", save_dir])
+                else:  # Linux
+                    subprocess.run(["xdg-open", save_dir])
+            else:
+                self.hal_status_var.set("未成功拉取任何文件")
+                self.update_info_text("未成功拉取任何文件")
+        
+        except Exception as e:
+            self.hal_status_var.set(f"拉取文件出错: {str(e)}")
+            self.update_info_text(f"拉取文件出错: {str(e)}")
+
+    def update_info_text(self, message):
+        """更新信息文本框"""
+        self.hal_info_text.config(state="normal")
+        self.hal_info_text.insert("end", message + "\n")
+        self.hal_info_text.see("end")  # 滚动到底部
+        self.hal_info_text.config(state="disabled")
+
+    def update_device_status_color(self, color):
+        """更新设备状态标签的颜色"""
+        # 查找设备状态标签并更新颜色
+        for widget in self.root.winfo_children():
+            if isinstance(widget, ttk.Label) and hasattr(widget, 'cget') and widget.cget("textvariable") == str(self.device_status_var):
+                widget.configure(foreground=color)
+                return
+
+    def auto_create_hal_dir(self):
+        """自动创建HAL录音目录"""
+        try:
+            directory = "data/vendor/audiohal"
+            
+            # 检查目录是否存在
+            check_cmd = self.get_adb_command(f"shell ls -la {directory}")
+            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+            
+            # 如果目录不存在，则创建
+            if result.returncode != 0 or "No such file or directory" in result.stderr:
+                # 创建目录
+                mkdir_cmd = self.get_adb_command(f"shell mkdir -p {directory}")
+                subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True)
+                
+                # 设置权限
+                chmod_cmd = self.get_adb_command(f"shell chmod 777 {directory}")
+                subprocess.run(chmod_cmd, shell=True, capture_output=True, text=True)
+                
+                if hasattr(self, 'hal_status_var') and hasattr(self, 'update_info_text'):
+                    self.hal_status_var.set(f"已自动创建录音目录: {directory}")
+                    self.update_info_text(f"已自动创建录音目录: {directory}")
+        except Exception as e:
+            print(f"自动创建HAL录音目录出错: {str(e)}")
+
+    def ensure_hal_dir(self, directory):
+        """确保HAL录音目录存在"""
+        try:
+            # 检查目录是否存在
+            check_cmd = self.get_adb_command(f"shell ls -la {directory}")
+            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+            
+            # 如果目录不存在，则创建
+            if result.returncode != 0 or "No such file or directory" in result.stderr:
+                self.update_info_text(f"目录 {directory} 不存在，正在创建...")
+                
+                # 创建目录
+                mkdir_cmd = self.get_adb_command(f"shell mkdir -p {directory}")
+                mkdir_result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True)
+                
+                if mkdir_result.returncode != 0:
+                    raise Exception(f"创建目录失败: {mkdir_result.stderr}")
+                
+                # 设置权限
+                chmod_cmd = self.get_adb_command(f"shell chmod 777 {directory}")
+                chmod_result = subprocess.run(chmod_cmd, shell=True, capture_output=True, text=True)
+                
+                if chmod_result.returncode != 0:
+                    raise Exception(f"设置目录权限失败: {chmod_result.stderr}")
+                
+                self.update_info_text(f"已成功创建目录: {directory}")
+            else:
+                self.update_info_text(f"目录 {directory} 已存在")
+            
+            return True
+        except Exception as e:
+            self.update_info_text(f"确保目录存在时出错: {str(e)}")
+            messagebox.showerror("错误", f"确保录音目录存在时出错:\n{str(e)}")
+            return False
 
 if __name__ == "__main__":
     root = tk.Tk()
