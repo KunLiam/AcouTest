@@ -505,63 +505,71 @@ class TestOperations:
             self.stop_hal_button.config(state="disabled")
     
     def take_screenshot(self):
-        """截取设备屏幕"""
+        """截取屏幕截图 - 修复递归调用问题"""
         if not self.check_device_selected():
             return
     
         try:
-            self.screenshot_status_var.set("正在截取屏幕...")
-            self.update_screenshot_info("正在截取屏幕...")
+            # 更新状态
+            if hasattr(self, 'screenshot_status_var'):
+                self.screenshot_status_var.set("正在截取屏幕...")
             
-            # 获取时间戳
+            # 获取保存路径
+            save_dir = os.path.join(os.getcwd(), "screenshots")
+            if hasattr(self, 'screenshot_save_path_var'):
+                save_dir = self.screenshot_save_path_var.get().strip()
+                if not save_dir:
+                    save_dir = os.path.join(os.getcwd(), "screenshots")
+            
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+            
+            # 生成文件名
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            
-            # 确保保存目录存在
-            save_dir = self.screenshot_save_path_var.get().strip()
-            if not save_dir:
-                save_dir = os.path.join(os.getcwd(), "screenshots")
-            
-            os.makedirs(save_dir, exist_ok=True)
-            
-            # 截图文件名
             filename = f"screenshot_{timestamp}.png"
-            device_path = f"/sdcard/{filename}"
             local_path = os.path.join(save_dir, filename)
             
-            # 在设备上截图
-            screencap_cmd = self.get_adb_command(f"shell screencap -p {device_path}")
-            result = subprocess.run(screencap_cmd, shell=True, capture_output=True, text=True)
+            # 执行截图命令
+            cmd = self.get_adb_command("exec-out screencap -p")
+            result = subprocess.run(cmd, shell=True, capture_output=True)
             
             if result.returncode != 0:
-                raise Exception(f"截图失败: {result.stderr}")
+                raise Exception(f"截图命令执行失败")
             
-            # 拉取截图到本地
-            pull_cmd = self.get_adb_command(f"pull {device_path} \"{local_path}\"")
-            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            # 保存截图数据
+            with open(local_path, 'wb') as f:
+                f.write(result.stdout)
             
-            if result.returncode != 0:
-                raise Exception(f"拉取截图失败: {result.stderr}")
-            
-            # 删除设备上的临时文件
-            rm_cmd = self.get_adb_command(f"shell rm {device_path}")
-            subprocess.run(rm_cmd, shell=True)
-            
-            self.screenshot_status_var.set(f"截图已保存: {filename}")
-            self.update_screenshot_info(f"截图已保存: {local_path}")
-            
-            # 打开截图文件夹
-            self.open_screenshot_folder()
+            # 检查文件是否保存成功
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                success_msg = f"截图成功保存: {filename}"
+                if hasattr(self, 'screenshot_status_var'):
+                    self.screenshot_status_var.set("截图完成")
+                if hasattr(self, 'update_screenshot_info'):
+                    self.update_screenshot_info(success_msg)
+                    self.update_screenshot_info(f"文件路径: {local_path}")
+                
+                # 询问是否打开文件夹
+                if messagebox.askyesno("截图完成", f"截图已保存为:\n{local_path}\n\n是否打开文件夹？"):
+                    self.open_screenshot_folder()
+            else:
+                raise Exception("截图文件保存失败或文件为空")
             
         except Exception as e:
-            self.screenshot_status_var.set(f"截图出错: {str(e)}")
-            self.update_screenshot_info(f"截图出错: {str(e)}")
+            error_msg = f"截图出错: {str(e)}"
+            if hasattr(self, 'screenshot_status_var'):
+                self.screenshot_status_var.set(error_msg)
+            if hasattr(self, 'update_screenshot_info'):
+                self.update_screenshot_info(error_msg)
             messagebox.showerror("错误", f"截图时出错:\n{str(e)}")
 
     def open_screenshot_folder(self):
         """打开截图保存文件夹"""
-        save_dir = self.screenshot_save_path_var.get().strip()
-        if not save_dir:
-            save_dir = os.path.join(os.getcwd(), "screenshots")
+        save_dir = os.path.join(os.getcwd(), "screenshots")
+        if hasattr(self, 'screenshot_save_path_var'):
+            save_dir = self.screenshot_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.path.join(os.getcwd(), "screenshots")
         
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
@@ -574,9 +582,12 @@ class TestOperations:
             else:  # Linux
                 subprocess.run(["xdg-open", save_dir])
         except Exception as e:
-            self.screenshot_status_var.set(f"打开文件夹出错: {str(e)}")
-            self.update_screenshot_info(f"打开文件夹出错: {str(e)}")
-            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")   
+            error_msg = f"打开文件夹出错: {str(e)}"
+            if hasattr(self, 'screenshot_status_var'):
+                self.screenshot_status_var.set(error_msg)
+            if hasattr(self, 'update_screenshot_info'):
+                self.update_screenshot_info(error_msg)
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
 
     def update_sweep_file_options(self):
         """更新扫频文件选项"""
@@ -1137,7 +1148,7 @@ class TestOperations:
     def show_debug_info(self):
         """显示调试信息对话框"""
         # 收集调试信息
-        debug_info = "音频测试工具调试信息\n"
+        debug_info = "声测大师(AcouTest)调试信息\n"
         debug_info += "=" * 40 + "\n\n"
         
         # 系统信息
@@ -2930,14 +2941,16 @@ class TestOperations:
         self.update_logcat_status(f"已移除属性: {prop_name}")
 
     def enable_logcat_debug(self):
-        """放开日志打印"""
-        if not self.check_device_selected():
+        """启用logcat调试"""
+        # 直接检查设备，避免递归调用
+        if not self.device_var.get():
+            messagebox.showwarning("警告", "请先选择设备")
             return
         
         try:
             self.update_logcat_status("正在放开日志打印...")
             
-            # 设置属性
+            # 修复属性访问问题
             for prop in self.logcat_props_vars:
                 if prop["var"].get():
                     # 查找对应的调试值
@@ -2947,7 +2960,13 @@ class TestOperations:
                             debug_value = default_prop["debug_value"]
                             break
                     
-                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {debug_value}")
+                    # 直接构建adb命令，避免递归调用
+                    device_id = self.device_var.get()
+                    if device_id:
+                        cmd = f"adb -s {device_id} shell setprop {prop['name']} {debug_value}"
+                    else:
+                        cmd = f"adb shell setprop {prop['name']} {debug_value}"
+                    
                     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                     
                     if result.returncode != 0:
@@ -2966,89 +2985,101 @@ class TestOperations:
             messagebox.showerror("错误", f"放开日志打印时出错:\n{str(e)}")
 
     def disable_logcat_debug(self):
-        """停止日志打印"""
-        if not self.check_device_selected():
+        """禁用logcat调试"""
+        # 直接检查设备，避免递归调用
+        if not self.device_var.get():
+            messagebox.showwarning("警告", "请先选择设备")
             return
         
         try:
-            self.update_logcat_status("正在停止日志打印...")
+            self.update_logcat_status("正在关闭日志打印...")
             
-            # 恢复属性
+            # 恢复属性默认值
             for prop in self.logcat_props_vars:
                 if prop["var"].get():
-                    # 查找对应的正常值
-                    normal_value = "0"  # 默认值
+                    # 查找对应的默认值
+                    default_value = "0"  # 默认值
                     for default_prop in self.logcat_props:
                         if default_prop["name"] == prop["name"]:
-                            normal_value = default_prop["normal_value"]
+                            default_value = default_prop["default_value"]
                             break
                     
-                    cmd = self.get_adb_command(f"shell setprop {prop['name']} {normal_value}")
+                    # 直接构建adb命令
+                    device_id = self.device_var.get()
+                    if device_id:
+                        cmd = f"adb -s {device_id} shell setprop {prop['name']} {default_value}"
+                    else:
+                        cmd = f"adb shell setprop {prop['name']} {default_value}"
+                    
                     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                     
                     if result.returncode != 0:
                         raise Exception(f"恢复属性 {prop['name']} 失败: {result.stderr}")
                     
-                    self.update_logcat_status(f"已恢复: {prop['name']}={normal_value}")
+                    self.update_logcat_status(f"已恢复: {prop['name']}={default_value}")
             
             # 更新按钮状态
             self.enable_debug_button.config(state="normal")
             self.disable_debug_button.config(state="disabled")
             
-            self.update_logcat_status("日志打印已停止")
+            self.update_logcat_status("日志打印已关闭")
             
         except Exception as e:
-            self.update_logcat_status(f"停止日志打印出错: {str(e)}")
-            messagebox.showerror("错误", f"停止日志打印时出错:\n{str(e)}")
+            self.update_logcat_status(f"关闭日志打印出错: {str(e)}")
+            messagebox.showerror("错误", f"关闭日志打印时出错:\n{str(e)}")
 
     def start_logcat_capture(self):
-        """开始抓取日志"""
-        if not self.check_device_selected():
+        """开始抓取logcat日志"""
+        # 直接检查设备，避免递归调用
+        if not self.device_var.get():
+            messagebox.showwarning("警告", "请先选择设备")
             return
-    
+        
         try:
             self.update_logcat_status("正在开始抓取日志...")
             
-            # 确保保存目录存在
+            # 获取保存路径
             save_dir = self.logcat_save_path_var.get().strip()
             if not save_dir:
-                save_dir = os.path.join(os.getcwd(), "logcat")
+                save_dir = os.path.join(os.getcwd(), "test")
             
-            os.makedirs(save_dir, exist_ok=True)
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
             
-            # 生成日志文件名
+            # 生成文件名
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            self.log_file_path = os.path.join(save_dir, f"audio_logcat_{timestamp}.txt")
+            filename = f"logcat_{timestamp}.txt"
+            self.logcat_file_path = os.path.join(save_dir, filename)
             
-            # 开始抓取日志
-            filter_str = self.logcat_filter_var.get().strip()
-            if not filter_str:
-                filter_str = "*:V"
+            # 构建logcat命令
+            device_id = self.device_var.get()
+            if device_id:
+                cmd = f"adb -s {device_id} logcat"
+            else:
+                cmd = "adb logcat"
             
-            logcat_cmd = self.get_adb_command(f"logcat -v threadtime {filter_str}")
+            # 启动logcat进程
+            self.logcat_process = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
             
-            # 打开日志文件
-            self.logcat_file = open(self.log_file_path, "w", encoding="utf-8")
+            # 启动文件写入线程
+            self.logcat_running = True
+            self.logcat_thread = threading.Thread(target=self._logcat_capture_thread)
+            self.logcat_thread.daemon = True
+            self.logcat_thread.start()
             
-            # 启动日志进程
-            self.logcat_process = subprocess.Popen(logcat_cmd, shell=True, stdout=self.logcat_file, stderr=subprocess.PIPE, text=True)
+            # 更新UI状态
+            self.start_logcat_button.config(state="disabled")
+            self.stop_logcat_button.config(state="normal")
             
-            # 更新按钮状态
-            self.start_capture_button.config(state="disabled")
-            self.stop_capture_button.config(state="normal")
-            
-            self.update_logcat_status(f"正在抓取日志到: {self.log_file_path}")
-            
-            # 检查是否需要自动停止
-            auto_stop_time = self.logcat_auto_stop_var.get().strip()
-            if auto_stop_time and auto_stop_time != "0":
-                try:
-                    seconds = int(auto_stop_time)
-                    if seconds > 0:
-                        self.update_logcat_status(f"将在 {seconds} 秒后自动停止抓取")
-                        self.root.after(seconds * 1000, self.stop_logcat_capture)
-                except ValueError:
-                    self.update_logcat_status("自动停止时间格式无效，将不会自动停止")
+            self.update_logcat_status(f"正在抓取日志到: {filename}")
             
         except Exception as e:
             self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
@@ -3243,20 +3274,17 @@ class TestOperations:
 
     def play_local_audio(self):
         """播放本地音频文件"""
-        if not self.local_audio_file:
-            messagebox.showerror("错误", "请先选择音频/视频文件")
+        # 直接检查设备，避免递归调用
+        if not self.device_var.get():
+            messagebox.showwarning("警告", "请先选择设备")
             return
         
-        if not os.path.exists(self.local_audio_file):
-            messagebox.showerror("错误", "所选文件不存在")
+        if not hasattr(self, 'local_audio_file') or not os.path.exists(self.local_audio_file):
+            messagebox.showerror("错误", "请先选择音频文件")
             return
         
         # 获取播放方式
         playback_mode = self.playback_mode_var.get()
-        
-        # 如果选择设备播放，检查设备是否已选择
-        if playback_mode == "device" and not self.check_device_selected():
-            return
         
         try:
             # 停止当前播放
@@ -3268,89 +3296,52 @@ class TestOperations:
             
             # 记录调试信息
             self.debug_info = f"文件: {self.local_audio_file}\n类型: {ext}\n播放方式: {playback_mode}"
-            print(self.debug_info)  # 添加调试输出
+            print(self.debug_info)
             
             # 通过Android设备播放
             if playback_mode == "device":
                 self.playback_status_var.set("正在准备通过Android设备播放...")
                 
-                # 创建专用目录
-                subprocess.run(self.get_adb_command("shell mkdir -p /sdcard/HPlayerFiles"), shell=True)
+                # 构建adb命令
+                device_id = self.device_var.get()
+                if device_id:
+                    mkdir_cmd = f"adb -s {device_id} shell mkdir -p /sdcard/HPlayerFiles"
+                else:
+                    mkdir_cmd = "adb shell mkdir -p /sdcard/HPlayerFiles"
                 
-                # 推送文件到设备的专用目录
+                subprocess.run(mkdir_cmd, shell=True)
+                
+                # 推送文件到设备
                 self.status_var.set("正在推送文件到Android设备...")
                 file_basename = os.path.basename(self.local_audio_file)
                 remote_path = f"/sdcard/HPlayerFiles/{file_basename}"
-                push_cmd = self.get_adb_command(f"push \"{self.local_audio_file}\" \"{remote_path}\"")
                 
-                # 执行推送命令
+                if device_id:
+                    push_cmd = f"adb -s {device_id} push \"{self.local_audio_file}\" \"{remote_path}\""
+                else:
+                    push_cmd = f"adb push \"{self.local_audio_file}\" \"{remote_path}\""
+                
                 result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
                 if "error" in result.stderr.lower():
                     raise Exception(f"推送文件失败: {result.stderr}")
                 
-                # 确保媒体库更新
-                self.status_var.set("正在更新媒体库...")
-                scan_cmd = self.get_adb_command(f"shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote_path}")
-                subprocess.run(scan_cmd, shell=True)
-                
-                # 等待媒体扫描完成
-                time.sleep(2)
-                
-                # 尝试直接播放文件
-                self.status_var.set("正在尝试播放文件...")
-                
-                if ext in ['.mp3', '.wav', '.ogg', '.flac']:
-                    # 音频文件
-                    play_cmd = self.get_adb_command(f"shell am start -a android.intent.action.VIEW -d file://{remote_path} -t audio/*")
-                    subprocess.run(play_cmd, shell=True)
-                elif ext in ['.mp4', '.avi', '.mkv', '.mov']:
-                    # 视频文件
-                    play_cmd = self.get_adb_command(f"shell am start -a android.intent.action.VIEW -d file://{remote_path} -t video/*")
-                    subprocess.run(play_cmd, shell=True)
+                # 播放文件
+                if device_id:
+                    play_cmd = f"adb -s {device_id} shell am start -a android.intent.action.VIEW -d file://{remote_path}"
                 else:
-                    # 其他文件，尝试通用方式打开
-                    play_cmd = self.get_adb_command(f"shell am start -a android.intent.action.VIEW -d file://{remote_path}")
-                    subprocess.run(play_cmd, shell=True)
+                    play_cmd = f"adb shell am start -a android.intent.action.VIEW -d file://{remote_path}"
+                
+                subprocess.run(play_cmd, shell=True)
                 
                 self.playback_status_var.set(f"已在设备上播放: {file_basename}")
-                self.status_var.set("文件正在设备上播放")
             
-            # 在本地电脑播放
+            # 本地播放
             else:
-                # 根据文件类型选择播放方式
-                if ext in ['.mp4', '.avi', '.mkv', '.mov', '.wmv']:
-                    # 视频文件使用系统默认播放器
-                    self.playback_status_var.set("使用系统播放器播放视频文件...")
-                    os.startfile(self.local_audio_file)
-                    self.status_var.set(f"已启动系统播放器播放: {os.path.basename(self.local_audio_file)}")
-                    return
-                
-                # 音频文件使用pygame播放
-                try:
-                    # 设置音量
-                    pygame.mixer.music.set_volume(self.volume_var.get())
-                    
-                    # 加载并播放音频
-                    pygame.mixer.music.load(self.local_audio_file)
-                    pygame.mixer.music.play()
-                    
-                    self.playback_status_var.set("正在本地播放...")
-                    self.status_var.set(f"正在播放: {os.path.basename(self.local_audio_file)}")
-                    
-                    # 启动线程监控播放状态
-                    threading.Thread(target=self._monitor_playback, daemon=True).start()
-                    
-                except Exception as e:
-                    # pygame播放失败，尝试使用系统默认播放器
-                    self.debug_info += f"\nPygame错误: {str(e)}"
-                    self.playback_status_var.set("使用系统播放器播放...")
-                    os.startfile(self.local_audio_file)
-                    self.status_var.set(f"已启动系统播放器播放: {os.path.basename(self.local_audio_file)}")
+                self._start_local_playback()
             
         except Exception as e:
-            self.debug_info += f"\n错误: {str(e)}"
-            self.playback_status_var.set("播放出错")
-            messagebox.showerror("错误", f"播放音频时出错:\n{str(e)}")
+            self.status_var.set(f"播放出错: {str(e)}")
+            messagebox.showerror("错误", f"播放时出错:\n{str(e)}")
 
     def add_prop_to_ui(self, prop, value="1"):
         """将新的录音属性添加到UI，格式为 prop value"""
@@ -3377,59 +3368,56 @@ class TestOperations:
         cb.pack(side="left", padx=2, fill="x", expand=True)
 
     def adapt_remote_controller(self):
-        """重新适配设备的遥控器"""
+        """重新适配设备的遥控器 - 修复功能失效问题"""
         if not self.check_device_selected():
             return
         
         try:
-            self.status_var.set("正在适配遥控器...")
+            # 更新状态
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set("正在适配遥控器...")
             
-            # 显示确认对话框
-            if not messagebox.askyesno("确认", "将开始适配遥控器，请确保遥控器电池已装好并处于待配对状态。\n\n继续吗？"):
-                self.status_var.set("已取消适配遥控器")
-                return
+            # 直接执行遥控器适配命令
+            pairing_cmd = self.get_adb_command("shell am broadcast -a com.nes.intent.action.NES_RESET_LONGPRESS")
+            result = subprocess.run(pairing_cmd, shell=True, capture_output=True, text=True)
             
-            # 执行遥控器适配命令
-            self.update_sweep_info("开始适配遥控器...")
+            if result.returncode != 0:
+                raise Exception(f"适配命令执行失败: {result.stderr}")
             
-            # 方法1: 启动系统遥控器设置界面
-            settings_cmd = self.get_adb_command("shell am start -n com.android.tv.settings/.accessories.AddAccessoryActivity")
-            subprocess.run(settings_cmd, shell=True)
-            
-            # 方法2: 直接发送广播触发蓝牙搜索
-            broadcast_cmd = self.get_adb_command("shell am broadcast -a android.bluetooth.adapter.action.REQUEST_DISCOVERABLE")
-            subprocess.run(broadcast_cmd, shell=True)
-            
-            # 方法3: 重启蓝牙服务
-            restart_bt_cmd = self.get_adb_command("shell svc bluetooth disable && sleep 2 && svc bluetooth enable")
-            subprocess.run(restart_bt_cmd, shell=True)
-            
-            self.status_var.set("遥控器适配已启动，请按照设备屏幕上的指示操作")
-            messagebox.showinfo("适配遥控器", "遥控器适配模式已启动！\n\n请按照设备屏幕上的指示进行操作。\n\n通常需要长按遥控器上的确认键或配对按钮数秒钟。")
+            # 简单更新状态
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set("遥控器适配已启动")
             
         except Exception as e:
-            self.status_var.set(f"适配遥控器失败: {str(e)}")
+            error_msg = f"适配遥控器失败: {str(e)}"
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(error_msg)
             messagebox.showerror("错误", f"适配遥控器时出错:\n{str(e)}")
 
     def send_keycode(self, keycode):
-        """发送按键代码到设备"""
+        """发送遥控器按键 - 修复功能失效问题"""
         if not self.check_device_selected():
             return
         
         try:
-            self.remote_status_var.set(f"正在发送按键: {keycode}")
+            # 更新状态
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(f"正在发送按键: {keycode}")
             
-            # 执行发送按键命令
-            cmd = self.get_adb_command(f"shell input keyevent {keycode}")
+            # 发送按键命令
+            cmd = self.get_adb_command(f"shell input keyevent KEYCODE_{keycode}")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
                 raise Exception(f"发送按键失败: {result.stderr}")
             
-            self.remote_status_var.set(f"已发送按键: {keycode}")
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(f"已发送按键: {keycode}")
             
         except Exception as e:
-            self.remote_status_var.set(f"发送按键失败: {str(e)}")
+            error_msg = f"发送按键出错: {str(e)}"
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(error_msg)
             messagebox.showerror("错误", f"发送按键时出错:\n{str(e)}")
 
     def send_custom_keycode(self):

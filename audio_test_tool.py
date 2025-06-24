@@ -17,9 +17,47 @@ from test_operations import TestOperations
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
         self.root = root
-        self.root.title("音频调试小助手V1.5")
-        self.root.geometry("750x650")  # 增加宽度从650到750
+        self.root.title("声测大师(AcouTest)V1.6")
+        self.root.geometry("750x650")
         self.root.resizable(False, False)
+        
+        # 设置应用图标/logo - 更强健的版本
+        try:
+            # 尝试多种可能的路径
+            possible_paths = [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(sys._MEIPASS, "logo", "AcouTest.png") if hasattr(sys, "_MEIPASS") else None
+            ]
+            
+            logo_loaded = False
+            for path in possible_paths:
+                if path and os.path.exists(path):
+                    print(f"找到logo: {path}")
+                    try:
+                        icon_image = tk.PhotoImage(file=path)
+                        self.root.tk.call('wm', 'iconphoto', self.root._w, icon_image)
+                        print(f"成功加载logo: {path}")
+                        logo_loaded = True
+                        break
+                    except Exception as e:
+                        print(f"加载 {path} 失败: {e}")
+            
+            if not logo_loaded:
+                print("无法加载任何logo文件")
+        except Exception as e:
+            print(f"设置Logo时出错: {str(e)}")
+        
+        # 在Windows系统上使用.ico文件
+        if platform.system() == "Windows":
+            try:
+                ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "AcouTest.ico")
+                if os.path.exists(ico_path):
+                    self.root.iconbitmap(ico_path)
+                elif os.path.exists("logo/AcouTest.ico"):
+                    self.root.iconbitmap("logo/AcouTest.ico")
+            except Exception as e:
+                print(f"设置Windows图标出错: {str(e)}")
         
         # 设置样式
         self.style = ttk.Style()
@@ -62,6 +100,17 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         # 检查ADB设备
         self.refresh_devices()
         
+        # 在__init__方法的最后
+        try:
+            # 检查打包后的文件结构
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            print("基础目录:", base_dir)
+            print("目录内容:", os.listdir(base_dir))
+            if os.path.exists(os.path.join(base_dir, "logo")):
+                print("Logo目录内容:", os.listdir(os.path.join(base_dir, "logo")))
+        except Exception as e:
+            print(f"检查目录结构时出错: {str(e)}")
+        
     def ensure_directories(self):
         """确保必要的目录结构存在"""
         # 创建测试结果目录
@@ -78,7 +127,7 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         header_frame.pack(fill="x", padx=20, pady=10)
         
         # 左侧标题
-        header = ttk.Label(header_frame, text="音频调试工具", style="Header.TLabel")
+        header = ttk.Label(header_frame, text="声测大师(AcouTest)", style="Header.TLabel")
         header.pack(side="left", pady=10)
         
         # 右侧设备选择
@@ -104,92 +153,22 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                                   command=self.show_network_connect_dialog)
         connect_button.pack(side="left", padx=5)
         
+        # 添加ADB调试按钮
+        debug_button = ttk.Button(device_frame, text="调试ADB", style="Refresh.TButton", 
+                                command=self.debug_adb_connection)
+        debug_button.pack(side="left", padx=5)
+        
         # 设备状态标签
         device_status = ttk.Label(self.root, textvariable=self.device_status_var, 
                                 foreground="red", anchor="center")
         device_status.pack(fill="x", padx=20)
         
-        # 创建主框架
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        # 主内容区域
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill="both", expand=True, padx=20, pady=10)
         
-        # 创建选项卡
-        self.tab_control = ttk.Notebook(main_frame)
-        
-        # Loopback和Ref通道测试选项卡 (原10通道测试)
-        loopback_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(loopback_tab, text="Loopback和Ref测试")
-        
-        # 麦克风测试选项卡
-        mic_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(mic_tab, text="麦克风测试")
-        
-        # 多声道测试选项卡
-        multichannel_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(multichannel_tab, text="多声道测试")
-        
-        # 本地播放选项卡
-        local_playback_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(local_playback_tab, text="本地播放")
-        
-        # mic扫频测试选项卡
-        sweep_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(sweep_tab, text="mic扫频测试")
-        
-        # 喇叭测试选项卡
-        speaker_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(speaker_tab, text="喇叭测试")
-        
-        # HAL 录音选项卡
-        hal_recording_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(hal_recording_tab, text="HAL 录音")
-        
-        # Logcat选项卡
-        logcat_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(logcat_tab, text="Logcat")
-        
-        # 截图选项卡
-        screenshot_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(screenshot_tab, text="截图")
-        
-        # 在其他选项卡添加之后，添加雷达检查选项卡
-        radar_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(radar_tab, text="雷达检查")
-        self.setup_radar_tab(radar_tab)
-        
-        # 在其他选项卡添加之后，添加遥控器选项卡
-        remote_tab = ttk.Frame(self.tab_control)
-        self.tab_control.add(remote_tab, text="遥控器")
-        self.setup_remote_tab(remote_tab)
-        
-        self.tab_control.pack(expand=1, fill="both")
-        
-        # Loopback和Ref通道测试内容
-        self.setup_loopback_tab(loopback_tab)
-        
-        # 麦克风测试内容
-        self.setup_mic_tab(mic_tab)
-        
-        # 多声道测试内容
-        self.setup_multichannel_tab(multichannel_tab)
-        
-        # 本地播放内容
-        self.setup_local_playback_tab(local_playback_tab)
-        
-        # mic扫频测试内容
-        self.setup_sweep_tab(sweep_tab)
-        
-        # 喇叭测试内容
-        self.setup_speaker_tab(speaker_tab)
-        
-        # HAL 录音内容
-        self.setup_hal_recording_tab(hal_recording_tab)
-        
-        # Logcat内容
-        self.setup_logcat_tab(logcat_tab)
-        
-        # 截图内容
-        self.setup_screenshot_tab(screenshot_tab)
+        # 使用改进的分类标签页设计
+        self.create_main_ui(main_container)
         
         # 状态栏
         status_bar = ttk.Frame(self.root)
@@ -198,5 +177,5 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         status_label = ttk.Label(status_bar, textvariable=self.status_var, font=("Arial", 9))
         status_label.pack(side="left")
         
-        version_label = ttk.Label(status_bar, text="V1.5", font=("Arial", 9))
-        version_label.pack(side="right") 
+        version_label = ttk.Label(status_bar, text="V1.6", font=("Arial", 9))
+        version_label.pack(side="right")

@@ -3,7 +3,7 @@ import threading
 import time
 import platform
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox
 
 class DeviceOperations:
     def __init__(self, parent):
@@ -12,61 +12,97 @@ class DeviceOperations:
     def refresh_devices(self):
         """刷新设备列表"""
         try:
-            # 使用新方法执行ADB命令
-            result = self.execute_adb_command("devices")
+            self.device_status_var.set("正在检测设备...")
             
-            if result and result.returncode == 0:
+            # 检查ADB是否可用
+            try:
+                result = subprocess.run("adb version", shell=True, capture_output=True, text=True, timeout=5)
+                if result.returncode != 0:
+                    self.device_status_var.set("ADB不可用，请检查ADB环境")
+                    self.devices = []
+                    self.device_combobox['values'] = []
+                    return
+            except subprocess.TimeoutExpired:
+                self.device_status_var.set("ADB命令超时")
+                return
+            except Exception as e:
+                self.device_status_var.set(f"ADB检查失败: {str(e)}")
+                return
+            
+            # 获取设备列表
+            try:
+                result = subprocess.run("adb devices", shell=True, capture_output=True, text=True, timeout=10)
+                if result.returncode != 0:
+                    self.device_status_var.set("获取设备列表失败")
+                    return
+                
                 # 解析设备列表
                 lines = result.stdout.strip().split('\n')
-                self.devices = []
+                devices = []
                 
                 for line in lines[1:]:  # 跳过第一行 "List of devices attached"
-                    if line.strip():
-                        parts = line.split('\t')
+                    if line.strip() and '\t' in line:
+                        parts = line.strip().split('\t')
                         if len(parts) >= 2:
-                            device_id = parts[0].strip()
-                            self.devices.append(device_id)
+                            device_id = parts[0]
+                            status = parts[1]
+                            if status == "device":  # 只添加已连接的设备
+                                devices.append(device_id)
                 
-                # 更新设备下拉菜单
-                self.update_device_dropdown()
+                self.devices = devices
                 
-                # 更新设备状态
-                if self.devices:
-                    self.device_status_var.set(f"检测到 {len(self.devices)} 个设备")
+                if devices:
+                    self.device_combobox['values'] = devices
+                    if not self.device_var.get() or self.device_var.get() not in devices:
+                        self.device_var.set(devices[0])  # 自动选择第一个设备
+                    self.device_status_var.set(f"已检测到 {len(devices)} 个设备")
+                    self.update_device_status_color("green")
                 else:
+                    self.device_combobox['values'] = []
+                    self.device_var.set("")
                     self.device_status_var.set("未检测到设备")
-            else:
-                self.device_status_var.set("检查设备失败")
-                self.devices = []
-                self.update_device_dropdown()
+                    self.update_device_status_color("red")
+                    
+            except subprocess.TimeoutExpired:
+                self.device_status_var.set("设备检测超时")
+                self.update_device_status_color("red")
+            except Exception as e:
+                self.device_status_var.set(f"设备检测失败: {str(e)}")
+                self.update_device_status_color("red")
+                
         except Exception as e:
-            self.device_status_var.set(f"检查设备出错: {str(e)}")
-            self.devices = []
-            self.update_device_dropdown()
+            self.device_status_var.set(f"刷新设备出错: {str(e)}")
+            self.update_device_status_color("red")
     
     def on_device_selected(self, event=None):
-        """设备选择事件处理"""
-        if not self.devices:  # 如果没有设备，直接返回
-            return
+        """当设备被选择时的回调函数"""
+        selected_device = self.device_var.get()
+        
+        if selected_device and selected_device != "未连接设备":
+            # 解析设备信息
+            if "\t" in selected_device:
+                device_id = selected_device.split("\t")[0]
+            else:
+                device_id = selected_device
             
-        selected_index = self.device_combobox.current()
-        if selected_index >= 0 and selected_index < len(self.devices):
-            self.selected_device = self.devices[selected_index]  # 直接使用设备ID
-            self.status_var.set(f"已连接到设备: {self.selected_device}")
-            self.device_status_var.set(f"已选择设备: {self.selected_device}")
-            # 更新设备状态标签颜色为绿色
+            self.selected_device = device_id
+            
+            # 更新状态为绿色（连接成功）
+            self.device_status_var.set(f"已连接: {device_id}")
             self.update_device_status_color("green")
             
-            # 自动创建HAL录音目录
-            if hasattr(self, 'hal_dir_var'):
-                # 在后台线程中创建目录，避免阻塞UI
-                threading.Thread(target=self.auto_create_hal_dir, daemon=True).start()
+            # 更新主状态
+            if hasattr(self, 'status_var'):
+                self.status_var.set(f"已选择设备: {device_id}")
+            
+            print(f"已选择设备: {device_id}")
         else:
             self.selected_device = None
-            self.status_var.set("未选择设备")
-            self.device_status_var.set("未选择设备")
-            # 更新设备状态标签颜色为红色
+            self.device_status_var.set("未连接")
             self.update_device_status_color("red")
+            
+            if hasattr(self, 'status_var'):
+                self.status_var.set("未选择设备")
     
     def get_adb_command(self, cmd):
         """获取完整的ADB命令"""
@@ -216,8 +252,69 @@ class DeviceOperations:
                 
     def update_device_status_color(self, color):
         """更新设备状态标签的颜色"""
-        # 查找设备状态标签并更新颜色
-        for widget in self.root.winfo_children():
-            if isinstance(widget, tk.ttk.Label) and hasattr(widget, 'cget') and widget.cget("textvariable") == str(self.device_status_var):
-                widget.configure(foreground=color)
-                return
+        try:
+            # 查找设备状态标签并更新颜色
+            for widget in self.root.winfo_children():
+                if isinstance(widget, ttk.Frame):
+                    for child in widget.winfo_children():
+                        if isinstance(child, ttk.LabelFrame) and "设备控制" in child.cget("text"):
+                            for subchild in child.winfo_children():
+                                if isinstance(subchild, ttk.Frame):
+                                    for label in subchild.winfo_children():
+                                        if isinstance(label, ttk.Label) and hasattr(label, 'cget'):
+                                            try:
+                                                if label.cget("textvariable") == str(self.device_status_var):
+                                                    label.configure(foreground=color)
+                                                    return
+                                            except:
+                                                continue
+        except Exception as e:
+            print(f"更新设备状态颜色时出错: {e}")
+
+    def check_adb_environment(self):
+        """检查ADB环境"""
+        try:
+            # 检查ADB是否在PATH中
+            result = subprocess.run("where adb" if platform.system() == "Windows" else "which adb", 
+                                  shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                adb_path = result.stdout.strip()
+                print(f"ADB路径: {adb_path}")
+                return True
+            else:
+                print("ADB不在系统PATH中")
+                return False
+        except Exception as e:
+            print(f"检查ADB环境出错: {str(e)}")
+            return False
+    
+    def debug_adb_connection(self):
+        """调试ADB连接问题"""
+        try:
+            print("=== ADB调试信息 ===")
+            
+            # 1. 检查ADB版本
+            result = subprocess.run("adb version", shell=True, capture_output=True, text=True)
+            print(f"ADB版本检查: {result.returncode}")
+            print(f"输出: {result.stdout}")
+            if result.stderr:
+                print(f"错误: {result.stderr}")
+            
+            # 2. 检查ADB服务状态
+            result = subprocess.run("adb get-state", shell=True, capture_output=True, text=True)
+            print(f"ADB状态: {result.stdout.strip() if result.stdout else 'No output'}")
+            
+            # 3. 重启ADB服务
+            print("正在重启ADB服务...")
+            subprocess.run("adb kill-server", shell=True)
+            time.sleep(2)
+            subprocess.run("adb start-server", shell=True)
+            time.sleep(3)
+            
+            # 4. 再次检查设备
+            result = subprocess.run("adb devices -l", shell=True, capture_output=True, text=True)
+            print(f"设备列表详细信息:")
+            print(result.stdout)
+            
+        except Exception as e:
+            print(f"ADB调试出错: {str(e)}")
