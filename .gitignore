@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# 测试生成数据统一目录（见 output_paths.py）
+output/
+
+# elevoc 烧 Key 运行时生成（日志等，可不提交）
+elevoc_ukey/elevoc_log.txt
+
+# OS / IDE
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+

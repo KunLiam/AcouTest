@@ -3,33 +3,1126 @@ from tkinter import ttk, filedialog, messagebox
 import os
 import threading
 import time
-import pygame
 import subprocess
 import platform
 import re
 import shutil
+import shlex
+import datetime
+import sys
+import ctypes
+from ctypes import c_int, c_char_p, c_void_p, POINTER, c_char
+import tempfile
+import textwrap
+
+from output_paths import (
+    OUTPUT_ROOT,
+    get_output_dir,
+    ensure_output_dir,
+    DIR_LOGCAT,
+    DIR_SCREENSHOTS,
+    DIR_MIC_TEST,
+    DIR_SWEEP_RECORDINGS,
+    DIR_HAL_DUMP,
+    DIR_HAL_CUSTOM,
+    DIR_LOOPBACK,
+)
 
 class UIComponents:
     def __init__(self, parent):
         self.parent = parent
+    
+    def create_main_ui(self, parent):
+        """创建主界面UI - 改进的分类标签页设计"""
+        # 创建主选项卡控件
+        self.main_notebook = ttk.Notebook(parent)
+        self.main_notebook.pack(fill="both", expand=True)
+        
+        # 1. 声学测试大类
+        acoustic_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(acoustic_frame, text="声学测试")
+        self.setup_acoustic_tab(acoustic_frame)
+        
+        # 2. 硬件测试大类  
+        hardware_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(hardware_frame, text="硬件测试")
+        self.setup_hardware_tab(hardware_frame)
+        
+        # 3. 音频调试大类
+        debug_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(debug_frame, text="音频调试")
+        self.setup_debug_tab(debug_frame)
+        
+        # 4. 常用功能大类
+        common_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(common_frame, text="常用功能")
+        self.setup_common_tab(common_frame)
+
+        # 5. 烧大象key（U盘/设备key相关）
+        keyburn_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(keyburn_frame, text="烧大象key")
+        self.setup_keyburn_tab(keyburn_frame)
+        
+        return self.main_notebook
+
+    def setup_keyburn_tab(self, parent):
+        """设置烧大象key标签页"""
+        nb = ttk.Notebook(parent)
+        nb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ukey_frame = ttk.Frame(nb)
+        nb.add(ukey_frame, text="u盘烧key")
+        self.setup_ukey_burn_tab(ukey_frame)
+
+        sn_frame = ttk.Frame(nb)
+        nb.add(sn_frame, text="sn烧key")
+        self.setup_sn_key_burn_tab(sn_frame)
+
+    def _get_runtime_base_dir(self) -> str:
+        """返回运行时基准目录（支持 PyInstaller onefile）"""
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _find_elevoc_src_dir(self) -> str:
+        """
+        在多个可能位置查找 elevoc_ukey 目录（避免 dist 运行时找不到资源）。
+        优先顺序：
+        1) exe 同级 / 源码同级
+        2) 当前工作目录
+        3) base_dir 上一级（开发/打包脚本可能从不同目录启动）
+        """
+        base_dir = self._get_runtime_base_dir()
+        candidates = [
+            os.path.join(base_dir, "elevoc_ukey"),
+            os.path.join(os.getcwd(), "elevoc_ukey"),
+            os.path.join(os.path.dirname(base_dir), "elevoc_ukey"),
+        ]
+        for p in candidates:
+            if os.path.isdir(p):
+                return p
+        raise FileNotFoundError(
+            "找不到 elevoc_ukey 目录。\n\n"
+            "请确认已把 elevoc_ukey 放在以下任一位置：\n"
+            + "\n".join(f"- {p}" for p in candidates)
+            + "\n\n"
+            "如果你运行的是 dist\\声测大师(AcouTest).exe：请用更新后的 Packager.bat 重新打包，"
+            "它会自动把 elevoc_ukey 复制到 dist\\elevoc_ukey。"
+        )
+
+    def _prepare_elevoc_workdir(self) -> str:
+        """
+        准备 elevoc_ukey 工作目录：
+        - DLL 可能只支持 ANSI 路径，中文路径会导致 init 失败
+        - 这里复制一份到 TEMP 下的纯英文目录，确保 DLL 可读写 uuidSet / usb_info_0 / elevoc_log.txt
+        """
+        src_dir = self._find_elevoc_src_dir()
+
+        dst_dir = os.path.join(tempfile.gettempdir(), "elevoc_ukey_runtime")
+        os.makedirs(dst_dir, exist_ok=True)
+
+        # 只复制必要文件，避免每次全量拷贝
+        need_files = ["soft_encryption.dll", "uuidSet", "usb_info_0", "elevoc_log.txt", "README.md"]
+        for name in need_files:
+            src = os.path.join(src_dir, name)
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, os.path.join(dst_dir, name))
+                except Exception:
+                    pass
+
+        # 返回运行目录，同时把 src_dir 记录下来用于后续同步日志
+        self._elevoc_src_dir = src_dir
+        return dst_dir
+
+    def _sync_elevoc_log_to_src(self):
+        """把 TEMP 运行目录里的 elevoc_log.txt 同步回 elevoc_ukey 源目录（方便用户在 dist 里查看）。"""
+        try:
+            st = getattr(self, "_elevoc_state", None)
+            if not st:
+                return
+            workdir = st.get("workdir") or ""
+            src_dir = st.get("src_dir") or getattr(self, "_elevoc_src_dir", "")
+            if not workdir or not src_dir:
+                return
+            src = os.path.join(workdir, "elevoc_log.txt")
+            dst = os.path.join(src_dir, "elevoc_log.txt")
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+        except Exception:
+            # 同步失败不影响主流程
+            pass
+
+    def _elevoc_init(self):
+        """
+        初始化 elevoc DLL（只初始化一次）。
+        返回一个 dict：{dll, workdir, last_uuid(bytes), last_key(str)}
+        """
+        if getattr(self, "_elevoc_state", None):
+            return self._elevoc_state
+
+        workdir = self._prepare_elevoc_workdir()
+        src_dir = getattr(self, "_elevoc_src_dir", "")
+        dll_path = os.path.join(workdir, "soft_encryption.dll")
+        if not os.path.exists(dll_path):
+            raise FileNotFoundError(f"找不到 DLL：{dll_path}")
+
+        elevoc_dll = ctypes.CDLL(dll_path)
+
+        # 函数签名（与 elevoc_ukey/test.py 保持一致）
+        elevoc_dll.elevoc_soft_encryption_init.argtypes = [c_char_p, c_void_p]
+        elevoc_dll.elevoc_soft_encryption_init.restype = c_int
+        elevoc_dll.elevoc_generate_license.argtypes = [c_void_p, c_int, POINTER(c_char)]
+        elevoc_dll.elevoc_generate_license.restype = c_int
+        elevoc_dll.elevoc_get_license_number.argtypes = []
+        elevoc_dll.elevoc_get_license_number.restype = c_int
+        elevoc_dll.elevoc_soft_encryption_destory.argtypes = []
+        elevoc_dll.elevoc_soft_encryption_destory.restype = None
+
+        # 传给 DLL：用本地编码（更兼容只支持 ANSI 路径的 DLL）
+        log_dir_bytes = workdir.encode("mbcs", errors="ignore")
+        ret = elevoc_dll.elevoc_soft_encryption_init(log_dir_bytes, None)
+        if ret != 0:
+            # 把 elevoc_log.txt 的末尾显示出来帮助定位
+            log_path = os.path.join(workdir, "elevoc_log.txt")
+            tail = ""
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                tail = "".join(lines[-30:]).strip()
+            except Exception:
+                pass
+            extra = f"\n\n--- elevoc_log.txt (最后 30 行) ---\n{tail}" if tail else ""
+            raise RuntimeError(
+                "License init fail!\n"
+                f"返回码: {ret}\n"
+                f"dll_path: {dll_path}\n"
+                f"workdir: {workdir}\n"
+                + extra
+            )
+
+        self._elevoc_state = {
+            "dll": elevoc_dll,
+            "workdir": workdir,
+            "src_dir": src_dir,
+            "last_uuid": b"",
+            "last_key": "",
+        }
+        return self._elevoc_state
+
+    @staticmethod
+    def _bytes_to_hexstr(data: bytes) -> str:
+        return "".join(f"{b:02X}" for b in data)
+
+    def setup_ukey_burn_tab(self, parent):
+        """u盘烧key（集成 elevoc_ukey 核心能力，不依赖 PyQt5）"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        header = ttk.LabelFrame(frame, text="说明")
+        header.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            header,
+            text=(
+                "流程：读取设备 SN → 调用 soft_encryption.dll 生成 license → 写回 unifykeys(elevockey)。\n"
+                "提示：该 DLL 可能不支持中文路径，本工具会自动在临时英文目录运行所需文件。"
+            ),
+            style="Muted.TLabel",
+        ).pack(anchor="w", padx=10, pady=8)
+
+        # 按钮区：分两行，避免窗口稍窄时按钮文字被遮挡/省略
+        btn_bar = ttk.Frame(frame)
+        btn_bar.pack(fill="x", pady=(0, 8))
+
+        row1 = ttk.Frame(btn_bar)
+        row1.pack(fill="x")
+        status_var = tk.StringVar(value="就绪")
+        ttk.Label(row1, textvariable=status_var).pack(side="left")
+
+        # 单行按钮：从右往左依次排（保持最右侧对齐），顺序：UUID | 烧Key | 检查 | 打开日志 | 打开目录
+        btn_check = ttk.Button(row1, text="检查key", style="Small.TButton", width=8)
+        btn_burn = ttk.Button(row1, text="烧大象Key", style="Small.TButton", width=8)
+        btn_uuid = ttk.Button(row1, text="读SN", style="Small.TButton", width=8)
+        btn_open = ttk.Button(row1, text="打开目录", style="Small.TButton", width=10)
+        btn_open_log = ttk.Button(row1, text="打开日志", style="Small.TButton", width=10)
+
+        # pack(side="right") 时先 pack 的在最右侧，故先 pack 打开目录/打开日志，再 检查/烧Key/UUID
+        btn_open.pack(side="right")
+        btn_open_log.pack(side="right", padx=(6, 0))
+        btn_check.pack(side="right", padx=(6, 0))
+        btn_burn.pack(side="right", padx=(6, 0))
+        btn_uuid.pack(side="right", padx=(6, 0))
+
+        text_frame = ttk.Frame(frame)
+        text_frame.pack(fill="both", expand=True)
+        # 允许自动换行，长 key 不再“看不到”
+        txt = tk.Text(text_frame, wrap="word", font=("Consolas", 9))
+        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.config(state="disabled")
+
+        def _append(s: str):
+            txt.config(state="normal")
+            txt.insert("end", s)
+            txt.see("end")
+            txt.config(state="disabled")
+
+        def _adb(serial: str, shell_cmd: str, timeout_s: int = 20):
+            # shell_cmd 作为单个参数给 adb shell，避免 Windows shell 解析问题
+            return subprocess.run(
+                ["adb", "-s", serial, "shell", shell_cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+
+        def _adb_root(serial: str, timeout_s: int = 15):
+            return subprocess.run(["adb", "-s", serial, "root"], capture_output=True, text=True, timeout=timeout_s)
+
+        def _adb_su(serial: str, cmd: str, timeout_s: int = 20):
+            # su -c：适配 user build / 需要 su 权限场景
+            return subprocess.run(
+                ["adb", "-s", serial, "shell", "su", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+
+        def _read_unify_usid(serial: str) -> str:
+            """
+            读取 unifykeys usid（UUID/SN）。
+            - 先 adb root + 直接访问 /sys/class/unifykeys
+            - 如果失败/为空，再 fallback 到 su -c
+            """
+            _adb_root(serial)
+            # 先单独 set name，再读回（比 && 更稳）
+            _adb(serial, "echo usid > /sys/class/unifykeys/name", timeout_s=10)
+            time.sleep(0.15)
+            r = _adb(serial, "cat /sys/class/unifykeys/read", timeout_s=10)
+            uuid = (r.stdout or "").strip()
+            if uuid:
+                return uuid
+
+            # fallback：su -c 一把做完
+            r2 = _adb_su(serial, "echo usid > /sys/class/unifykeys/name; cat /sys/class/unifykeys/read", timeout_s=10)
+            uuid2 = (r2.stdout or "").strip()
+            if uuid2:
+                return uuid2
+
+            # 仍失败：拼错误信息，方便定位
+            err = (r.stderr or "").strip()
+            err2 = (r2.stderr or "").strip()
+            raise RuntimeError(
+                "获取SN失败：unifykeys/read 无输出。\n"
+                "可能原因：\n"
+                "1) 设备未 root / 无 su 权限\n"
+                "2) /sys/class/unifykeys 不存在或权限受限\n"
+                "3) usid key 未配置\n\n"
+                f"[adb shell stderr]\n{err}\n\n[su -c stderr]\n{err2}".strip()
+            )
+
+        def _get_serial() -> str:
+            try:
+                return (self.device_var.get() or "").strip()
+            except Exception:
+                return ""
+
+        def _open_folder():
+            try:
+                p = self._find_elevoc_src_dir()
+            except Exception as e:
+                messagebox.showerror("错误", str(e))
+                return
+            try:
+                os.startfile(p)  # type: ignore[attr-defined]
+            except Exception as e:
+                messagebox.showerror("错误", f"打开目录失败：{type(e).__name__}: {e}")
+
+        def _open_log():
+            # 优先打开真正写入位置（TEMP workdir）；同时会尝试同步回 dist 目录
+            try:
+                st = self._elevoc_init()
+                self._sync_elevoc_log_to_src()
+                p = os.path.join(st["workdir"], "elevoc_log.txt")
+                if not os.path.exists(p):
+                    # 兜底：打开源目录里的
+                    src_dir = st.get("src_dir") or self._find_elevoc_src_dir()
+                    p = os.path.join(src_dir, "elevoc_log.txt")
+                os.startfile(p)  # type: ignore[attr-defined]
+            except Exception as e:
+                messagebox.showerror("错误", f"打开日志失败：{type(e).__name__}: {e}")
+
+        def _run_in_thread(fn):
+            def worker():
+                try:
+                    self.root.after(0, lambda: status_var.set("运行中..."))
+                    fn()
+                    self.root.after(0, lambda: status_var.set("完成"))
+                except Exception as e:
+                    self.root.after(0, lambda: status_var.set("失败"))
+                    self.root.after(0, lambda: _append(f"\n[ERROR] {type(e).__name__}: {e}\n"))
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _wrap_long(s: str, width: int = 64) -> str:
+            s = (s or "").strip()
+            if not s:
+                return ""
+            return "\n".join(textwrap.wrap(s, width=width, break_long_words=True, drop_whitespace=False))
+
+        def do_get_uuid():
+            serial = _get_serial()
+            if not serial:
+                messagebox.showerror("错误", "请先选择设备")
+                return
+            st = self._elevoc_init()
+            dll = st["dll"]
+            try:
+                count = dll.elevoc_get_license_number()
+            except Exception:
+                count = -1
+            _append(f"\n=== 获取SN ===\nLicense count: {count}\n")
+            uuid = _read_unify_usid(serial)
+            st["last_uuid"] = uuid.encode("utf-8", errors="ignore")
+            _append(f"SN: {uuid} | length: {len(uuid)}\n")
+            self._sync_elevoc_log_to_src()
+
+        def do_burn():
+            serial = _get_serial()
+            if not serial:
+                messagebox.showerror("错误", "请先选择设备")
+                return
+            st = self._elevoc_init()
+            dll = st["dll"]
+            uuid_bytes: bytes = st.get("last_uuid") or b""
+            if not uuid_bytes:
+                raise RuntimeError("请先点击“获取SN”")
+
+            LICENSE_DATA_LEN = 192
+            license_dat = (c_char * LICENSE_DATA_LEN)()
+            ret = dll.elevoc_generate_license(uuid_bytes, len(uuid_bytes), license_dat)
+            if ret != 0:
+                raise RuntimeError(f"Generate license fail (ret={ret})")
+
+            license_hex = self._bytes_to_hexstr(bytes(license_dat))
+            st["last_key"] = license_hex
+            _append("\n=== 生成并写入License(烧key) ===\n")
+            _append("license:\n")
+            _append(_wrap_long(license_hex) + "\n")
+
+            # 写回 unifykeys：先 adb root，失败再 su -c
+            _adb_root(serial)
+            r = _adb(serial, f"echo elevockey > /sys/class/unifykeys/name && echo {license_hex} > /sys/class/unifykeys/write", timeout_s=20)
+            if r.returncode != 0:
+                r2 = _adb_su(serial, f"echo elevockey > /sys/class/unifykeys/name; echo {license_hex} > /sys/class/unifykeys/write", timeout_s=20)
+                if r2.returncode != 0:
+                    raise RuntimeError((r2.stderr or r.stderr or "写入失败").strip())
+            _append("写入成功。\n")
+            self._sync_elevoc_log_to_src()
+
+        def do_check():
+            serial = _get_serial()
+            if not serial:
+                messagebox.showerror("错误", "请先选择设备")
+                return
+            st = self._elevoc_init()
+            expected = (st.get("last_key") or "").strip()
+            _append("\n=== 检查License ===\n")
+            _adb_root(serial)
+            r = _adb(serial, "echo elevockey > /sys/class/unifykeys/name && cat /sys/class/unifykeys/read", timeout_s=20)
+            got = (r.stdout or "").strip()
+            if (r.returncode != 0) or (not got):
+                r2 = _adb_su(serial, "echo elevockey > /sys/class/unifykeys/name; cat /sys/class/unifykeys/read", timeout_s=20)
+                if r2.returncode == 0:
+                    got = (r2.stdout or "").strip()
+                else:
+                    raise RuntimeError((r2.stderr or r.stderr or "读取失败").strip())
+            if not got:
+                _append("License status: NO DATA\n")
+                return
+            if expected:
+                _append("Expected:\n")
+                _append(_wrap_long(expected) + "\n")
+                _append("Got:\n")
+                _append(_wrap_long(got) + "\n")
+                _append("Result  : OK\n" if got == expected else "Result  : MISMATCH\n")
+            else:
+                _append("Got:\n")
+                _append(_wrap_long(got) + "\n")
+                _append("Result  : DATA FOUND（未生成过 expected，仅展示读取值）\n")
+            self._sync_elevoc_log_to_src()
+
+        btn_open.config(command=_open_folder)
+        btn_open_log.config(command=_open_log)
+        btn_uuid.config(command=lambda: _run_in_thread(do_get_uuid))
+        btn_burn.config(command=lambda: _run_in_thread(do_burn))
+        btn_check.config(command=lambda: _run_in_thread(do_check))
+
+    def setup_sn_key_burn_tab(self, parent):
+        """sn烧key：按 sn烧key.bat 的逻辑集成（写入 unifykeys:elevockey）"""
+        nb = ttk.Notebook(parent)
+        nb.pack(fill="both", expand=True, padx=10, pady=10)
+
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text="烧elevockey")
+
+        sn_edit_frame = ttk.Frame(nb, padding=10)
+        nb.add(sn_edit_frame, text="重写设备SN")
+
+        header = ttk.LabelFrame(frame, text="说明")
+        header.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            header,
+            text=(
+                "功能：检查设备 unifykeys 是否支持 elevockey，并可新增/替换 elevockey。\n"
+                "流程：adb root → 检查 list → 读取当前值 → 输入新 elevockey → 写入 → 读回校验。"
+            ),
+            style="Muted.TLabel",
+        ).pack(anchor="w", padx=10, pady=8)
+
+        top = ttk.Frame(frame)
+        top.pack(fill="x", pady=(0, 8))
+
+        status_var = tk.StringVar(value="就绪")
+        ttk.Label(top, textvariable=status_var).pack(side="left")
+
+        # SN 展示（自动获取并填入）
+        sn_var = tk.StringVar(value="")
+        ttk.Label(top, text="设备SN:").pack(side="left", padx=(12, 6))
+        sn_entry = ttk.Entry(top, textvariable=sn_var, width=24, state="readonly")
+        sn_entry.pack(side="left")
+
+        # 操作按钮
+        btn_get_sn = ttk.Button(top, text="获取SN", style="Small.TButton")
+        btn_support = ttk.Button(top, text="检查支持", style="Small.TButton")
+        btn_read = ttk.Button(top, text="读取当前key", style="Small.TButton")
+        btn_get_sn.pack(side="right")
+        btn_support.pack(side="right", padx=(6, 0))
+        btn_read.pack(side="right", padx=(6, 0))
+
+        key_frame = ttk.LabelFrame(frame, text="写入 elevockey")
+        key_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(key_frame, text="elevockey:").pack(side="left", padx=(10, 6), pady=8)
+        key_var = tk.StringVar(value="")
+        key_entry = ttk.Entry(key_frame, textvariable=key_var)
+        key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
+        btn_burn = ttk.Button(key_frame, text="写入/替换(烧key)", style="Small.TButton")
+        btn_burn.pack(side="right", padx=(0, 10), pady=8)
+
+        text_frame = ttk.Frame(frame)
+        text_frame.pack(fill="both", expand=True)
+        txt = tk.Text(text_frame, wrap="none", font=("Consolas", 9))
+        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+        hsb = ttk.Scrollbar(text_frame, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.config(state="disabled")
+
+        UNIFY_KEY_NAME_PATH = "/sys/class/unifykeys/name"
+        UNIFY_KEY_READ_PATH = "/sys/class/unifykeys/read"
+        UNIFY_KEY_WRITE_PATH = "/sys/class/unifykeys/write"
+        UNIFY_KEY_LIST_PATH = "/sys/class/unifykeys/list"
+        ELEVOC_KEY_NAME = "elevockey"
+
+        def _append(s: str):
+            txt.config(state="normal")
+            txt.insert("end", s)
+            txt.see("end")
+            txt.config(state="disabled")
+
+        def _serial() -> str:
+            try:
+                return (self.device_var.get() or "").strip()
+            except Exception:
+                return ""
+
+        def _run(argv, timeout_s=15):
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s)
+
+        def _adb_shell(serial: str, cmd: str, timeout_s=15):
+            # cmd 作为单个参数传给 adb shell，避免 Windows shell 解析问题
+            return _run(["adb", "-s", serial, "shell", cmd], timeout_s=timeout_s)
+
+        def _adb_root(serial: str):
+            return _run(["adb", "-s", serial, "root"], timeout_s=15)
+
+        def _ensure_device() -> str:
+            if hasattr(self, "check_device_selected") and not self.check_device_selected():
+                return ""
+            serial = _serial()
+            if not serial:
+                messagebox.showerror("错误", "请先选择设备")
+                return ""
+            return serial
+
+        def _do_get_sn():
+            serial = _ensure_device()
+            if not serial:
+                return
+            _append("\n=== 获取SN ===\n")
+            r = _run(["adb", "-s", serial, "get-serialno"], timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "adb get-serialno 失败")
+            sn = (r.stdout or "").strip()
+            sn_var.set(sn)
+            _append(f"SN: {sn}\n")
+
+        def _auto_fill_sn_quiet():
+            """自动填充 SN：不弹窗、不写日志（避免干扰）"""
+            serial = _serial()
+            if not serial:
+                return
+            try:
+                r = _run(["adb", "-s", serial, "get-serialno"], timeout_s=10)
+                if r.returncode == 0:
+                    sn = (r.stdout or "").strip()
+                    if sn:
+                        sn_var.set(sn)
+            except Exception:
+                pass
+
+        def _do_check_support():
+            serial = _ensure_device()
+            if not serial:
+                return
+            _append("\n=== 检查驱动DTS是否支持 elevockey ===\n")
+            _append("$ adb root\n")
+            _adb_root(serial)
+            r = _adb_shell(serial, f"cat {UNIFY_KEY_LIST_PATH}", timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "读取 unifykeys list 失败")
+            out = r.stdout or ""
+            if ELEVOC_KEY_NAME in out:
+                _append("支持：驱动DTS支持【elevockey】\n")
+            else:
+                _append("不支持：驱动DTS不支持【elevockey】\n")
+                raise RuntimeError("驱动DTS不支持 elevockey")
+
+        def _do_read_current():
+            serial = _ensure_device()
+            if not serial:
+                return
+            _append("\n=== 读取当前 elevockey ===\n")
+            _append("$ adb root\n")
+            _adb_root(serial)
+            r = _adb_shell(serial, f"echo {ELEVOC_KEY_NAME} > {UNIFY_KEY_NAME_PATH} && cat {UNIFY_KEY_READ_PATH}", timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "读取 elevockey 失败")
+            val = (r.stdout or "").strip()
+            if val:
+                _append(f"已烧录 elevockey: {val}\n")
+            else:
+                _append("未烧录 elevockey（read 为空）\n")
+
+        def _do_burn():
+            serial = _ensure_device()
+            if not serial:
+                return
+            key = (key_var.get() or "").strip()
+            if not key:
+                messagebox.showerror("错误", "请输入 elevockey")
+                return
+
+            if not messagebox.askyesno("确认", "确认新增或替换 elevockey？"):
+                _append("\n用户取消操作。\n")
+                return
+
+            _append("\n=== 写入 elevockey ===\n")
+            _append("$ adb root\n")
+            _adb_root(serial)
+
+            # 先检查支持
+            r = _adb_shell(serial, f"cat {UNIFY_KEY_LIST_PATH}", timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "读取 unifykeys list 失败")
+            if ELEVOC_KEY_NAME not in (r.stdout or ""):
+                raise RuntimeError("驱动DTS不支持 elevockey")
+
+            if not messagebox.askyesno("再次确认", "请确认 elevockey 内容正确，确定开始烧录？"):
+                _append("\n用户取消操作。\n")
+                return
+
+            _append("正在烧录...\n")
+            r = _adb_shell(serial, f"echo {key} > {UNIFY_KEY_WRITE_PATH}", timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "写入失败")
+            _append("烧录完成，开始校验...\n")
+
+            r = _adb_shell(serial, f"echo {ELEVOC_KEY_NAME} > {UNIFY_KEY_NAME_PATH} && cat {UNIFY_KEY_READ_PATH}", timeout_s=10)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr or "读取校验失败")
+            val = (r.stdout or "").strip()
+            if val:
+                _append(f"烧录成功，【elevockey】: {val}\n")
+            else:
+                raise RuntimeError("烧录失败：读回为空")
+
+        def _run_in_thread(fn):
+            def worker():
+                try:
+                    self.root.after(0, lambda: status_var.set("运行中..."))
+                    fn()
+                    self.root.after(0, lambda: status_var.set("完成"))
+                except Exception as e:
+                    self.root.after(0, lambda: status_var.set("失败"))
+                    self.root.after(0, lambda: _append(f"\n[ERROR] {type(e).__name__}: {e}\n"))
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_get_sn.config(command=lambda: _run_in_thread(_do_get_sn))
+        btn_support.config(command=lambda: _run_in_thread(_do_check_support))
+        btn_read.config(command=lambda: _run_in_thread(_do_read_current))
+        btn_burn.config(command=lambda: _run_in_thread(_do_burn))
+
+        # 初次进入自动填一次
+        try:
+            self.root.after(300, lambda: _auto_fill_sn_quiet())
+        except Exception:
+            pass
+
+        # 设备切换时自动刷新（做简单 debounce）
+        try:
+            _sn_timer = {"id": None}
+            def _on_device_change(*_a):
+                try:
+                    if _sn_timer["id"] is not None:
+                        self.root.after_cancel(_sn_timer["id"])
+                except Exception:
+                    pass
+                try:
+                    _sn_timer["id"] = self.root.after(300, _auto_fill_sn_quiet)
+                except Exception:
+                    pass
+
+            if hasattr(self, "device_var") and isinstance(self.device_var, tk.StringVar):
+                self.device_var.trace_add("write", _on_device_change)
+        except Exception:
+            pass
+
+        # -------------------- 修改设备SN（usid） --------------------
+        edit_header = ttk.LabelFrame(sn_edit_frame, text="说明")
+        edit_header.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            edit_header,
+            text=(
+                "常用方式：adb shell → su → echo usid > name → echo <SN> > write → cat read → reboot\n"
+                "注意：需要 su 权限（或可 adb root 的 userdebug）。"
+            ),
+            style="Muted.TLabel",
+        ).pack(anchor="w", padx=10, pady=8)
+
+        # 这里如果把输入框/勾选框/按钮都塞一行，窗口稍窄时按钮会被挤成“...”
+        # 改为两行：第一行参数，第二行按钮，保证不遮挡文字。
+        edit_top = ttk.Frame(sn_edit_frame)
+        edit_top.pack(fill="x", pady=(0, 8))
+
+        row_a = ttk.Frame(edit_top)
+        row_a.pack(fill="x", pady=(0, 6))
+        edit_status = tk.StringVar(value="就绪")
+        ttk.Label(row_a, textvariable=edit_status).pack(side="left")
+
+        ttk.Label(row_a, text="新SN:").pack(side="left", padx=(12, 6))
+        new_sn_var = tk.StringVar()
+        new_sn_entry = ttk.Entry(row_a, textvariable=new_sn_var, width=28)
+        new_sn_entry.pack(side="left")
+
+        reboot_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row_a, text="写完后重启", variable=reboot_var).pack(side="left", padx=(12, 0))
+
+        row_b = ttk.Frame(edit_top)
+        row_b.pack(fill="x")
+        btn_read_usid = ttk.Button(row_b, text="读取当前SN(usid)", style="Small.TButton", width=16)
+        btn_write_usid = ttk.Button(row_b, text="写入SN(usid)", style="Small.TButton", width=14)
+        btn_reboot = ttk.Button(row_b, text="重启设备", style="Small.TButton", width=10)
+        btn_reboot.pack(side="right")
+        btn_write_usid.pack(side="right", padx=(6, 0))
+        btn_read_usid.pack(side="right", padx=(6, 0))
+
+        edit_text_frame = ttk.Frame(sn_edit_frame)
+        edit_text_frame.pack(fill="both", expand=True)
+        edit_txt = tk.Text(edit_text_frame, wrap="none", font=("Consolas", 9))
+        edit_vsb = ttk.Scrollbar(edit_text_frame, orient="vertical", command=edit_txt.yview)
+        edit_hsb = ttk.Scrollbar(edit_text_frame, orient="horizontal", command=edit_txt.xview)
+        edit_txt.configure(yscrollcommand=edit_vsb.set, xscrollcommand=edit_hsb.set)
+        edit_vsb.pack(side="right", fill="y")
+        edit_hsb.pack(side="bottom", fill="x")
+        edit_txt.pack(side="left", fill="both", expand=True)
+        edit_txt.config(state="disabled")
+
+        def _eappend(s: str):
+            edit_txt.config(state="normal")
+            edit_txt.insert("end", s)
+            edit_txt.see("end")
+            edit_txt.config(state="disabled")
+
+        def _adb_su(serial: str, cmd: str, timeout_s=15):
+            return subprocess.run(["adb", "-s", serial, "shell", "su", "-c", cmd], capture_output=True, text=True, timeout=timeout_s)
+
+        def _adb_root(serial: str, timeout_s=15):
+            return subprocess.run(["adb", "-s", serial, "root"], capture_output=True, text=True, timeout=timeout_s)
+
+        def _adb_shell(serial: str, cmd: str, timeout_s=15):
+            return subprocess.run(["adb", "-s", serial, "shell", cmd], capture_output=True, text=True, timeout=timeout_s)
+
+        def _ensure_serial() -> str:
+            if hasattr(self, "check_device_selected") and not self.check_device_selected():
+                return ""
+            s = _serial()
+            if not s:
+                messagebox.showerror("错误", "请先选择设备")
+                return ""
+            return s
+
+        def _validate_sn(val: str) -> str:
+            v = (val or "").strip()
+            if not v:
+                raise ValueError("请输入SN")
+            # 避免 shell 注入/转义问题：SN 通常是字母数字，必要时你再告诉我规则我放宽
+            if not re.match(r"^[0-9A-Za-z._\\-]+$", v):
+                raise ValueError("SN 仅允许字母数字及 . _ - 字符（避免转义问题）")
+            return v
+
+        def _read_usid():
+            serial = _ensure_serial()
+            if not serial:
+                return
+            _eappend("\n=== 读取当前SN(usid) ===\n")
+            _adb_root(serial)
+            r = _adb_shell(serial, "echo usid > /sys/class/unifykeys/name && cat /sys/class/unifykeys/read", timeout_s=10)
+            out = (r.stdout or "").strip()
+            if not out:
+                r2 = _adb_su(serial, "echo usid > /sys/class/unifykeys/name; cat /sys/class/unifykeys/read", timeout_s=10)
+                out = (r2.stdout or "").strip()
+                if not out:
+                    raise RuntimeError((r2.stderr or r.stderr or "读取失败").strip())
+            _eappend(f"usid: {out}\n")
+
+        def _write_usid():
+            serial = _ensure_serial()
+            if not serial:
+                return
+            sn_new = _validate_sn(new_sn_var.get())
+            if not messagebox.askyesno("确认", f"确认写入新的 usid/SN？\n\n{sn_new}"):
+                _eappend("\n用户取消操作。\n")
+                return
+            _eappend("\n=== 写入SN(usid) ===\n")
+            _adb_root(serial)
+
+            # 先尝试直接写（root），不行再 su
+            r = _adb_shell(serial, f"echo usid > /sys/class/unifykeys/name && echo {sn_new} > /sys/class/unifykeys/write && cat /sys/class/unifykeys/read", timeout_s=10)
+            out = (r.stdout or "").strip()
+            if not out:
+                r2 = _adb_su(serial, f"echo usid > /sys/class/unifykeys/name; echo {sn_new} > /sys/class/unifykeys/write; cat /sys/class/unifykeys/read", timeout_s=10)
+                out = (r2.stdout or "").strip()
+                if not out:
+                    raise RuntimeError((r2.stderr or r.stderr or "写入失败").strip())
+
+            _eappend(f"读回: {out}\n")
+            if out != sn_new:
+                _eappend("警告：读回值与写入值不一致，请检查设备实现。\n")
+
+            if reboot_var.get():
+                _eappend("执行重启...\n")
+                subprocess.run(["adb", "-s", serial, "reboot"], capture_output=True, text=True)
+
+        def _do_reboot():
+            serial = _ensure_serial()
+            if not serial:
+                return
+            _eappend("\n=== 重启设备 ===\n")
+            subprocess.run(["adb", "-s", serial, "reboot"], capture_output=True, text=True)
+
+        def _run2(fn):
+            def worker():
+                try:
+                    self.root.after(0, lambda: edit_status.set("运行中..."))
+                    fn()
+                    self.root.after(0, lambda: edit_status.set("完成"))
+                except Exception as e:
+                    self.root.after(0, lambda: edit_status.set("失败"))
+                    self.root.after(0, lambda: _eappend(f"\n[ERROR] {type(e).__name__}: {e}\n"))
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_read_usid.config(command=lambda: _run2(_read_usid))
+        btn_write_usid.config(command=lambda: _run2(_write_usid))
+        btn_reboot.config(command=lambda: _run2(_do_reboot))
+    
+    def setup_acoustic_tab(self, parent):
+        """设置声学测试标签页"""
+        # 创建子标签页
+        acoustic_notebook = ttk.Notebook(parent)
+        acoustic_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 扫频测试子标签
+        sweep_frame = ttk.Frame(acoustic_notebook)
+        acoustic_notebook.add(sweep_frame, text="扫频测试")
+        self.setup_sweep_tab(sweep_frame)
+        
+    def setup_hardware_tab(self, parent):
+        """设置硬件测试标签页"""
+        # 创建子标签页
+        hardware_notebook = ttk.Notebook(parent)
+        hardware_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 麦克风测试子标签
+        mic_frame = ttk.Frame(hardware_notebook)
+        hardware_notebook.add(mic_frame, text="麦克风测试")
+        self.setup_mic_tab(mic_frame)
+        
+        # 雷达检查子标签
+        radar_frame = ttk.Frame(hardware_notebook)
+        hardware_notebook.add(radar_frame, text="雷达检查")
+        self.setup_radar_tab(radar_frame)
+        
+        # 喇叭测试子标签
+        speaker_frame = ttk.Frame(hardware_notebook)
+        hardware_notebook.add(speaker_frame, text="喇叭测试")
+        self.setup_speaker_tab(speaker_frame)
+        
+        # 多声道测试子标签
+        multichannel_frame = ttk.Frame(hardware_notebook)
+        hardware_notebook.add(multichannel_frame, text="多声道测试")
+        self.setup_multichannel_tab(multichannel_frame)
+        
+    def setup_debug_tab(self, parent):
+        """设置音频调试标签页"""
+        # 创建子标签页
+        debug_notebook = ttk.Notebook(parent)
+        debug_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Loopback和Ref测试子标签
+        loopback_frame = ttk.Frame(debug_notebook)
+        debug_notebook.add(loopback_frame, text="Loopback和Ref测试")
+        self.setup_loopback_tab(loopback_frame)
+        
+        # HAL录音子标签
+        hal_frame = ttk.Frame(debug_notebook)
+        debug_notebook.add(hal_frame, text="HAL录音")
+        self.setup_hal_recording_tab(hal_frame)
+        
+        # Logcat日志子标签
+        logcat_frame = ttk.Frame(debug_notebook)
+        debug_notebook.add(logcat_frame, text="Logcat日志")
+        self.setup_logcat_tab(logcat_frame)
+
+        # 系统指令子标签（独立页面：dumpsys/tinymix/getprop 等）
+        syscmd_frame = ttk.Frame(debug_notebook)
+        debug_notebook.add(syscmd_frame, text="系统指令")
+        self.setup_system_cmd_tab(syscmd_frame)
+        
+    def setup_common_tab(self, parent):
+        """设置常用功能标签页"""
+        # 创建子标签页
+        common_notebook = ttk.Notebook(parent)
+        common_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 本地播放子标签
+        playback_frame = ttk.Frame(common_notebook)
+        common_notebook.add(playback_frame, text="本地播放")
+        self.setup_local_playback_tab(playback_frame)
+        
+        # 截图功能子标签
+        screenshot_frame = ttk.Frame(common_notebook)
+        common_notebook.add(screenshot_frame, text="截图功能")
+        self.setup_screenshot_tab(screenshot_frame)
+        
+        # 遥控器子标签
+        remote_frame = ttk.Frame(common_notebook)
+        common_notebook.add(remote_frame, text="遥控器")
+        self.setup_remote_tab(remote_frame)
+    
+    def setup_acoustic_category(self, parent):
+        """设置声学测试分类"""
+        # 说明文字
+        desc_label = ttk.Label(parent, text="音频频率响应和声学特性测试", 
+                              font=("Arial", 9), foreground="gray")
+        desc_label.pack(pady=(0, 10))
+        
+        # 扫频测试按钮
+        sweep_button = ttk.Button(parent, text="扫频测试", 
+                                 command=self.open_sweep_window,
+                                 width=20)
+        sweep_button.pack(pady=5, fill="x")
+        
+        # 添加扫频测试说明
+        sweep_desc = ttk.Label(parent, text="• 播放扫频音频并录制回环信号\n• 支持批量测试多个频率文件\n• 可自定义播放和录制参数", 
+                              font=("Arial", 8), foreground="gray", justify="left")
+        sweep_desc.pack(pady=(2, 10), anchor="w")
+    
+    def setup_hardware_category(self, parent):
+        """设置硬件测试分类"""
+        # 说明文字
+        desc_label = ttk.Label(parent, text="设备硬件功能检测和测试", 
+                              font=("Arial", 9), foreground="gray")
+        desc_label.pack(pady=(0, 10))
+        
+        # 麦克风测试
+        mic_button = ttk.Button(parent, text="麦克风测试", 
+                               command=self.open_mic_window,
+                               width=20)
+        mic_button.pack(pady=2, fill="x")
+        
+        # 雷达检查
+        radar_button = ttk.Button(parent, text="雷达检查", 
+                                 command=self.open_radar_window,
+                                 width=20)
+        radar_button.pack(pady=2, fill="x")
+        
+        # 喇叭测试
+        speaker_button = ttk.Button(parent, text="喇叭测试", 
+                                   command=self.open_speaker_window,
+                                   width=20)
+        speaker_button.pack(pady=2, fill="x")
+        
+        # 多声道测试
+        multichannel_button = ttk.Button(parent, text="多声道测试", 
+                                        command=self.open_multichannel_window,
+                                        width=20)
+        multichannel_button.pack(pady=2, fill="x")
+    
+    def setup_debug_category(self, parent):
+        """设置音频调试分类"""
+        # 说明文字
+        desc_label = ttk.Label(parent, text="音频系统调试和日志分析", 
+                              font=("Arial", 9), foreground="gray")
+        desc_label.pack(pady=(0, 10))
+        
+        # Loopback和Ref测试
+        loopback_button = ttk.Button(parent, text="Loopback和Ref测试", 
+                                    command=self.open_loopback_window,
+                                    width=20)
+        loopback_button.pack(pady=2, fill="x")
+        
+        # HAL录音
+        hal_button = ttk.Button(parent, text="HAL录音", 
+                               command=self.open_hal_window,
+                               width=20)
+        hal_button.pack(pady=2, fill="x")
+        
+        # Logcat日志
+        logcat_button = ttk.Button(parent, text="Logcat日志", 
+                                  command=self.open_logcat_window,
+                                  width=20)
+        logcat_button.pack(pady=2, fill="x")
+    
+    def setup_common_category(self, parent):
+        """设置常用功能分类"""
+        # 说明文字
+        desc_label = ttk.Label(parent, text="日常使用的便民功能", 
+                              font=("Arial", 9), foreground="gray")
+        desc_label.pack(pady=(0, 10))
+        
+        # 本地播放
+        playback_button = ttk.Button(parent, text="本地播放", 
+                                    command=self.open_playback_window,
+                                    width=20)
+        playback_button.pack(pady=2, fill="x")
+        
+        # 截图功能
+        screenshot_button = ttk.Button(parent, text="截图功能", 
+                                      command=self.open_screenshot_window,
+                                      width=20)
+        screenshot_button.pack(pady=2, fill="x")
+        
+        # 遥控器
+        remote_button = ttk.Button(parent, text="遥控器", 
+                                  command=self.open_remote_window,
+                                  width=20)
+        remote_button.pack(pady=2, fill="x")
+    
+    # 以下是各个功能窗口的打开方法
+    def open_sweep_window(self):
+        """打开扫频测试窗口"""
+        self.create_function_window("扫频测试", self.setup_sweep_tab)
+    
+    def open_mic_window(self):
+        """打开麦克风测试窗口"""
+        self.create_function_window("麦克风测试", self.setup_mic_tab)
+    
+    def open_radar_window(self):
+        """打开雷达检查窗口"""
+        self.create_function_window("雷达检查", self.setup_radar_tab)
+    
+    def open_speaker_window(self):
+        """打开喇叭测试窗口"""
+        self.create_function_window("喇叭测试", self.setup_speaker_tab)
+    
+    def open_multichannel_window(self):
+        """打开多声道测试窗口"""
+        self.create_function_window("多声道测试", self.setup_multichannel_tab)
+    
+    def open_loopback_window(self):
+        """打开Loopback和Ref测试窗口"""
+        self.create_function_window("Loopback和Ref测试", self.setup_loopback_tab)
+    
+    def open_hal_window(self):
+        """打开HAL录音窗口"""
+        self.create_function_window("HAL录音", self.setup_hal_recording_tab)
+    
+    def open_logcat_window(self):
+        """打开Logcat日志窗口"""
+        self.create_function_window("Logcat日志", self.setup_logcat_tab)
+    
+    def open_playback_window(self):
+        """打开本地播放窗口"""
+        self.create_function_window("本地播放", self.setup_local_playback_tab)
+    
+    def open_screenshot_window(self):
+        """打开截图功能窗口"""
+        self.create_function_window("截图功能", self.setup_screenshot_tab)
+    
+    def open_remote_window(self):
+        """打开遥控器窗口"""
+        self.create_function_window("遥控器", self.setup_remote_tab)
+    
+    def create_function_window(self, title, setup_func):
+        """创建功能窗口的通用方法"""
+        # 创建新窗口
+        # 这里的 parent 是 Tk root，不是业务对象；新窗口直接挂在 root 上即可
+        window = tk.Toplevel(getattr(self, "root", self.parent))
+        window.title(title)
+        window.geometry("900x700")
+
+        # 鼠标进入窗口时自动获得焦点（配合“键盘挂载”体验更好）
+        try:
+            window.bind("<Enter>", lambda e: window.focus_set(), add=True)
+        except Exception:
+            pass
+        
+        # 设置窗口图标（如果存在）
+        try:
+            if os.path.exists("logo/AcouTest.ico"):
+                window.iconbitmap("logo/AcouTest.ico")
+        except:
+            pass
+        
+        # 创建主框架
+        main_frame = ttk.Frame(window, padding=10)
+        main_frame.pack(fill="both", expand=True)
+        
+        # 说明：本项目采用 mixin（AudioTestTool 继承 UIComponents/DeviceOperations/TestOperations），
+        # setup_func 绑定的 self 就是主应用实例，因此无需再创建“handler”桥接对象。
+        setup_func(main_frame)
     
     def setup_loopback_tab(self, parent):
         """设置Loopback和Ref测试标签页"""
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
         
-        # 添加标题说明
-        title_label = ttk.Label(frame, text="播放音频并同时录制通道音频", font=("Arial", 11, "bold"))
-        title_label.pack(pady=(10, 0))
-        subtitle_label = ttk.Label(frame, text="用于验证音频回路和参考信号", font=("Arial", 9))
-        subtitle_label.pack(pady=(0, 10))
+        # 删除标题说明，直接开始参数设置
+        # title_label = ttk.Label(frame, text="播放音频并同时录制通道音频", font=("Arial", 11, "bold"))
+        # title_label.pack(pady=(10, 0))
+        # subtitle_label = ttk.Label(frame, text="用于验证音频回路和参考信号", font=("Arial", 9))
+        # subtitle_label.pack(pady=(0, 10))
         
         # 缺少初始化的变量
         self.audio_source_var = tk.StringVar(value="default")
         
-        # 创建设置区域
+        # 创建设置区域 - 减少上边距
         settings_frame = ttk.LabelFrame(frame, text="参数设置")
-        settings_frame.pack(fill="x", padx=20, pady=10)
+        settings_frame.pack(fill="x", padx=20, pady=(5, 10))
         
         # 设备参数设置 - 使用网格布局
         grid_frame = ttk.Frame(settings_frame)
@@ -52,7 +1145,7 @@ class UIComponents:
         
         # 添加保存路径设置
         ttk.Label(grid_frame, text="保存路径:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.loopback_save_path_var = tk.StringVar(value=os.path.join(os.getcwd(), "test"))
+        self.loopback_save_path_var = tk.StringVar(value=get_output_dir(DIR_LOOPBACK))
         path_frame = ttk.Frame(grid_frame)
         path_frame.grid(row=3, column=1, columnspan=3, sticky="w", padx=5, pady=5)
         
@@ -85,6 +1178,27 @@ class UIComponents:
             value="default"
         )
         default_radio.pack(anchor="w", padx=10, pady=2)
+
+        # 默认音频路径显示 + 打开位置（和喇叭测试一致）
+        default_loopback_audio_path = os.path.join(os.getcwd(), "audio", "Nums_7dot1_16_48000.wav")
+        self.default_loopback_audio_path_var = tk.StringVar(value=default_loopback_audio_path)
+
+        default_path_frame = ttk.Frame(audio_frame)
+        default_path_frame.pack(fill="x", padx=10, pady=(0, 6))
+
+        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).pack(side="left", padx=(10, 6))
+        default_path_entry = ttk.Entry(default_path_frame, textvariable=self.default_loopback_audio_path_var)
+        default_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        default_path_entry.config(state="readonly")
+
+        open_default_folder_btn = ttk.Button(
+            default_path_frame,
+            text="打开位置",
+            style="Small.TButton",
+            command=lambda p=default_loopback_audio_path: self.open_containing_folder(p),
+            width=8,
+        )
+        open_default_folder_btn.pack(side="left", padx=(0, 10))
         
         # 自定义音频选项
         custom_frame = ttk.Frame(audio_frame)
@@ -133,81 +1247,165 @@ class UIComponents:
         ttk.Label(frame, textvariable=self.loopback_status_var, font=("Arial", 10)).pack(anchor="center", pady=10)
     
     def setup_mic_tab(self, parent):
-        """设置麦克风测试选项卡"""
-        frame = ttk.Frame(parent, padding=20)
-        frame.pack(fill="both", expand=True)
+        """设置麦克风测试标签页"""
+        print("开始设置麦克风测试标签页")
+        
+        # 确保所有必要的变量都已初始化
+        if not hasattr(self, 'mic_count_var') or self.mic_count_var is None:
+            self.mic_count_var = tk.StringVar(value="4")
+            print("初始化 mic_count_var")
+        
+        if not hasattr(self, 'pcm_device_var') or self.pcm_device_var is None:
+            self.pcm_device_var = tk.StringVar(value="0")
+            print("初始化 pcm_device_var")
+        
+        if not hasattr(self, 'device_id_var') or self.device_id_var is None:
+            self.device_id_var = tk.StringVar(value="3")
+            print("初始化 device_id_var")
+        
+        if not hasattr(self, 'rate_var') or self.rate_var is None:
+            self.rate_var = tk.StringVar(value="16000")
+            print("初始化 rate_var")
+        
+        if not hasattr(self, 'mic_save_path_var') or self.mic_save_path_var is None:
+            self.mic_save_path_var = tk.StringVar(value=get_output_dir(DIR_MIC_TEST))
+            print("初始化 mic_save_path_var")
+        
+        if not hasattr(self, 'mic_info_var') or self.mic_info_var is None:
+            self.mic_info_var = tk.StringVar(value="准备就绪")
+            print("初始化 mic_info_var")
+        
+        # 创建主框架（使用 ttk：更现代、字体/间距可统一、按钮默认灰色）
+        main_frame = ttk.Frame(parent, padding=(16, 16))
+        main_frame.pack(fill="both", expand=True)
         
         # 标题
-        title_label = ttk.Label(frame, text="麦克风测试", style="Header.TLabel")
-        title_label.pack(pady=10)
+        title_label = ttk.Label(main_frame, text="麦克风测试", style="Header.TLabel")
+        title_label.pack(pady=(0, 12))
         
-        # 参数设置区域
-        settings_frame = ttk.LabelFrame(frame, text="测试设置", padding=10)
-        settings_frame.pack(fill="x", padx=10, pady=10)
+        # 测试设置框架
+        settings_frame = ttk.LabelFrame(main_frame, text="测试设置", padding=(12, 8))
+        settings_frame.pack(fill="x", pady=(0, 14))
         
-        # 麦克风数量选择
-        mic_frame = ttk.Frame(settings_frame)
-        mic_frame.pack(fill="x", pady=5)
+        # 创建设置项
+        # 麦克风数量
+        mic_count_frame = ttk.Frame(settings_frame)
+        mic_count_frame.pack(fill="x", pady=6)
         
-        ttk.Label(mic_frame, text="麦克风数量:").pack(side="left", padx=5)
+        ttk.Label(mic_count_frame, text="麦克风数量:").pack(side="left")
+        # 允许：下拉选择 + 手动输入（不改变UI布局/配色）
+        def _validate_positive_int_input(proposed_value: str) -> bool:
+            """只允许输入数字（允许为空，便于用户删除后重新输入）"""
+            return proposed_value == "" or proposed_value.isdigit()
+
+        mic_count_combo = ttk.Combobox(
+            mic_count_frame,
+            textvariable=self.mic_count_var,
+            values=["1", "2", "3", "4", "5", "6", "7", "8"],
+            state="normal",  # 可输入
+            width=10,
+            validate="key",
+            validatecommand=(parent.register(_validate_positive_int_input), "%P"),
+        )
+        mic_count_combo.pack(side="left", padx=(10, 0))
         
-        self.mic_count_var = tk.StringVar(value="4")  # 默认值为4
-        mic_combobox = ttk.Combobox(mic_frame, textvariable=self.mic_count_var, 
-                                   values=["2", "4"], width=5, state="readonly")
-        mic_combobox.pack(side="left", padx=5)
-        
-        # PCM设备设置
+        # PCM设备
         pcm_frame = ttk.Frame(settings_frame)
-        pcm_frame.pack(fill="x", pady=5)
+        pcm_frame.pack(fill="x", pady=6)
         
-        ttk.Label(pcm_frame, text="PCM设备(-D):").pack(side="left", padx=5)
+        ttk.Label(pcm_frame, text="PCM设备(-D):").pack(side="left")
+        pcm_entry = ttk.Entry(pcm_frame, textvariable=self.pcm_device_var, width=15)
+        pcm_entry.pack(side="left", padx=(10, 0))
         
-        self.mic_pcm_var = tk.StringVar(value="0")
-        pcm_entry = ttk.Entry(pcm_frame, textvariable=self.mic_pcm_var, width=5)
-        pcm_entry.pack(side="left", padx=5)
+        # 设备ID
+        device_id_frame = ttk.Frame(settings_frame)
+        device_id_frame.pack(fill="x", pady=6)
         
-        # 设备ID设置
-        device_frame = ttk.Frame(settings_frame)
-        device_frame.pack(fill="x", pady=5)
+        ttk.Label(device_id_frame, text="设备ID(-d):").pack(side="left")
+        device_id_entry = ttk.Entry(device_id_frame, textvariable=self.device_id_var, width=15)
+        device_id_entry.pack(side="left", padx=(10, 0))
         
-        ttk.Label(device_frame, text="设备ID(-d):").pack(side="left", padx=5)
-        
-        self.mic_device_var = tk.StringVar(value="3")
-        device_entry = ttk.Entry(device_frame, textvariable=self.mic_device_var, width=5)
-        device_entry.pack(side="left", padx=5)
-        
-        # 采样率设置
+        # 采样率
         rate_frame = ttk.Frame(settings_frame)
-        rate_frame.pack(fill="x", pady=5)
+        rate_frame.pack(fill="x", pady=6)
         
-        ttk.Label(rate_frame, text="采样率(-r):").pack(side="left", padx=5)
+        ttk.Label(rate_frame, text="采样率(-r):").pack(side="left")
+        # 允许：下拉选择 + 手动输入（仅数字）
+        def _validate_rate_input(proposed_value: str) -> bool:
+            return proposed_value == "" or proposed_value.isdigit()
+
+        rate_combo = ttk.Combobox(
+            rate_frame,
+            textvariable=self.rate_var,
+            values=["8000", "16000", "44100", "48000"],
+            state="normal",
+            width=12,
+            validate="key",
+            validatecommand=(parent.register(_validate_rate_input), "%P"),
+        )
+        rate_combo.pack(side="left", padx=(10, 0))
         
-        self.mic_rate_var = tk.StringVar(value="16000")
-        rate_combobox = ttk.Combobox(rate_frame, textvariable=self.mic_rate_var, 
-                                     values=["8000", "16000", "44100", "48000"], width=8)
-        rate_combobox.pack(side="left", padx=5)
+        # 控制按钮框架
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(pady=12)
         
-        # 按钮区域
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(pady=20)
+        # 开始测试按钮
+        def on_start_click():
+            print("开始按钮被点击")
+            try:
+                if hasattr(self, 'start_mic_test'):
+                    print("找到 start_mic_test 方法，准备调用")
+                    self.start_mic_test()
+                else:
+                    print("错误：找不到 start_mic_test 方法")
+                    print(f"可用方法: {[method for method in dir(self) if 'mic' in method.lower()]}")
+            except Exception as e:
+                print(f"调用 start_mic_test 出错: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # 开始按钮
-        self.start_mic_button = ttk.Button(button_frame, text="开始麦克风测试", 
-                                  command=self.start_mic_test, width=15)
-        self.start_mic_button.pack(side="left", padx=10, expand=True)
+        self.start_mic_button = ttk.Button(
+            control_frame, 
+            text="开始麦克风测试", 
+            command=on_start_click,
+            width=16
+        )
+        self.start_mic_button.pack(side="left", padx=(0, 10))
         
-        # 停止按钮
-        self.stop_mic_button = ttk.Button(button_frame, text="停止录制", 
-                                 command=self.stop_mic_test, width=15, state="disabled")
-        self.stop_mic_button.pack(side="left", padx=10, expand=True)
+        # 停止测试按钮
+        def on_stop_click():
+            print("停止按钮被点击")
+            try:
+                if hasattr(self, 'stop_mic_test'):
+                    print("找到 stop_mic_test 方法，准备调用")
+                    self.stop_mic_test()
+                else:
+                    print("错误：找不到 stop_mic_test 方法")
+            except Exception as e:
+                print(f"调用 stop_mic_test 出错: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # 状态区域
-        status_frame = ttk.Frame(frame)
-        status_frame.pack(fill="x", pady=10)
+        self.stop_mic_button = ttk.Button(
+            control_frame, 
+            text="停止录制", 
+            command=on_stop_click,
+            width=16,
+            state="disabled"
+        )
+        self.stop_mic_button.pack(side="left", padx=10)
         
-        self.mic_status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(status_frame, textvariable=self.mic_status_var)
-        status_label.pack(side="left")
+        # 状态显示框架
+        status_frame = ttk.Frame(main_frame)
+        status_frame.pack(fill="x", pady=(10, 0))
+        
+        ttk.Label(status_frame, text="状态", style="Header.TLabel").pack()
+        
+        # 状态信息显示
+        info_label = ttk.Label(status_frame, textvariable=self.mic_info_var, style="Muted.TLabel")
+        info_label.pack(pady=(6, 0))
+        
+        print("麦克风测试UI创建完成")
     
     def setup_multichannel_tab(self, parent):
         """设置多声道测试选项卡"""
@@ -311,212 +1509,153 @@ class UIComponents:
                                 command=self.show_debug_info, width=15)
         debug_button.pack(pady=5)
     
-    def setup_sweep_tab(self, parent):
-        """设置扫频测试选项卡"""
+    def setup_sweep_tab(self, parent, handler=None):
+        """设置扫频测试标签页"""
+        # 如果没有传递handler，使用当前应用实例（self）
+        # 注意：self.parent 是 Tk root，不包含设备变量/ADB方法，不能作为业务handler使用
+        if handler is None:
+            handler = self
+        
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill="both", expand=True)
         
-        # 创建上下两栏布局
-        top_frame = ttk.Frame(frame)
-        top_frame.pack(fill="x", pady=5)
-        
-        bottom_frame = ttk.Frame(frame)
-        bottom_frame.pack(fill="both", expand=True, pady=5)
-        
-        # 上部 - 控制区域
-        control_frame = ttk.LabelFrame(top_frame, text="扫频控制", padding=5)
-        control_frame.pack(fill="x", expand=True)
-        
-        # 扫频文件选择
-        file_frame = ttk.Frame(control_frame)
-        file_frame.pack(fill="x", pady=2)
-        
         # 扫频类型选择
-        self.sweep_type_var = tk.StringVar(value="custom")
-        ttk.Radiobutton(file_frame, text="大象扫频文件", variable=self.sweep_type_var, 
-                      value="elephant", command=self.update_sweep_file_options, 
-                      style="Small.TCheckbutton").pack(side="left", padx=10)
-        ttk.Radiobutton(file_frame, text="自定义扫频文件", variable=self.sweep_type_var, 
-                      value="custom", command=self.update_sweep_file_options, 
-                      style="Small.TCheckbutton").pack(side="left", padx=10)
+        type_frame = ttk.Frame(frame)
+        type_frame.pack(fill="x", pady=5)
         
-        # 批量测试选项
-        self.sweep_batch_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(file_frame, text="批量测试所有文件", variable=self.sweep_batch_var,
-                      style="Small.TCheckbutton").pack(side="right", padx=10)
+        ttk.Label(type_frame, text="扫频类型:").pack(side="left")
         
-        # 扫频文件下拉框
-        file_select_frame = ttk.Frame(control_frame)
-        file_select_frame.pack(fill="x", pady=2)
+        self.sweep_type_var = tk.StringVar(value="elephant")
+        ttk.Radiobutton(type_frame, text="大象扫频文件", variable=self.sweep_type_var, 
+                       value="elephant", command=lambda: self.update_sweep_file_options(handler)).pack(side="left", padx=(10, 0))
+        ttk.Radiobutton(type_frame, text="自定义扫频文件", variable=self.sweep_type_var, 
+                       value="custom", command=lambda: self.update_sweep_file_options(handler)).pack(side="left", padx=(10, 0))
         
-        ttk.Label(file_select_frame, text="扫频文件:", font=("Arial", 9)).pack(side="left", padx=2)
+        # 文件选择
+        file_frame = ttk.Frame(frame)
+        file_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(file_frame, text="扫频文件:").pack(side="left")
         
         self.sweep_file_var = tk.StringVar()
-        self.sweep_file_combobox = ttk.Combobox(file_select_frame, textvariable=self.sweep_file_var, 
-                                              width=40, state="readonly")
-        self.sweep_file_combobox.pack(side="left", fill="x", expand=True, padx=2)
+        self.sweep_file_combobox = ttk.Combobox(file_frame, textvariable=self.sweep_file_var, 
+                                           width=50, state="readonly")
+        self.sweep_file_combobox.pack(side="left", padx=(10, 5))
         
-        # 添加自定义文件按钮
-        self.add_custom_sweep_button = ttk.Button(file_select_frame, text="添加文件", 
-                                               command=self.add_custom_sweep_file, width=10, 
-                                               style="Small.TButton")
-        self.add_custom_sweep_button.pack(side="right", padx=2)
-        
-        # 播放设置
-        playback_frame = ttk.LabelFrame(control_frame, text="播放设置", padding=5)
-        playback_frame.pack(fill="x", pady=5)
-        
-        # 播放设备选择
-        device_frame = ttk.Frame(playback_frame)
-        device_frame.pack(fill="x", pady=2)
-        
-        ttk.Label(device_frame, text="播放设备:", font=("Arial", 9)).pack(side="left", padx=2)
-        
-        # 播放设备下拉菜单 - 使用PCM设备号
-        self.sweep_playback_device_var = tk.StringVar(value="0")
-        playback_device_combobox = ttk.Combobox(device_frame, textvariable=self.sweep_playback_device_var, 
-                                          width=5, values=["0", "1", "2", "3", "4", "5"])
-        playback_device_combobox.pack(side="left", padx=2)
-        
-        # 播放卡号
-        ttk.Label(device_frame, text="卡号:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_playback_card_var = tk.StringVar(value="0")
-        ttk.Combobox(device_frame, textvariable=self.sweep_playback_card_var, 
-               width=5, values=["0", "1", "2"]).pack(side="left", padx=2)
-        
-        # 播放参数
-        param_frame = ttk.Frame(playback_frame)
-        param_frame.pack(fill="x", pady=2)
-        
-        ttk.Label(param_frame, text="采样率:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_playback_rate_var = tk.StringVar(value="48000")
-        ttk.Entry(param_frame, textvariable=self.sweep_playback_rate_var, 
-                font=("Arial", 9), width=8).pack(side="left", padx=2)
-        
-        ttk.Label(param_frame, text="通道数:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_playback_channels_var = tk.StringVar(value="4")
-        ttk.Entry(param_frame, textvariable=self.sweep_playback_channels_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
-        
-        ttk.Label(param_frame, text="位深:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_playback_bits_var = tk.StringVar(value="16")
-        ttk.Entry(param_frame, textvariable=self.sweep_playback_bits_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        self.add_custom_sweep_button = ttk.Button(file_frame, text="添加文件", 
+                                             command=lambda: self.add_custom_sweep_file(handler))
+        self.add_custom_sweep_button.pack(side="left", padx=5)
         
         # 录制设置
-        recording_frame = ttk.LabelFrame(control_frame, text="录制设置", padding=5)
-        recording_frame.pack(fill="x", pady=5)
+        record_frame = ttk.LabelFrame(frame, text="录制设置")
+        record_frame.pack(fill="x", pady=5)
         
-        # 录制设备选择
-        rec_device_frame = ttk.Frame(recording_frame)
-        rec_device_frame.pack(fill="x", pady=2)
+        record_line1 = ttk.Frame(record_frame)
+        record_line1.pack(fill="x", padx=10, pady=2)
         
-        ttk.Label(rec_device_frame, text="录制设备:", font=("Arial", 9)).pack(side="left", padx=2)
+        ttk.Label(record_line1, text="设备:", font=("Arial", 8)).pack(side="left")
+        self.record_device_var = tk.StringVar(value="0")  # 修正为设备0
+        ttk.Combobox(record_line1, textvariable=self.record_device_var, 
+                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
         
-        # 录制设备下拉菜单 - 使用PCM设备号
-        self.sweep_recording_device_var = tk.StringVar(value="7")  # 默认使用LOOPBACK-A设备
-        recording_device_combobox = ttk.Combobox(rec_device_frame, textvariable=self.sweep_recording_device_var, 
-                                           width=5, values=["0", "1", "2", "3", "4", "5", "6", "7"])
-        recording_device_combobox.pack(side="left", padx=2)
+        ttk.Label(record_line1, text="卡号:", font=("Arial", 8)).pack(side="left")
+        self.record_card_var = tk.StringVar(value="3")  # 修正为卡3
+        ttk.Combobox(record_line1, textvariable=self.record_card_var, 
+                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
         
-        # 录制卡号
-        ttk.Label(rec_device_frame, text="卡号:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_card_var = tk.StringVar(value="0")
-        ttk.Combobox(rec_device_frame, textvariable=self.sweep_recording_card_var, 
-               width=5, values=["0", "1", "2"]).pack(side="left", padx=2)
+        ttk.Label(record_line1, text="通道:", font=("Arial", 8)).pack(side="left")
+        self.record_channels_var = tk.StringVar(value="4")
+        ttk.Combobox(record_line1, textvariable=self.record_channels_var, 
+                    values=["1", "2", "4", "8"], width=5, state="readonly").pack(side="left", padx=(5, 10))
         
-        # 录制参数
-        rec_param_frame = ttk.Frame(recording_frame)
-        rec_param_frame.pack(fill="x", pady=2)
+        ttk.Label(record_line1, text="采样率:", font=("Arial", 8)).pack(side="left")
+        self.record_rate_var = tk.StringVar(value="16000")
+        ttk.Combobox(record_line1, textvariable=self.record_rate_var, 
+                    values=["8000", "16000", "44100", "48000"], width=8, state="readonly").pack(side="left", padx=5)
         
-        ttk.Label(rec_param_frame, text="采样率:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_rate_var = tk.StringVar(value="16000")
-        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_rate_var, 
-                font=("Arial", 9), width=8).pack(side="left", padx=2)
+        # 播放设置
+        play_frame = ttk.LabelFrame(frame, text="播放设置")
+        play_frame.pack(fill="x", pady=5)
         
-        ttk.Label(rec_param_frame, text="通道数:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_channels_var = tk.StringVar(value="10")
-        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_channels_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        play_line1 = ttk.Frame(play_frame)
+        play_line1.pack(fill="x", padx=10, pady=2)
         
-        ttk.Label(rec_param_frame, text="位深:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_bits_var = tk.StringVar(value="16")
-        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_bits_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        ttk.Label(play_line1, text="设备:", font=("Arial", 8)).pack(side="left")
+        self.play_device_var = tk.StringVar(value="0")  # 播放设备0
+        ttk.Combobox(play_line1, textvariable=self.play_device_var, 
+                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
         
-        ttk.Label(rec_param_frame, text="时长(秒):", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_duration_var = tk.StringVar(value="5")  # 增加默认录制时长
-        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_duration_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        ttk.Label(play_line1, text="卡号:", font=("Arial", 8)).pack(side="left")
+        self.play_card_var = tk.StringVar(value="0")  # 播放卡0
+        ttk.Combobox(play_line1, textvariable=self.play_card_var, 
+                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=5)
         
-        # 周期大小
-        ttk.Label(rec_param_frame, text="周期:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.sweep_recording_periods_var = tk.StringVar(value="480")
-        ttk.Entry(rec_param_frame, textvariable=self.sweep_recording_periods_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
+        # 测试设置
+        test_frame = ttk.LabelFrame(frame, text="测试设置")
+        test_frame.pack(fill="x", pady=5)
         
-        # 批量测试间隔
-        batch_frame = ttk.Frame(recording_frame)
-        batch_frame.pack(fill="x", pady=2)
+        test_line1 = ttk.Frame(test_frame)
+        test_line1.pack(fill="x", padx=10, pady=2)
         
-        ttk.Label(batch_frame, text="批量测试间隔:", font=("Arial", 9)).pack(side="left", padx=2)
-        self.batch_interval_var = tk.StringVar(value="5")
-        ttk.Entry(batch_frame, textvariable=self.batch_interval_var, 
-                font=("Arial", 9), width=5).pack(side="left", padx=2)
-        ttk.Label(batch_frame, text="秒", font=("Arial", 9)).pack(side="left")
+        ttk.Label(test_line1, text="录制时长(秒):").pack(side="left")
+        self.sweep_duration_var = tk.StringVar(value="5")
+        ttk.Entry(test_line1, textvariable=self.sweep_duration_var, width=5).pack(side="left", padx=(5, 15))
         
-        # 保存路径设置
-        save_path_frame = ttk.Frame(control_frame)
-        save_path_frame.pack(fill="x", pady=2)
+        # 批量测试选项
+        self.batch_test_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(test_line1, text="批量测试", variable=self.batch_test_var).pack(side="left", padx=(0, 15))
         
-        ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
+        ttk.Label(test_line1, text="间隔时间(秒):").pack(side="left")
+        self.batch_interval_var = tk.StringVar(value="2")
+        ttk.Entry(test_line1, textvariable=self.batch_interval_var, width=5).pack(side="left", padx=5)
         
-        # 设置默认保存路径为当前目录下的sweep_recordings文件夹
-        default_save_path = os.path.join(os.getcwd(), "sweep_recordings")
-        if not os.path.exists(default_save_path):
-            os.makedirs(default_save_path, exist_ok=True)
-        
-        self.sweep_save_path_var = tk.StringVar(value=default_save_path)
-        save_path_entry = ttk.Entry(save_path_frame, textvariable=self.sweep_save_path_var, font=("Arial", 9))
-        save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
-        
-        browse_save_button = ttk.Button(save_path_frame, text="浏览", 
-                                      command=self.browse_sweep_save_path, width=5, style="Small.TButton")
-        browse_save_button.pack(side="right", padx=2)
-        
-        # 操作按钮
-        button_frame = ttk.Frame(control_frame)
-        button_frame.pack(fill="x", pady=5)
+        # 控制按钮
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill="x", pady=10)
         
         self.start_sweep_button = ttk.Button(button_frame, text="开始扫频测试", 
-                                          command=self.start_sweep_test, width=15, style="TButton")
+                                        command=lambda: self.start_sweep_test(handler))
         self.start_sweep_button.pack(side="left", padx=5)
         
         self.stop_sweep_button = ttk.Button(button_frame, text="停止测试", 
-                                         command=self.stop_sweep_test, width=15, style="TButton", state="disabled")
+                                       command=lambda: self.stop_sweep_test(handler), state="disabled")
         self.stop_sweep_button.pack(side="left", padx=5)
         
-        self.open_sweep_folder_button = ttk.Button(button_frame, text="打开文件夹", 
-                                                command=self.open_sweep_folder, width=15, style="TButton")
-        self.open_sweep_folder_button.pack(side="right", padx=5)
+        ttk.Button(button_frame, text="打开文件夹", 
+                  command=self.open_sweep_folder).pack(side="left", padx=5)
         
-        # 下部 - 信息区域
-        info_frame = ttk.LabelFrame(bottom_frame, text="测试信息", padding=5)
-        info_frame.pack(fill="both", expand=True)
+        ttk.Button(button_frame, text="浏览保存路径", 
+                  command=self.browse_sweep_save_path).pack(side="left", padx=5)
+        
+        # 保存路径
+        path_frame = ttk.Frame(frame)
+        path_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(path_frame, text="保存路径:").pack(side="left")
+        self.sweep_save_path_var = tk.StringVar(value=get_output_dir(DIR_SWEEP_RECORDINGS))
+        ttk.Entry(path_frame, textvariable=self.sweep_save_path_var, width=60).pack(side="left", padx=(10, 0), fill="x", expand=True)
+        
+        # 状态和信息显示
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill="both", expand=True, pady=5)
+        
+        # 状态标签
+        self.sweep_status_var = tk.StringVar(value="就绪")
+        ttk.Label(status_frame, textvariable=self.sweep_status_var, font=("Arial", 10, "bold")).pack(anchor="w")
         
         # 信息文本框
-        self.sweep_info_text = tk.Text(info_frame, height=10, font=("Arial", 9), wrap="word")
-        self.sweep_info_text.pack(fill="both", expand=True, pady=2)
-        self.sweep_info_text.insert("1.0", "扫频测试信息将显示在这里...\n")
-        self.sweep_info_text.config(state="disabled")
+        info_frame = ttk.LabelFrame(status_frame, text="测试信息")
+        info_frame.pack(fill="both", expand=True, pady=(5, 0))
         
-        # 底部状态显示
-        self.sweep_status_var = tk.StringVar(value="就绪")
-        status_label = ttk.Label(frame, textvariable=self.sweep_status_var, font=("Arial", 9))
-        status_label.pack(pady=2)
+        self.sweep_info_text = tk.Text(info_frame, height=10, wrap="word")
+        scrollbar = ttk.Scrollbar(info_frame, command=self.sweep_info_text.yview)
+        self.sweep_info_text.config(yscrollcommand=scrollbar.set)
         
-        # 初始化扫频文件列表
-        self.update_sweep_file_options()
+        self.sweep_info_text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # 初始化文件选项
+        self.update_sweep_file_options(handler)
     
     def setup_hal_recording_tab(self, parent):
         """设置 HAL 录音选项卡"""
@@ -676,11 +1815,8 @@ class UIComponents:
         
         ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
         
-        # 设置默认保存路径为当前目录下的hal_dump文件夹
-        default_save_path = os.path.join(os.getcwd(), "hal_dump")
-        if not os.path.exists(default_save_path):
-            os.makedirs(default_save_path, exist_ok=True)
-        
+        # 默认保存到 output/hal_dump
+        default_save_path = ensure_output_dir(DIR_HAL_DUMP)
         self.hal_save_path_var = tk.StringVar(value=default_save_path)
         save_path_entry = ttk.Entry(save_path_frame, textvariable=self.hal_save_path_var, font=("Arial", 9))
         save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
@@ -892,7 +2028,7 @@ class UIComponents:
         save_path_frame.pack(fill="x", pady=5, padx=5)
         
         ttk.Label(save_path_frame, text="本地保存路径:").pack(side="left", padx=5)
-        self.custom_save_path_var = tk.StringVar(value="test/hal_recordings")
+        self.custom_save_path_var = tk.StringVar(value=get_output_dir(DIR_HAL_CUSTOM))
         save_path_entry = ttk.Entry(save_path_frame, textvariable=self.custom_save_path_var, width=20)
         save_path_entry.pack(side="left", padx=5, fill="x", expand=True)
         
@@ -960,11 +2096,8 @@ class UIComponents:
         
         ttk.Label(save_path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
         
-        # 设置默认保存路径为当前目录下的screenshots文件夹
-        default_save_path = os.path.join(os.getcwd(), "screenshots")
-        if not os.path.exists(default_save_path):
-            os.makedirs(default_save_path, exist_ok=True)
-        
+        # 默认保存到 output/screenshots
+        default_save_path = ensure_output_dir(DIR_SCREENSHOTS)
         self.screenshot_save_path_var = tk.StringVar(value=default_save_path)
         save_path_entry = ttk.Entry(save_path_frame, textvariable=self.screenshot_save_path_var, font=("Arial", 9))
         save_path_entry.pack(side="left", fill="x", expand=True, padx=2)
@@ -1076,6 +2209,28 @@ class UIComponents:
         default_status_label = ttk.Label(default_status_frame, textvariable=self.default_audio_status_var,
                                        foreground="blue")
         default_status_label.pack(anchor="w", padx=5)
+
+        # 默认音频路径显示（让用户清楚“默认音频放哪里/当前路径是什么”）
+        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+        self.default_speaker_audio_path_var = tk.StringVar(value=default_audio_path)
+
+        default_path_frame = ttk.Frame(audio_frame)
+        default_path_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).pack(side="left", padx=(5, 5))
+        default_path_entry = ttk.Entry(default_path_frame, textvariable=self.default_speaker_audio_path_var)
+        default_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        default_path_entry.config(state="readonly")
+
+        # 打开所在文件夹
+        open_default_folder_btn = ttk.Button(
+            default_path_frame,
+            text="打开位置",
+            style="Small.TButton",
+            command=lambda p=default_audio_path: self.open_containing_folder(p),
+            width=8,
+        )
+        open_default_folder_btn.pack(side="left", padx=(0, 5))
         
         # 添加默认音频文件按钮
         self.add_default_audio_button = ttk.Button(default_status_frame, text="添加默认音频文件", 
@@ -1105,23 +2260,23 @@ class UIComponents:
         """设置Logcat选项卡"""
         # 创建框架
         frame = ttk.Frame(parent)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        # 创建标题
-        ttk.Label(frame, text="音频日志控制", style="Header.TLabel").pack(pady=10)
+        # 删除标题，直接开始布局
+        # ttk.Label(frame, text="音频日志控制", style="Header.TLabel").pack(pady=10)
         
-        # 左右分栏布局
+        # 左右分栏布局（左：属性管理；右：日志控制/日志信息）
         main_frame = ttk.Frame(frame)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        main_frame.pack(fill="both", expand=True, padx=6, pady=5)
         
-        # 左侧属性管理区域 - 设置宽度为40%
+        # 左侧属性管理区域（略加宽，避免长属性被遮挡/截断）
         left_frame = ttk.Frame(main_frame, width=320)
-        left_frame.pack(side="left", fill="both", padx=5, pady=5)
+        left_frame.pack(side="left", fill="both", padx=(2, 2), pady=5)
         left_frame.pack_propagate(False)  # 防止子组件改变frame大小
         
-        # 右侧日志控制区域 - 设置宽度为60%
+        # 右侧日志控制区域
         right_frame = ttk.Frame(main_frame)
-        right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+        right_frame.pack(side="right", fill="both", expand=True, padx=(2, 2), pady=5)
         
         # 左侧 - 属性管理
         props_frame = ttk.LabelFrame(left_frame, text="logcat属性管理")
@@ -1157,23 +2312,30 @@ class UIComponents:
                                       width=8, style="Small.TButton")
         deselect_all_button.pack(side="left", padx=5, pady=2)
         
-        # 属性列表区域 - 使用Canvas和Scrollbar
+        # 属性列表区域 - 使用Canvas和Scrollbar（滚动条尽量窄，避免“遮挡/挤压”属性文本）
         canvas_frame = ttk.Frame(props_frame)
-        canvas_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        canvas_frame.pack(fill="both", expand=True, padx=3, pady=5)
         
         # 创建Canvas和Scrollbar，调整Scrollbar样式使其更明显
         self.logcat_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        # 注意：部分 Tk/ttk 版本的 ttk.Scrollbar 不支持 width 这个 widget option（打包时会报 unknown option "-width"）
+        # 这里不传 width，尽量通过 style/padding 控制视觉宽度。
         scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.logcat_canvas.yview)
         
         # 配置滚动条样式使其更加明显
         self.style = ttk.Style()
-        self.style.configure("Logcat.Vertical.TScrollbar", background="#bbbbbb", troughcolor="#dddddd", 
-                            arrowcolor="#555555", bordercolor="#999999")
+        self.style.configure(
+            "Logcat.Vertical.TScrollbar",
+            background="#bbbbbb",
+            troughcolor="#dddddd",
+            arrowcolor="#555555",
+            bordercolor="#999999",
+        )
         scrollbar.configure(style="Logcat.Vertical.TScrollbar")
         
         self.logcat_canvas.configure(yscrollcommand=scrollbar.set)
         
-        scrollbar.pack(side="right", fill="y")
+        scrollbar.pack(side="right", fill="y", padx=(2, 0))
         self.logcat_canvas.pack(side="left", fill="both", expand=True)
         
         # 创建属性列表框架
@@ -1221,7 +2383,7 @@ class UIComponents:
         
         ttk.Label(path_frame, text="保存路径:", font=("Arial", 9)).pack(side="left", padx=2)
         
-        self.logcat_save_path_var = tk.StringVar(value=os.path.join(os.getcwd(), "logcat"))
+        self.logcat_save_path_var = tk.StringVar(value=get_output_dir(DIR_LOGCAT))
         path_entry = ttk.Entry(path_frame, textvariable=self.logcat_save_path_var)
         path_entry.pack(side="left", padx=2, fill="x", expand=True)
         
@@ -1252,41 +2414,41 @@ class UIComponents:
         filter_entry = ttk.Entry(filter_frame, textvariable=self.logcat_filter_var)
         filter_entry.pack(side="left", padx=2, fill="x", expand=True)
         
-        # 操作按钮
-        button_frame = ttk.Frame(control_frame)
-        button_frame.pack(fill="x", padx=5, pady=5)
-        
-        self.enable_debug_button = ttk.Button(button_frame, text="放开打印", 
+        # 操作按钮：两行用 grid 对齐，上下列对齐、间距一致
+        btn_container = ttk.Frame(control_frame)
+        btn_container.pack(fill="x", padx=5, pady=5)
+        # 第一行：放开打印、停止打印
+        self.enable_debug_button = ttk.Button(btn_container, text="放开打印",
                                             command=self.enable_logcat_debug,
-                                            style="Small.TButton")
-        self.enable_debug_button.pack(side="left", padx=5)
-        
-        self.disable_debug_button = ttk.Button(button_frame, text="停止打印", 
+                                            style="Small.TButton", width=8)
+        self.enable_debug_button.grid(row=0, column=0, padx=(0, 6), pady=(0, 4), sticky="w")
+        self.disable_debug_button = ttk.Button(btn_container, text="停止打印",
                                              command=self.disable_logcat_debug,
-                                             style="Small.TButton")
-        self.disable_debug_button.pack(side="left", padx=5)
+                                             style="Small.TButton", width=8)
+        self.disable_debug_button.grid(row=0, column=1, padx=(0, 6), pady=(0, 4), sticky="w")
         self.disable_debug_button.config(state="disabled")
-        
-        # 日志抓取按钮
-        capture_frame = ttk.Frame(control_frame)
-        capture_frame.pack(fill="x", padx=5, pady=5)
-        
-        self.start_capture_button = ttk.Button(capture_frame, text="开始抓取", 
+        # 第二行：开始抓取、停止抓取、打开文件夹（与第一行列对齐）
+        self.start_capture_button = ttk.Button(btn_container, text="开始抓取",
                                              command=self.start_logcat_capture,
-                                             style="Small.TButton")
-        self.start_capture_button.pack(side="left", padx=5)
+                                             style="Small.TButton", width=8)
+        self.start_capture_button.grid(row=1, column=0, padx=(0, 6), pady=(0, 0), sticky="w")
         
-        self.stop_capture_button = ttk.Button(capture_frame, text="停止抓取", 
+        self.stop_capture_button = ttk.Button(btn_container, text="停止抓取",
                                             command=self.stop_logcat_capture,
-                                            style="Small.TButton")
-        self.stop_capture_button.pack(side="left", padx=5)
+                                            style="Small.TButton", width=8)
+        self.stop_capture_button.grid(row=1, column=1, padx=(0, 6), pady=(0, 0), sticky="w")
         self.stop_capture_button.config(state="disabled")
         
-        open_folder_button = ttk.Button(capture_frame, text="打开文件夹", 
-                                      command=self.open_logcat_folder,
-                                      style="Small.TButton")
-        open_folder_button.pack(side="left", padx=5)
-        
+        open_folder_button = ttk.Button(
+            btn_container,
+            text="打开文件夹",
+            command=self.open_logcat_folder,
+            style="Small.TButton",
+            width=9,
+        )
+        # 放到同一排按钮组里，避免“孤零零靠右”造成割裂感
+        open_folder_button.grid(row=1, column=2, padx=(0, 0), pady=(0, 0), sticky="w")
+
         # 状态显示
         status_frame = ttk.LabelFrame(right_frame, text="日志信息")
         status_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1301,6 +2463,488 @@ class UIComponents:
         
         # 清理已有的删除按钮
         self.root.after(100, self.clean_logcat_delete_buttons)
+
+    def setup_system_cmd_tab(self, parent):
+        """系统指令（独立子标签页）"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        # 直接复用面板组件：按钮 -> 弹窗（Ctrl+F/刷新/保存）
+        self._setup_system_cmd_panel(frame)
+
+    def _setup_system_cmd_panel(self, parent):
+        """Logcat日志右侧：系统指令面板（点击后弹窗显示结果，支持 Ctrl+F 搜索/刷新/保存）"""
+        lf = ttk.LabelFrame(parent, text="系统指令")
+        lf.pack(fill="both", expand=True, padx=5, pady=5)
+
+        tip = ttk.Label(lf, text="点击按钮获取设备信息（弹窗支持 Ctrl+F 搜索/刷新/保存）", style="Muted.TLabel")
+        tip.pack(anchor="w", padx=8, pady=(6, 6))
+
+        btns = ttk.Frame(lf)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+
+        commands = [
+            ("dumpsys media.audio_policy", "dumpsys media.audio_policy"),
+            ("dumpsys media.audio_flinger", "dumpsys media.audio_flinger"),
+            ("dumpsys audio", "dumpsys audio"),
+            ("tinymix", "tinymix"),
+            ("getprop", "getprop"),
+            ("getprop ro.build.fingerprint", "getprop ro.build.fingerprint"),
+            ("dumpsys input", "dumpsys input"),
+        ]
+
+        for i, (label, cmd) in enumerate(commands):
+            r, c = divmod(i, 1)
+            b = ttk.Button(
+                btns,
+                text=label,
+                style="Small.TButton",
+                command=lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd),
+            )
+            b.grid(row=r, column=c, sticky="ew", pady=4)
+            btns.grid_columnconfigure(c, weight=1)
+
+        # 设备维护：解锁/重启等（注意：可能触发清数据，需要强提示）
+        maint = ttk.LabelFrame(lf, text="设备解锁")
+        maint.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(
+            maint,
+            text="Bootloader 解锁 + root/remount",
+            style="Small.TButton",
+            command=self.open_device_unlock_window,
+        ).pack(fill="x", padx=8, pady=8)
+
+        # 自定义指令
+        custom_lf = ttk.LabelFrame(lf, text="自定义指令")
+        custom_lf.pack(fill="x", padx=8, pady=(0, 8))
+
+        self._syscmd_custom_var = getattr(self, "_syscmd_custom_var", tk.StringVar())
+        entry = ttk.Entry(custom_lf, textvariable=self._syscmd_custom_var)
+        entry.pack(side="left", fill="x", expand=True, padx=(8, 6), pady=6)
+
+        ttk.Button(
+            custom_lf,
+            text="运行",
+            style="Small.TButton",
+            command=lambda: self.open_system_cmd_window("custom", (self._syscmd_custom_var.get() or "").strip()),
+            width=6,
+        ).pack(side="right", padx=(0, 8), pady=6)
+
+    def open_system_cmd_window(self, title: str, shell_cmd: str):
+        """打开系统指令结果弹窗并执行"""
+        shell_cmd = (shell_cmd or "").strip()
+        if not shell_cmd:
+            messagebox.showerror("错误", "请输入要执行的系统指令（例如：dumpsys media.audio）")
+            return
+
+        # 设备检查：复用现有逻辑
+        if hasattr(self, "check_device_selected") and not self.check_device_selected():
+            return
+
+        serial = ""
+        try:
+            serial = (self.device_var.get() or "").strip()
+        except Exception:
+            serial = ""
+        if not serial:
+            messagebox.showerror("错误", "请先选择设备")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"{title} 结果")
+        win.geometry("980x720")
+        try:
+            win.bind("<Enter>", lambda e: win.focus_set(), add=True)
+        except Exception:
+            pass
+
+        topbar = ttk.Frame(win)
+        topbar.pack(fill="x", padx=10, pady=(10, 6))
+
+        ttk.Label(topbar, text=f"命令：{shell_cmd}", style="Muted.TLabel").pack(side="left", fill="x", expand=True)
+
+        # 控件：刷新/保存
+        btn_refresh = ttk.Button(topbar, text="刷新", style="Small.TButton")
+        btn_refresh.pack(side="right", padx=(6, 0))
+        btn_save = ttk.Button(topbar, text="保存", style="Small.TButton")
+        btn_save.pack(side="right", padx=(6, 0))
+
+        # 搜索栏（Ctrl+F 呼出）
+        findbar = ttk.Frame(win)
+        findbar.pack(fill="x", padx=10, pady=(0, 6))
+        ttk.Label(findbar, text="查找：").pack(side="left")
+        find_var = tk.StringVar()
+        find_entry = ttk.Entry(findbar, textvariable=find_var, width=30)
+        find_entry.pack(side="left", padx=(6, 6))
+        btn_find_next = ttk.Button(findbar, text="下一个", style="Small.TButton", width=7)
+        btn_find_next.pack(side="left")
+        hint = ttk.Label(findbar, text="（支持 Ctrl+F 搜索内容）", style="Muted.TLabel")
+        hint.pack(side="left", padx=(8, 0))
+
+        # 文本区
+        text_frame = ttk.Frame(win)
+        text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        txt = tk.Text(text_frame, wrap="none", font=("Consolas", 9))
+        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+        hsb = ttk.Scrollbar(text_frame, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        txt.pack(side="left", fill="both", expand=True)
+
+        txt.tag_configure("hit", background="#ffe58a")
+        txt.tag_configure("hit_cur", background="#ffd666")
+
+        state = {"last_output": "", "last_cmd": shell_cmd, "last_title": title, "cur_index": "1.0"}
+
+        def _set_text(content: str):
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("1.0", content or "")
+            txt.config(state="disabled")
+            state["last_output"] = content or ""
+            state["cur_index"] = "1.0"
+
+        def _run_cmd_async():
+            btn_refresh.config(state="disabled")
+            btn_save.config(state="disabled")
+            _set_text("正在执行...\n")
+
+            def worker():
+                try:
+                    # shell=False：避免 Windows 下 %xx/%s 被 cmd.exe 展开导致 input/text 类命令异常
+                    result = subprocess.run(
+                        ["adb", "-s", serial, "shell"] + shlex.split(state["last_cmd"]),
+                        capture_output=True,
+                        text=True,
+                    )
+                    out = (result.stdout or "")
+                    err = (result.stderr or "")
+                    if result.returncode != 0 and err:
+                        out = out + ("\n\n[stderr]\n" + err)
+                    elif err:
+                        out = out + ("\n\n[stderr]\n" + err)
+                except Exception as e:
+                    out = f"执行失败：{type(e).__name__}: {e}"
+
+                self.root.after(0, lambda: (_set_text(out), btn_refresh.config(state="normal"), btn_save.config(state="normal")))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _highlight_all(needle: str):
+            txt.config(state="normal")
+            txt.tag_remove("hit", "1.0", "end")
+            txt.tag_remove("hit_cur", "1.0", "end")
+            if not needle:
+                txt.config(state="disabled")
+                return
+            start = "1.0"
+            while True:
+                pos = txt.search(needle, start, stopindex="end", nocase=True)
+                if not pos:
+                    break
+                end = f"{pos}+{len(needle)}c"
+                txt.tag_add("hit", pos, end)
+                start = end
+            txt.config(state="disabled")
+
+        def _find_next():
+            needle = (find_var.get() or "").strip()
+            if not needle:
+                return
+            _highlight_all(needle)
+            txt.config(state="normal")
+            pos = txt.search(needle, state["cur_index"], stopindex="end", nocase=True)
+            if not pos:
+                pos = txt.search(needle, "1.0", stopindex="end", nocase=True)
+            if pos:
+                end = f"{pos}+{len(needle)}c"
+                txt.tag_remove("hit_cur", "1.0", "end")
+                txt.tag_add("hit_cur", pos, end)
+                txt.see(pos)
+                state["cur_index"] = end
+            txt.config(state="disabled")
+
+        def _on_ctrl_f(_e=None):
+            try:
+                find_entry.focus_set()
+                find_entry.selection_range(0, "end")
+            except Exception:
+                pass
+            return "break"
+
+        win.bind("<Control-f>", _on_ctrl_f, add=True)
+        win.bind("<Control-F>", _on_ctrl_f, add=True)
+        btn_find_next.config(command=_find_next)
+        find_entry.bind("<Return>", lambda e: (_find_next(), "break"), add=True)
+        find_entry.bind("<KeyRelease>", lambda e: _highlight_all((find_var.get() or "").strip()), add=True)
+
+        def _save():
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = f"{state['last_title']}_{ts}.txt".replace(" ", "_")
+            path = filedialog.asksaveasfilename(
+                title="保存输出",
+                defaultextension=".txt",
+                initialfile=default_name,
+                filetypes=[("Text", "*.txt"), ("All", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8", errors="ignore") as f:
+                    f.write(state["last_output"] or "")
+            except Exception as e:
+                messagebox.showerror("错误", f"保存失败：{type(e).__name__}: {e}")
+
+        btn_refresh.config(command=_run_cmd_async)
+        btn_save.config(command=_save)
+
+        # 运行一次
+        _run_cmd_async()
+
+    def open_device_unlock_window(self):
+        """
+        设备解锁序列（按用户给定步骤）：
+        1) adb reboot bootloader
+        2) fastboot flashing unlock  (通常需要在设备端确认，且可能清除数据)
+        3) fastboot reboot
+        4) adb root  & adb remount
+        5) adb reboot
+        """
+        # 设备检查：复用现有逻辑
+        if hasattr(self, "check_device_selected") and not self.check_device_selected():
+            return
+
+        try:
+            serial = (self.device_var.get() or "").strip()
+        except Exception:
+            serial = ""
+        if not serial:
+            messagebox.showerror("错误", "请先选择设备")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("设备解锁（Bootloader）/root&remount")
+        win.geometry("980x720")
+        try:
+            win.bind("<Enter>", lambda e: win.focus_set(), add=True)
+        except Exception:
+            pass
+
+        header = ttk.LabelFrame(win, text="重要提示")
+        header.pack(fill="x", padx=10, pady=(10, 8))
+        warn = (
+            "此操作通常会触发【解锁 Bootloader】，很多设备会【清除全部用户数据】。\n"
+            "并且 fastboot flashing unlock 需要你在设备端确认。\n"
+            "确认你已经备份数据，并理解风险后再执行。"
+        )
+        ttk.Label(header, text=warn, foreground="#b00020").pack(anchor="w", padx=10, pady=8)
+
+        steps = ttk.LabelFrame(win, text="将依次执行的命令")
+        steps.pack(fill="x", padx=10, pady=(0, 8))
+        cmd_lines = [
+            "adb reboot bootloader",
+            "fastboot flashing unlock",
+            "fastboot reboot",
+            "adb root",
+            "adb remount",
+            "adb reboot",
+        ]
+        ttk.Label(steps, text="\n".join(cmd_lines), style="Muted.TLabel").pack(anchor="w", padx=10, pady=8)
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(0, 8))
+        status_var = tk.StringVar(value="就绪")
+        ttk.Label(bar, textvariable=status_var).pack(side="left")
+        btn_run = ttk.Button(bar, text="一键执行", style="Small.TButton")
+        btn_stop = ttk.Button(bar, text="停止", style="Small.TButton")
+        btn_save = ttk.Button(bar, text="保存日志", style="Small.TButton")
+        btn_save.pack(side="right")
+        btn_stop.pack(side="right", padx=(6, 0))
+        btn_run.pack(side="right", padx=(6, 0))
+
+        text_frame = ttk.Frame(win)
+        text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        txt = tk.Text(text_frame, wrap="none", font=("Consolas", 9))
+        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
+        hsb = ttk.Scrollbar(text_frame, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        txt.pack(side="left", fill="both", expand=True)
+
+        stop_event = threading.Event()
+        state = {"log": ""}  # 保存最新日志用于保存
+
+        def _append(s: str):
+            state["log"] += s
+            txt.config(state="normal")
+            txt.insert("end", s)
+            txt.see("end")
+            txt.config(state="disabled")
+
+        def _run_proc(argv, wait_label: str):
+            """可中断执行一个进程，返回 (returncode, stdout, stderr)"""
+            status_var.set(wait_label)
+            _append(f"\n$ {' '.join(argv)}\n")
+            try:
+                p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            except Exception as e:
+                return 127, "", f"{type(e).__name__}: {e}"
+
+            out_chunks = []
+            err_chunks = []
+            while True:
+                if stop_event.is_set():
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                    return 130, "".join(out_chunks), "".join(err_chunks) + "\n[stopped]\n"
+                try:
+                    o, e = p.communicate(timeout=0.2)
+                    out_chunks.append(o or "")
+                    err_chunks.append(e or "")
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+                except Exception as ex:
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                    return 1, "".join(out_chunks), "".join(err_chunks) + f"\n[{type(ex).__name__}: {ex}]\n"
+
+            return p.returncode, "".join(out_chunks), "".join(err_chunks)
+
+        def _wait_fastboot(timeout_s=60):
+            """等待设备进入 fastboot"""
+            start = time.time()
+            while time.time() - start < timeout_s and not stop_event.is_set():
+                rc, out, err = _run_proc(["fastboot", "devices"], "等待 fastboot 设备...")
+                if rc == 0 and out.strip():
+                    return True
+                time.sleep(1)
+            return False
+
+        def _wait_adb(timeout_s=120):
+            """等待 adb 设备上线"""
+            start = time.time()
+            while time.time() - start < timeout_s and not stop_event.is_set():
+                rc, out, err = _run_proc(["adb", "-s", serial, "get-state"], "等待 adb 设备上线...")
+                if rc == 0 and ("device" in (out or "") or "device" in (err or "")):
+                    return True
+                time.sleep(1)
+            return False
+
+        def _worker():
+            btn_run.config(state="disabled")
+            btn_stop.config(state="normal")
+            btn_save.config(state="disabled")
+            stop_event.clear()
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.config(state="disabled")
+            state["log"] = ""
+
+            def done(msg: str):
+                status_var.set(msg)
+                btn_run.config(state="normal")
+                btn_stop.config(state="disabled")
+                btn_save.config(state="normal")
+
+            if not messagebox.askyesno("危险操作确认", "该流程可能会清除设备数据，确定继续吗？"):
+                done("已取消")
+                return
+
+            _append(f"开始时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+            # 1) adb reboot bootloader
+            rc, out, err = _run_proc(["adb", "-s", serial, "reboot", "bootloader"], "重启到 bootloader...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+            if rc != 0:
+                done(f"失败：adb reboot bootloader（rc={rc}）")
+                return
+
+            # 等待 fastboot
+            if not _wait_fastboot(timeout_s=90):
+                done("失败：未检测到 fastboot 设备")
+                return
+
+            # 2) fastboot flashing unlock（需要用户在设备端确认）
+            _append("\n注意：下一步需要在设备端确认解锁（可能清数据）。\n")
+            rc, out, err = _run_proc(["fastboot", "flashing", "unlock"], "执行 fastboot flashing unlock（等待设备确认）...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+            if rc != 0:
+                done(f"失败：fastboot flashing unlock（rc={rc}）")
+                return
+
+            # 3) fastboot reboot
+            rc, out, err = _run_proc(["fastboot", "reboot"], "fastboot reboot...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+            if rc != 0:
+                done(f"失败：fastboot reboot（rc={rc}）")
+                return
+
+            # 等待 adb
+            if not _wait_adb(timeout_s=180):
+                done("失败：设备未重新上线（adb）")
+                return
+
+            # 4) adb root & adb remount
+            rc, out, err = _run_proc(["adb", "-s", serial, "root"], "adb root...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+
+            rc, out, err = _run_proc(["adb", "-s", serial, "remount"], "adb remount...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+
+            # 5) adb reboot
+            rc, out, err = _run_proc(["adb", "-s", serial, "reboot"], "adb reboot...")
+            _append(out)
+            if err:
+                _append("\n[stderr]\n" + err + "\n")
+
+            done("完成（请等待设备重启）")
+
+        def _start():
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _stop():
+            stop_event.set()
+            status_var.set("正在停止...")
+
+        def _save():
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_name = f"unlock_sequence_{ts}.txt"
+            path = filedialog.asksaveasfilename(
+                title="保存日志",
+                defaultextension=".txt",
+                initialfile=default_name,
+                filetypes=[("Text", "*.txt"), ("All", "*.*")],
+            )
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8", errors="ignore") as f:
+                    f.write(state["log"] or "")
+            except Exception as e:
+                messagebox.showerror("错误", f"保存失败：{type(e).__name__}: {e}")
+
+        btn_run.config(command=_start)
+        btn_stop.config(command=_stop)
+        btn_save.config(command=_save)
+        btn_stop.config(state="disabled")
 
     def clean_logcat_delete_buttons(self):
         """清理Logcat属性列表中所有删除按钮"""
@@ -1328,11 +2972,11 @@ class UIComponents:
         # 复选框
         var = tk.BooleanVar(value=True)
         check = ttk.Checkbutton(prop_frame, variable=var, text="")
-        check.pack(side="left", padx=1)
+        check.pack(side="left", padx=(0, 2))
         
         # 属性名标签 - 使用更小的字体，显示为"属性名 属性值"
         prop_label = ttk.Label(prop_frame, text=f"{prop_name} {prop_value}", font=("Arial", 9))
-        prop_label.pack(side="left", padx=2, fill="x", expand=True)
+        prop_label.pack(side="left", padx=(0, 2), fill="x", expand=True)
         
         # 保存属性信息
         self.logcat_props_vars.append({
@@ -1513,17 +3157,22 @@ class UIComponents:
             return
         
         try:
-            self.status_var.set("正在适配遥控器...")
+            self.remote_status_var.set("正在适配遥控器...")
             
-            # 直接执行遥控器适配命令，不显示确认对话框
+            # 直接执行遥控器适配命令
             pairing_cmd = self.get_adb_command("shell am broadcast -a com.nes.intent.action.NES_RESET_LONGPRESS")
-            subprocess.run(pairing_cmd, shell=True)
+            result = subprocess.run(pairing_cmd, shell=True, capture_output=True, text=True)
             
-            # 简单更新状态，不显示消息框
-            self.status_var.set("遥控器适配已启动")
+            if result.returncode != 0:
+                raise Exception(f"适配命令执行失败: {result.stderr}")
+            
+            # 简单更新状态
+            self.remote_status_var.set("遥控器适配已启动")
             
         except Exception as e:
-            self.status_var.set(f"适配遥控器失败: {str(e)}")
+            error_msg = f"适配遥控器失败: {str(e)}"
+            self.remote_status_var.set(error_msg)
+            messagebox.showerror("错误", f"适配遥控器时出错:\n{str(e)}")
     
     def update_readme_with_remote_info(self):
         """更新README文件中的遥控器配对说明"""
@@ -1562,30 +3211,24 @@ class UIComponents:
         remote_frame = ttk.LabelFrame(frame, text="遥控器控制")
         remote_frame.pack(fill="both", expand=True, pady=5)
         
-        # 创建滚动画布以支持更多按钮
-        canvas = tk.Canvas(remote_frame)
-        scrollbar = ttk.Scrollbar(remote_frame, orient="vertical", command=canvas.yview)
-        self.remote_content_frame = ttk.Frame(canvas)
+        # 固定布局：不使用滚动（按你的要求“固定居中就 OK”）
+        self.remote_content_frame = ttk.Frame(remote_frame)
+        self.remote_content_frame.pack(fill="x", expand=False)
         
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # 创建窗口来放置内容框架
-        canvas_window = canvas.create_window((0, 0), window=self.remote_content_frame, anchor="nw")
-        
-        # 配置画布大小随内容调整
-        def configure_canvas(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(canvas_window, width=event.width)
-        
-        self.remote_content_frame.bind("<Configure>", configure_canvas)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
-        
-        # 设置按钮部分
-        # 1. 方向键和确认键部分
-        direction_frame = ttk.Frame(self.remote_content_frame)
-        direction_frame.pack(pady=10)
+        # 遥控器按键区域：整体居中（避免右侧留白过大）
+        # 做法：三列布局 [弹性空白 | 内容 | 弹性空白]
+        center_wrap = ttk.Frame(self.remote_content_frame)
+        center_wrap.pack(fill="x", pady=10)
+        center_wrap.grid_columnconfigure(0, weight=1)
+        center_wrap.grid_columnconfigure(1, weight=0)
+        center_wrap.grid_columnconfigure(2, weight=1)
+
+        controls_frame = ttk.Frame(center_wrap)
+        controls_frame.grid(row=0, column=1)
+
+        # 1. 方向键和确认键部分（左侧）
+        direction_frame = ttk.Frame(controls_frame)
+        direction_frame.grid(row=0, column=0, padx=20, pady=0)
         
         # 上方向键
         up_button = ttk.Button(direction_frame, text="↑", 
@@ -1615,33 +3258,204 @@ class UIComponents:
                                 width=5, style="Remote.TButton")
         down_button.grid(row=2, column=1, pady=2)
         
-        # 2. 音量和返回/配对按钮
-        volume_frame = ttk.Frame(self.remote_content_frame)
-        volume_frame.pack(pady=10)
+        # 设置按钮：直接打开系统设置（更符合你的使用习惯）
+        # am start -n com.android.tv.settings/.MainSettings
+        settings_button = ttk.Button(
+            direction_frame,
+            text="设置",
+            command=lambda: self.launch_quick_action("系统设置", ("shell", "am start -n com.android.tv.settings/.MainSettings")),
+            width=8,
+            style="Remote.TButton",
+        )
+        settings_button.grid(row=3, column=1, pady=8)
+        
+        # 2. 音量和返回/配对按钮（右侧）
+        volume_frame = ttk.Frame(controls_frame)
+        volume_frame.grid(row=0, column=1, padx=20, pady=0)
         
         # 音量增加
         vol_up_button = ttk.Button(volume_frame, text="Vol+", 
                                   command=lambda: self.send_keycode("VOLUME_UP"), 
                                   width=8, style="Remote.TButton")
-        vol_up_button.grid(row=0, column=0, padx=10, pady=5)
+        vol_up_button.grid(row=0, column=0, padx=5, pady=5)
         
         # 返回按钮
         back_button = ttk.Button(volume_frame, text="返回", 
                                 command=lambda: self.send_keycode("BACK"), 
                                 width=8, style="Remote.TButton")
-        back_button.grid(row=0, column=1, padx=10, pady=5)
+        back_button.grid(row=0, column=1, padx=5, pady=5)
         
         # 音量减少
         vol_down_button = ttk.Button(volume_frame, text="Vol-", 
                                     command=lambda: self.send_keycode("VOLUME_DOWN"), 
                                     width=8, style="Remote.TButton")
-        vol_down_button.grid(row=1, column=0, padx=10, pady=5)
+        vol_down_button.grid(row=1, column=0, padx=5, pady=5)
         
         # 配对遥控器
         pair_button = ttk.Button(volume_frame, text="配对遥控", 
                                command=self.adapt_remote_controller, 
                                width=8, style="Remote.TButton")
-        pair_button.grid(row=1, column=1, padx=10, pady=5)
+        pair_button.grid(row=1, column=1, padx=5, pady=5)
+
+        # 3) 快捷应用：一键打开常用 App（YouTube/Netflix 等）
+        # 说明：这里可能会被用户不断新增自定义项，如果不做滚动就会把后面的内容“顶出去”
+        # 处理：仅让“快捷应用内容区”可滚动；上面的遥控器区域保持固定居中，不影响整体布局。
+        quick_frame = ttk.LabelFrame(frame, text="快捷应用")
+        quick_frame.pack(fill="both", expand=True, pady=(8, 0))
+
+        ttk.Label(
+            quick_frame,
+            text="点击按钮后会在设备上启动对应应用（前提：ADB已连接；部分应用需已安装）。",
+            style="Muted.TLabel" if "Muted.TLabel" in ttk.Style().theme_names() else "TLabel",
+        ).pack(anchor="w", padx=10, pady=(6, 4))
+
+        quick_canvas_wrap = ttk.Frame(quick_frame)
+        quick_canvas_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        quick_canvas = tk.Canvas(quick_canvas_wrap, height=220, highlightthickness=0, bd=0)
+        quick_vsb = ttk.Scrollbar(quick_canvas_wrap, orient="vertical", command=quick_canvas.yview)
+        quick_canvas.configure(yscrollcommand=quick_vsb.set)
+
+        quick_canvas.pack(side="left", fill="both", expand=True)
+        quick_vsb.pack(side="right", fill="y")
+
+        quick_content = ttk.Frame(quick_canvas)
+        quick_window_id = quick_canvas.create_window((0, 0), window=quick_content, anchor="nw")
+
+        def _quick_on_content_configure(_e=None):
+            try:
+                quick_canvas.configure(scrollregion=quick_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def _quick_on_canvas_configure(e):
+            # 让内部内容宽度跟随 canvas，避免按钮区被压缩
+            try:
+                quick_canvas.itemconfigure(quick_window_id, width=e.width)
+            except Exception:
+                pass
+
+        quick_content.bind("<Configure>", _quick_on_content_configure, add=True)
+        quick_canvas.bind("<Configure>", _quick_on_canvas_configure, add=True)
+
+        # 鼠标滚轮滚动（仅在鼠标位于该区域时生效）
+        def _quick_on_mousewheel(e):
+            try:
+                # Windows: e.delta 通常为 120 的倍数
+                quick_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            except Exception:
+                pass
+            return "break"
+
+        def _bind_wheel(_e=None):
+            try:
+                quick_canvas.bind_all("<MouseWheel>", _quick_on_mousewheel, add=True)
+            except Exception:
+                pass
+
+        def _unbind_wheel(_e=None):
+            try:
+                quick_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+
+        quick_canvas.bind("<Enter>", _bind_wheel, add=True)
+        quick_canvas.bind("<Leave>", _unbind_wheel, add=True)
+
+        apps_grid = ttk.Frame(quick_content)
+        apps_grid.pack(fill="x", pady=(0, 6))
+
+        # 内置快捷项（按你的要求：Prime Video 用 am start -n；去掉 设置/Disney/Spotify）
+        builtin_quick_apps = [
+            ("YouTube", ("package", ["com.google.android.youtube.tv", "com.google.android.youtube"])),
+            ("Netflix", ("package", ["com.netflix.ninja", "com.netflix.mediaclient"])),
+            ("Prime Video", ("shell", "am start -n com.amazon.amazonvideo.livingroom/com.amazon.ignition.IgnitionActivity")),
+            ("HPlayer", ("activity", "com.nes.seihplayer/.ui.MainActivity")),
+            ("Humming EQ", ("package", ["com.nes.sound"])),
+        ]
+
+        # 自定义快捷项：名称 + 打开指令，可新增/删除（仅运行期保存）
+        if not hasattr(self, "_custom_quick_apps") or self._custom_quick_apps is None:
+            self._custom_quick_apps = []  # list[dict{name:str, cmd:str}]
+
+        custom_add_frame = ttk.LabelFrame(quick_content, text="自定义快捷（可新增/删除）")
+        custom_add_frame.pack(fill="x", pady=(0, 8))
+
+        custom_name_var = tk.StringVar()
+        custom_cmd_var = tk.StringVar()
+
+        row1 = ttk.Frame(custom_add_frame)
+        row1.pack(fill="x", padx=8, pady=(6, 4))
+        ttk.Label(row1, text="名称:").pack(side="left")
+        ttk.Entry(row1, textvariable=custom_name_var, width=16).pack(side="left", padx=(6, 12))
+        ttk.Label(row1, text="打开指令:").pack(side="left")
+        ttk.Entry(row1, textvariable=custom_cmd_var).pack(side="left", padx=(6, 6), fill="x", expand=True)
+
+        custom_list_frame = ttk.Frame(custom_add_frame)
+        custom_list_frame.pack(fill="x", padx=8, pady=(0, 6))
+
+        def _delete_custom(index: int):
+            try:
+                self._custom_quick_apps.pop(index)
+            except Exception:
+                pass
+            _render_quick_apps()
+
+        def _render_quick_apps():
+            # 清空按钮区
+            for w in apps_grid.winfo_children():
+                w.destroy()
+
+            items = list(builtin_quick_apps)
+            for item in self._custom_quick_apps:
+                items.append((item["name"], ("shell", item["cmd"])))
+
+            cols = 3
+            for i, (label, spec) in enumerate(items):
+                r, c = divmod(i, cols)
+                btn = ttk.Button(
+                    apps_grid,
+                    text=label,
+                    command=lambda _spec=spec, _label=label: self.launch_quick_action(_label, _spec),
+                    style="Small.TButton",
+                    width=14,
+                )
+                btn.grid(row=r, column=c, padx=6, pady=6, sticky="ew")
+                apps_grid.grid_columnconfigure(c, weight=1)
+
+            # 刷新自定义列表
+            for w in custom_list_frame.winfo_children():
+                w.destroy()
+            if not self._custom_quick_apps:
+                ttk.Label(custom_list_frame, text="（暂无自定义快捷）", style="Muted.TLabel").pack(anchor="w")
+            else:
+                for idx, item in enumerate(list(self._custom_quick_apps)):
+                    row = ttk.Frame(custom_list_frame)
+                    row.pack(fill="x", pady=2)
+                    ttk.Label(row, text=item["name"], width=14).pack(side="left")
+                    ttk.Label(row, text=item["cmd"], style="Muted.TLabel").pack(side="left", fill="x", expand=True)
+                    ttk.Button(row, text="删除", style="Small.TButton", width=6, command=lambda i=idx: _delete_custom(i)).pack(side="right")
+
+        def _add_custom():
+            name = (custom_name_var.get() or "").strip()
+            cmd = (custom_cmd_var.get() or "").strip()
+            if not name:
+                messagebox.showerror("错误", "请输入快捷名称")
+                return
+            if not cmd:
+                messagebox.showerror("错误", "请输入打开指令（例如：am start -n 包名/Activity）")
+                return
+            self._custom_quick_apps.append({"name": name, "cmd": cmd})
+            custom_name_var.set("")
+            custom_cmd_var.set("")
+            _render_quick_apps()
+
+        ttk.Button(row1, text="添加", style="Small.TButton", width=6, command=_add_custom).pack(side="right")
+
+        hint = "提示：指令填写 adb shell 里的内容即可（会自动加 shell），例如：am start -n 包名/Activity"
+        ttk.Label(custom_add_frame, text=hint, style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
+
+        _render_quick_apps()
         
         # 状态显示
         status_frame = ttk.Frame(frame)
@@ -1654,7 +3468,7 @@ class UIComponents:
         instruction_frame = ttk.LabelFrame(frame, text="配对说明")
         instruction_frame.pack(fill="both", expand=True, pady=10)
         
-        instruction_text = tk.Text(instruction_frame, height=8, wrap="word")
+        instruction_text = tk.Text(instruction_frame, height=6, wrap="word")
         instruction_text.pack(fill="both", expand=True, padx=5, pady=5)
         instruction_text.insert("1.0", "配对步骤：\n"
                               + "1. 确保遥控器有电池并处于待配对状态\n"
@@ -1664,14 +3478,12 @@ class UIComponents:
                               + "注意：如果遥控器已经配对，请先在设备设置中删除旧的配对记录")
         instruction_text.config(state="disabled")
 
-        # 添加设置按钮
-        settings_button = ttk.Button(direction_frame, text="设置", 
-                                 command=lambda: self.send_keycode("KEYCODE_MENU"), 
-                                 width=8, style="Remote.TButton")
-        settings_button.grid(row=3, column=1, pady=8)
-    
-    def setup_radar_tab(self, parent):
+    def setup_radar_tab(self, parent, handler=None):
         """设置雷达检查选项卡"""
+        # handler 必须是“业务对象”（拥有 device_var / check_device_selected 等），不能是 Tk root
+        if handler is None:
+            handler = self
+        
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
         
@@ -1692,12 +3504,12 @@ class UIComponents:
         # 方法1: TTY设备检查
         tty_frame = ttk.Frame(notebook, padding=10)
         notebook.add(tty_frame, text="TTY设备检查")
-        self.setup_tty_check(tty_frame)
+        self.setup_tty_check(tty_frame, handler)
         
         # 方法2: logcat监控
         logcat_frame = ttk.Frame(notebook, padding=10)
         notebook.add(logcat_frame, text="Logcat监控")
-        self.setup_radar_logcat(logcat_frame)
+        self.setup_radar_logcat(logcat_frame, handler)
         
         # 方法3: AIEQ操作指南
         aieq_frame = ttk.Frame(notebook, padding=10)
@@ -1709,7 +3521,7 @@ class UIComponents:
         status_label = ttk.Label(frame, textvariable=self.radar_status_var)
         status_label.pack(pady=5)
 
-    def setup_tty_check(self, parent):
+    def setup_tty_check(self, parent, handler):
         """TTY设备检查设置"""
         # 说明
         ttk.Label(parent, text="检查设备中是否存在ttyACM设备，存在则表明有雷达节点，是否工作还需要进一步检查").pack(pady=5)
@@ -1719,7 +3531,7 @@ class UIComponents:
         action_frame.pack(fill="x", pady=10)
         
         check_button = ttk.Button(action_frame, text="检查TTY设备", 
-                                command=self.check_tty_devices, width=15, style="Small.TButton")
+                                command=lambda: self.check_tty_devices(handler), width=15, style="Small.TButton")
         check_button.pack(side="left", padx=5)
         
         # 结果显示区域
@@ -1730,34 +3542,15 @@ class UIComponents:
         self.tty_result_text = tk.Text(result_frame, height=10, width=50)
         self.tty_result_text.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # 添加滚动条
-        scrollbar = ttk.Scrollbar(self.tty_result_text, command=self.tty_result_text.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.tty_result_text.config(yscrollcommand=scrollbar.set)
-        
         # 初始状态
         self.tty_result_text.insert("1.0", "点击\"检查TTY设备\"按钮开始检查...\n")
         self.tty_result_text.config(state="disabled")
 
-    def setup_radar_logcat(self, parent):
+    def setup_radar_logcat(self, parent, handler):
         """Logcat监控设置"""
         # 说明部分减小高度
-        ttk.Label(parent, text="监控logcat中的updateGain日志，遮挡雷达传感器时应该有数值变化", 
+        ttk.Label(parent, text="监控logcat日志并过滤关键词（默认updateGain），遮挡雷达传感器时应该有数值变化", 
                  font=("Arial", 9)).pack(pady=2)
-        
-        # 操作区域减小高度
-        action_frame = ttk.Frame(parent)
-        action_frame.pack(fill="x", pady=5)
-        
-        self.start_radar_monitor_button = ttk.Button(action_frame, text="开始监控", 
-                                                   command=self.start_radar_monitor, width=15,
-                                                   style="Small.TButton")
-        self.start_radar_monitor_button.pack(side="left", padx=5)
-        
-        self.stop_radar_monitor_button = ttk.Button(action_frame, text="停止监控", 
-                                                  command=self.stop_radar_monitor, width=15, 
-                                                  state="disabled", style="Small.TButton")
-        self.stop_radar_monitor_button.pack(side="left", padx=5)
         
         # 指导信息框减小高度
         guide_frame = ttk.LabelFrame(parent, text="测试步骤")
@@ -1765,11 +3558,32 @@ class UIComponents:
         
         guide_text = """    1. 点击"开始监控"按钮启动日志监控
         2. 用手或物体靠近/远离雷达传感器区域
-        3. 观察下方日志显示，如有updateGain值变化则表明雷达正常
+        3. 观察下方日志显示，如有关键词相关值变化则表明雷达正常
         4. 完成测试后点击"停止监控"按钮"""
         
         ttk.Label(guide_frame, text=guide_text, justify="left", 
                  font=("Arial", 9)).pack(padx=10, pady=2)
+        
+        # 操作区域减小高度
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill="x", pady=5)
+
+        # 关键词过滤（可修改，适配不同平台日志关键词）
+        ttk.Label(action_frame, text="关键词:", font=("Arial", 9)).pack(side="left", padx=(5, 2))
+        if not hasattr(self, "radar_keyword_var") or self.radar_keyword_var is None:
+            self.radar_keyword_var = tk.StringVar(value="updateGain")
+        keyword_entry = ttk.Entry(action_frame, textvariable=self.radar_keyword_var, width=16, font=("Arial", 9))
+        keyword_entry.pack(side="left", padx=(0, 10))
+        
+        self.start_radar_monitor_button = ttk.Button(action_frame, text="开始监控", 
+                                                   command=lambda: self.start_radar_monitor(handler), width=15,
+                                                   style="Small.TButton")
+        self.start_radar_monitor_button.pack(side="left", padx=5)
+        
+        self.stop_radar_monitor_button = ttk.Button(action_frame, text="停止监控", 
+                                                  command=lambda: self.stop_radar_monitor(handler), width=15, 
+                                                  state="disabled", style="Small.TButton")
+        self.stop_radar_monitor_button.pack(side="left", padx=5)
         
         # 结果显示区域扩大高度比例
         result_frame = ttk.LabelFrame(parent, text="监控结果")
@@ -1778,11 +3592,6 @@ class UIComponents:
         # 创建文本框显示结果
         self.radar_logcat_text = tk.Text(result_frame, height=14, width=50, font=("Arial", 9))
         self.radar_logcat_text.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # 添加滚动条
-        scrollbar = ttk.Scrollbar(self.radar_logcat_text, command=self.radar_logcat_text.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.radar_logcat_text.config(yscrollcommand=scrollbar.set)
         
         # 初始状态
         self.radar_logcat_text.insert("1.0", "点击\"开始监控\"按钮开始监控雷达传感器日志...\n")
@@ -1826,9 +3635,13 @@ class UIComponents:
         guide_text_widget.insert("1.0", guide_text)
         guide_text_widget.config(state="disabled")
     
-    def check_tty_devices(self):
+    def check_tty_devices(self, handler=None):
         """检查TTY设备"""
-        if not self.check_device_selected():
+        # 使用传入的handler或默认的parent
+        if handler is None:
+            handler = self
+        
+        if not handler.check_device_selected():
             return
         
         self.radar_status_var.set("正在检查TTY设备...")
@@ -1839,8 +3652,13 @@ class UIComponents:
         self.tty_result_text.insert("1.0", "正在检查TTY设备...\n")
         
         try:
-            # 执行命令检查TTY设备
-            cmd = self.get_adb_command("shell ls -la /dev/tty*")
+            # 直接构建adb命令，避免递归调用
+            device_id = handler.device_var.get() if hasattr(handler, 'device_var') else ""
+            if device_id:
+                cmd = f"adb -s {device_id} shell ls -la /dev/tty*"
+            else:
+                cmd = "adb shell ls -la /dev/tty*"
+            
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -1860,7 +3678,7 @@ class UIComponents:
                 self.tty_result_text.insert(tk.END, "\n\n检测到ttyACM设备:\n")
                 for device in acm_devices:
                     self.tty_result_text.insert(tk.END, f"{device}\n")
-                self.tty_result_text.insert(tk.END, "\n✅ 雷达传感器已连接，是否正常工作还需要进一步检查Logcat！\n")
+                self.tty_result_text.insert(tk.END, "\n✅ 雷达传感器已连接，是否正常工作还需要先打开AIEQ操作打开Sweet Sport，然后再检查Logcat！\n")
                 self.radar_status_var.set("检查完成: 已检测到雷达传感器")
             else:
                 self.tty_result_text.insert(tk.END, "\n\n❌ 未检测到ttyACM设备，雷达传感器可能未连接或不工作\n")
@@ -1873,9 +3691,12 @@ class UIComponents:
         # 禁用文本编辑
         self.tty_result_text.config(state="disabled")
 
-    def start_radar_monitor(self):
+    def start_radar_monitor(self, handler=None):
         """开始监控雷达传感器logcat"""
-        if not self.check_device_selected():
+        if handler is None:
+            handler = self
+        
+        if not handler.check_device_selected():
             return
         
         self.radar_status_var.set("正在开始监控雷达传感器日志...")
@@ -1886,21 +3707,49 @@ class UIComponents:
         self.radar_logcat_text.insert("1.0", "正在监控雷达传感器日志...\n")
         self.radar_logcat_text.insert(tk.END, "请用手或物体靠近/远离雷达传感器区域，观察updateGain值变化\n\n")
         self.radar_logcat_text.config(state="disabled")
+
+        # UI 追加内容的缓冲（避免高频 after 导致卡顿/“看起来不再更新”）
+        self._radar_ui_buffer = []
+        self._radar_ui_flush_scheduled = False
+        self._radar_lines_seen = 0
+        self._radar_last_line_ts = time.time()
+        self._radar_heartbeat_running = False
         
         try:
-            # 使用grep命令过滤updateGain日志
-            cmd = self.get_adb_command("shell \"logcat | grep updateGain\"")
+            # 说明：
+            # - 之前用 “logcat | grep/findstr” 在 Windows 上有时会因为管道缓冲导致看起来“到一定量就不更新”
+            # - 这里改用 logcat 自带过滤（命令层过滤 TAG），再在 Python 里按关键词过滤/解析
+            # - updateGain 常见于 audio_hw_hal_primary / audio_tvsdx_process
+            cmd = (
+                handler.get_adb_command("logcat -v time -s audio_hw_hal_primary:I audio_tvsdx_process:I *:S")
+                if hasattr(handler, "get_adb_command")
+                else "adb logcat -v time -s audio_hw_hal_primary:I audio_tvsdx_process:I *:S"
+            )
             
             # 启动日志进程
             self.radar_logcat_process = subprocess.Popen(
                 cmd, 
                 shell=True, 
                 stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,  # 行缓冲
                 universal_newlines=True
             )
+
+            # 如果进程启动后立刻退出，尽快把错误显示出来
+            try:
+                time.sleep(0.2)
+            except Exception:
+                pass
+            if self.radar_logcat_process.poll() is not None:
+                out = ""
+                try:
+                    if self.radar_logcat_process.stdout:
+                        out = (self.radar_logcat_process.stdout.read() or "").strip()
+                except Exception:
+                    out = ""
+                raise Exception(out or "adb logcat 进程启动失败（无输出），请检查 ADB/设备连接/权限")
             
             # 更新按钮状态
             self.start_radar_monitor_button.config(state="disabled")
@@ -1914,12 +3763,45 @@ class UIComponents:
             self.radar_monitor_thread.start()
             
             self.radar_status_var.set("正在监控雷达传感器日志...")
+
+            # 心跳：每 2 秒更新一次状态，提示“是否还在运行/多久没收到新日志”
+            self._radar_heartbeat_running = True
+
+            def _heartbeat():
+                try:
+                    if not getattr(self, "_radar_heartbeat_running", False):
+                        return
+                    proc = getattr(self, "radar_logcat_process", None)
+                    alive = proc is not None and proc.poll() is None
+                    now = time.time()
+                    last = getattr(self, "_radar_last_line_ts", now)
+                    gap = int(now - last)
+                    seen = int(getattr(self, "_radar_lines_seen", 0))
+                    if alive:
+                        if gap >= 10:
+                            self.radar_status_var.set(f"监控中：已捕获 {seen} 行（已 {gap}s 无新日志）")
+                        else:
+                            self.radar_status_var.set(f"监控中：已捕获 {seen} 行")
+                    else:
+                        self.radar_status_var.set("监控已停止（进程退出）")
+                        self._radar_heartbeat_running = False
+                        return
+                except Exception:
+                    pass
+                getattr(self, "root", self.parent).after(2000, _heartbeat)
+
+            getattr(self, "root", self.parent).after(2000, _heartbeat)
         
         except Exception as e:
             self.radar_status_var.set(f"开始监控出错: {str(e)}")
             self.radar_logcat_text.config(state="normal")
             self.radar_logcat_text.insert(tk.END, f"开始监控出错: {str(e)}\n")
             self.radar_logcat_text.config(state="disabled")
+            try:
+                self.start_radar_monitor_button.config(state="normal")
+                self.stop_radar_monitor_button.config(state="disabled")
+            except Exception:
+                pass
 
     def _read_radar_logcat(self):
         """读取雷达传感器日志输出"""
@@ -1928,49 +3810,128 @@ class UIComponents:
             last_gain = None
             gain_changes = 0
             
-            while self.radar_logcat_process and self.radar_logcat_process.poll() is None:
-                line = self.radar_logcat_process.stdout.readline()
+            keyword = None
+            if hasattr(self, "radar_keyword_var"):
+                keyword = (self.radar_keyword_var.get() or "").strip()
+            keyword_lower = keyword.lower() if keyword else None
+
+            def _ui_append(text_to_add: str) -> None:
+                """
+                线程安全地追加文本到 UI（带缓冲、批量刷新）。
+
+                之前每行都 after(0) 会造成 UI 消息队列堆积，日志多了之后表现为“到一定量就不检测/不刷新”。
+                """
+                try:
+                    if not hasattr(self, "_radar_ui_buffer") or self._radar_ui_buffer is None:
+                        self._radar_ui_buffer = []
+                    if not hasattr(self, "_radar_ui_flush_scheduled"):
+                        self._radar_ui_flush_scheduled = False
+                    self._radar_ui_buffer.append(text_to_add)
+                except Exception:
+                    return
+
+                if getattr(self, "_radar_ui_flush_scheduled", False):
+                    return
+
+                self._radar_ui_flush_scheduled = True
+
+                def _flush():
+                    try:
+                        buf = getattr(self, "_radar_ui_buffer", None) or []
+                        self._radar_ui_buffer = []
+                        self._radar_ui_flush_scheduled = False
+
+                        if not buf:
+                            return
+
+                        chunk = "".join(buf)
+                        self.radar_logcat_text.config(state="normal")
+                        self.radar_logcat_text.insert(tk.END, chunk)
+                        self.radar_logcat_text.see(tk.END)
+
+                        # 控制文本框大小：只保留最后 N 行，防止越跑越卡
+                        max_lines = 2000
+                        try:
+                            total_lines = int(self.radar_logcat_text.index("end-1c").split(".")[0])
+                            if total_lines > max_lines:
+                                # 删除最前面的多余行（保留 max_lines 行）
+                                delete_to = f"{total_lines - max_lines}.0"
+                                self.radar_logcat_text.delete("1.0", delete_to)
+                        except Exception:
+                            pass
+
+                        self.radar_logcat_text.config(state="disabled")
+                    except Exception:
+                        try:
+                            self._radar_ui_flush_scheduled = False
+                        except Exception:
+                            pass
+
+                # 100ms 批量刷新一次，既不卡也能实时看到变化
+                getattr(self, "root", self.parent).after(100, _flush)
+
+            # 如果 stdout 不存在，说明进程没正常起来
+            if not self.radar_logcat_process or not getattr(self.radar_logcat_process, "stdout", None):
+                _ui_append("监控进程未正常启动（stdout 为空）\n")
+                return
+
+            # 用迭代方式读取，避免 readline 在某些平台/缓冲模式下卡死
+            for line in self.radar_logcat_process.stdout:
+                if not self.radar_logcat_process or self.radar_logcat_process.poll() is not None:
+                    break
                 if not line:
                     continue
+
+                # 本地过滤关键词（忽略大小写）；关键词为空则显示全部
+                if keyword_lower and keyword_lower not in line.lower():
+                    continue
+
+                # 记录心跳信息（只对“匹配后的行”计数）
+                try:
+                    self._radar_lines_seen = int(getattr(self, "_radar_lines_seen", 0)) + 1
+                    self._radar_last_line_ts = time.time()
+                except Exception:
+                    pass
                 
                 # 将新行添加到文本框
-                self.radar_logcat_text.config(state="normal")
-                self.radar_logcat_text.insert(tk.END, line)
-                self.radar_logcat_text.see(tk.END)
-                self.radar_logcat_text.config(state="disabled")
+                _ui_append(line)
                 
-                # 提取updateGain值
-                match = re.search(r'updateGain.*?(\d+\.?\d*)', line)
+                # 尝试提取数值（如果日志里包含类似 updateGain xxx 12.34）
+                # 关键词不同也尽量匹配 “关键词 ... 数字”
+                if keyword:
+                    # 支持负数：updateGain=-21
+                    pattern = rf'{re.escape(keyword)}.*?(-?\d+\.?\d*)'
+                else:
+                    pattern = r'(-?\d+\.?\d*)'
+                match = re.search(pattern, line, re.IGNORECASE)
                 if match:
-                    gain = float(match.group(1))
+                    # UI 展示用正数（符合你给的示例：-21 显示为 21）
+                    gain = abs(float(match.group(1)))
                     
                     # 检查值是否变化
                     if last_gain is not None and abs(gain - last_gain) > 0.01:
                         gain_changes += 1
-                        self.radar_logcat_text.config(state="normal")
-                        self.radar_logcat_text.insert(tk.END, f"检测到值变化: {last_gain} -> {gain}\n")
-                        self.radar_logcat_text.see(tk.END)
-                        self.radar_logcat_text.config(state="disabled")
+                        _ui_append(f"检测到值变化: {last_gain} -> {gain}\n")
                         
                         # 如果检测到值变化，在界面显示
                         if gain_changes == 1:
-                            self.radar_logcat_text.config(state="normal")
-                            self.radar_logcat_text.insert(tk.END, "\n✅ 检测到雷达传感器响应！\n")
-                            self.radar_logcat_text.see(tk.END)
-                            self.radar_logcat_text.config(state="disabled")
-                            self.radar_status_var.set("监控中: 雷达传感器工作正常")
+                            _ui_append("\n✅ 检测到雷达传感器响应！\n")
+                            getattr(self, "root", self.parent).after(0, lambda: self.radar_status_var.set("监控中: 雷达传感器工作正常"))
                     
                     last_gain = gain
         
         except Exception as e:
-            self.root.after(0, lambda: self.radar_status_var.set(f"监控出错: {str(e)}"))
+            getattr(self, "root", self.parent).after(0, lambda: self.radar_status_var.set(f"监控出错: {str(e)}"))
 
-    def stop_radar_monitor(self):
+    def stop_radar_monitor(self, handler=None):
         """停止监控雷达传感器logcat"""
         if not hasattr(self, 'radar_logcat_process') or self.radar_logcat_process is None:
             return
         
         try:
+            # 停止心跳
+            self._radar_heartbeat_running = False
+
             # 终止日志进程
             if platform.system() == "Windows":
                 subprocess.run(f"taskkill /F /T /PID {self.radar_logcat_process.pid}", shell=True)
@@ -1995,7 +3956,7 @@ class UIComponents:
         """打开HAL录音保存文件夹"""
         save_dir = self.hal_save_path_var.get().strip()
         if not save_dir:
-            save_dir = os.path.join(os.getcwd(), "hal_dump")
+            save_dir = get_output_dir(DIR_HAL_DUMP)
         
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
@@ -2012,7 +3973,7 @@ class UIComponents:
             self.update_info_text(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
     
-    def update_sweep_file_options(self):
+    def update_sweep_file_options(self, handler):
         """更新扫频文件选项"""
         sweep_type = self.sweep_type_var.get()
         
@@ -2026,7 +3987,7 @@ class UIComponents:
             self.add_custom_sweep_button.config(state="disabled")
             
             # 查找audio目录下的大象扫频文件
-            elephant_dir = os.path.join(os.getcwd(), "audio", "elephant")
+            elephant_dir = os.path.join(os.getcwd(), "audio", "大象扫频文件")
             if not os.path.exists(elephant_dir):
                 os.makedirs(elephant_dir, exist_ok=True)
             
@@ -2039,16 +4000,18 @@ class UIComponents:
             if sorted_files:
                 self.sweep_file_combobox['values'] = sorted_files
                 self.sweep_file_var.set(sorted_files[0])
-                self.update_sweep_info(f"已加载 {len(sorted_files)} 个大象扫频文件")
+                if hasattr(self, 'update_sweep_info'):
+                    self.update_sweep_info(f"已加载 {len(sorted_files)} 个大象扫频文件")
             else:
-                self.update_sweep_info("未找到大象扫频文件，请在audio/elephant目录中添加.wav文件")
+                if hasattr(self, 'update_sweep_info'):
+                    self.update_sweep_info("未找到大象扫频文件，请在audio/大象扫频文件目录中添加.wav文件")
         
         else:  # custom
             # 启用添加文件按钮
             self.add_custom_sweep_button.config(state="normal")
             
             # 查找audio目录下的自定义扫频文件
-            custom_dir = os.path.join(os.getcwd(), "audio", "custom")
+            custom_dir = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
             if not os.path.exists(custom_dir):
                 os.makedirs(custom_dir, exist_ok=True)
             
@@ -2061,64 +4024,18 @@ class UIComponents:
             if sorted_files:
                 self.sweep_file_combobox['values'] = sorted_files
                 self.sweep_file_var.set(sorted_files[0])
-                self.update_sweep_info(f"已加载 {len(sorted_files)} 个自定义扫频文件")
+                if hasattr(self, 'update_sweep_info'):
+                    self.update_sweep_info(f"已加载 {len(sorted_files)} 个自定义扫频文件")
             else:
-                self.update_sweep_info("未找到自定义扫频文件，请点击'添加文件'按钮添加")
+                if hasattr(self, 'update_sweep_info'):
+                    self.update_sweep_info("未找到自定义扫频文件，请点击'添加文件'按钮添加")
 
-    def sort_files_by_frequency(self, files):
-        """按照频率排序文件（从低频到高频）"""
-        # 定义频率顺序的正则表达式模式
-        freq_patterns = [
-            r'(\d+)[-_](\d+)hz', 
-            r'(\d+)[-_](\d+)khz',
-            r'(\d+)hz[-_](\d+)hz',
-            r'(\d+)hz[-_](\d+)khz',
-            r'(\d+)[-_](\d+)[k]?'  # 更通用的模式，如20_20k
-        ]
-        
-        # 为文件创建排序键
-        def get_sort_key(filename):
-            filename_lower = filename.lower()
-            
-            # 特殊情况：如果是 custom 样式的文件，应该排在最前面
-            if "custom" in filename_lower:
-                return (20, 20000)
-                
-            # 尝试从文件名中提取频率信息
-            for pattern in freq_patterns:
-                match = re.search(pattern, filename_lower)
-                if match:
-                    start_freq = int(match.group(1))
-                    end_freq = int(match.group(2))
-                    
-                    # 转换单位：如果是kHz，转换为Hz
-                    if 'khz' in match.group(0) or 'k' in match.group(0):
-                        if end_freq < 1000:
-                            end_freq *= 1000
-                        if start_freq < 1000 and end_freq >= 1000:
-                            start_freq *= 1000
-                    
-                    return (start_freq, end_freq)
-            
-            # 尝试匹配单个频率数字
-            single_freq_match = re.search(r'(\d+)(hz|khz|k)?', filename_lower)
-            if single_freq_match:
-                freq = int(single_freq_match.group(1))
-                unit = single_freq_match.group(2) if single_freq_match.group(2) else ""
-                
-                if 'khz' in unit or 'k' in unit:
-                    freq *= 1000
-                    
-                return (freq, freq)
-            
-            # 如果没有匹配的频率模式，使用文件名进行排序，但优先级最低
-            return (999999, filename)
-        
-        # 按照起始频率和结束频率排序
-        return sorted(files, key=get_sort_key)
-
-    def add_custom_sweep_file(self):
+    def add_custom_sweep_file(self, handler):
         """添加自定义扫频文件"""
+        # 导入必要的模块
+        import shutil
+        from tkinter import filedialog, messagebox
+        
         file_types = [
             ('音频文件', '*.wav;*.mp3;*.flac;*.ogg'),
             ('WAV文件', '*.wav'),
@@ -2137,69 +4054,40 @@ class UIComponents:
             return
         
         # 确保自定义目录存在
-        custom_dir = os.path.join(os.getcwd(), "audio", "custom")
+        custom_dir = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
         if not os.path.exists(custom_dir):
             os.makedirs(custom_dir, exist_ok=True)
         
         # 复制文件到自定义目录
-        copied_files = []
+        copied_count = 0
         for file in files:
-            # 获取原始文件名和扩展名
             base_filename = os.path.basename(file)
-            filename, ext = os.path.splitext(base_filename)
-            filename_lower = filename.lower()
-            
-            # 检查是否是20-20kHz范围的扫频文件
-            is_full_range = False
-            
-            # 检查常见的全频扫频文件命名模式
-            if any(pattern in filename_lower for pattern in ["20hz-20khz", "20-20k", "20_20k", "20hz_20khz", "20to20k"]):
-                is_full_range = True
-            else:
-                # 使用正则表达式检查是否是20Hz到20kHz的范围
-                range_match = re.search(r'(\d+)[-_](\d+)([k]?hz)?', filename_lower)
-                if range_match:
-                    start_freq = int(range_match.group(1))
-                    end_freq = int(range_match.group(2))
-                    
-                    # 如果有单位且是k或khz，转换为Hz
-                    if range_match.group(3) and ('k' in range_match.group(3)):
-                        if end_freq < 1000:  # 如果数字小于1000，认为是以k为单位
-                            end_freq *= 1000
-                    
-                    # 检查是否接近20Hz-20kHz范围
-                    if (start_freq == 20 or start_freq == 16) and (end_freq == 20000 or end_freq == 20 or end_freq == 22000):
-                        is_full_range = True
-            
-            # 根据是否是全频扫频文件设置新文件名
-            if is_full_range:
-                new_filename = f"custom{ext}"
-                self.update_sweep_info(f"检测到全频扫频文件: {base_filename}，将重命名为: {new_filename}")
-            else:
-                new_filename = base_filename
-            
-            dest_path = os.path.join(custom_dir, new_filename)
+            dest_path = os.path.join(custom_dir, base_filename)
             
             try:
                 shutil.copy2(file, dest_path)
-                copied_files.append(new_filename)
+                copied_count += 1
             except Exception as e:
-                self.update_sweep_info(f"复制文件 {new_filename} 失败: {str(e)}")
+                messagebox.showerror("错误", f"复制文件 {base_filename} 失败: {str(e)}")
         
-        if copied_files:
-            self.update_sweep_info(f"已添加 {len(copied_files)} 个自定义扫频文件")
-            
+        if copied_count > 0:
+            self.update_sweep_info(f"已添加 {copied_count} 个文件到自定义扫频文件夹")
             # 更新文件列表
-            self.update_sweep_file_options()
+            self.update_sweep_file_options(handler)
+        else:
+            self.update_sweep_info("没有成功添加任何文件")
     
-    def start_sweep_test(self):
-        """开始扫频测试"""
-        if not self.check_device_selected():
+    def start_sweep_test(self, handler=None):
+        """启动扫频测试"""
+        if handler is None:
+            handler = self.parent
+        
+        if not handler.check_device_selected():
             return
         
         # 检查是否是批量测试
-        if self.sweep_batch_var.get():
-            self.start_batch_sweep_test()
+        if self.batch_test_var.get():  # 修复变量名
+            self.start_batch_sweep_test(handler)
             return
         
         try:
@@ -2213,9 +4101,9 @@ class UIComponents:
             
             # 确定源文件路径
             if sweep_type == "elephant":
-                source_path = os.path.join(os.getcwd(), "audio", "elephant", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "大象扫频文件", sweep_file)
             else:  # custom
-                source_path = os.path.join(os.getcwd(), "audio", "custom", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB", sweep_file)
             
             if not os.path.exists(source_path):
                 messagebox.showerror("错误", f"文件不存在: {source_path}")
@@ -2224,7 +4112,7 @@ class UIComponents:
             # 获取保存路径
             save_dir = self.sweep_save_path_var.get().strip()
             if not save_dir:
-                save_dir = os.path.join(os.getcwd(), "sweep_recordings")
+                save_dir = get_output_dir(DIR_SWEEP_RECORDINGS)
             
             os.makedirs(save_dir, exist_ok=True)
             
@@ -2236,71 +4124,30 @@ class UIComponents:
             self.start_sweep_button.config(state="disabled")
             self.stop_sweep_button.config(state="normal")
             
+            # 直接构建adb命令，避免递归调用
+            device_id = handler.device_var.get() if hasattr(handler, 'device_var') else ""
+            
+            # 导入必要的模块
+            import threading
+            import time
+            import subprocess
+            
             # 重启audioserver
             for _ in range(3):
-                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
+                if device_id:
+                    cmd = f"adb -s {device_id} shell killall audioserver"
+                else:
+                    cmd = "adb shell killall audioserver"
+                subprocess.run(cmd, shell=True)
                 time.sleep(0.5)
             
-            # 获取时间戳
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            
-            # 设置设备上的临时文件路径
-            device_audio_path = f"/sdcard/{sweep_file}"
-            
-            # 推送音频文件到设备
-            self.update_sweep_info(f"正在推送音频文件: {sweep_file}")
-            push_cmd = self.get_adb_command(f"push \"{source_path}\" {device_audio_path}")
-            subprocess.run(push_cmd, shell=True)
-            
-            # 设置录制文件名
-            file_base_name = os.path.splitext(sweep_file)[0]  # 获取不带扩展名的文件名
-            recording_filename = f"{file_base_name}_recording_{timestamp}.wav"
-            device_recording_path = f"/sdcard/{recording_filename}"
-            self.sweep_filename = recording_filename  # 保存文件名以便后续处理
-            
-            # 获取录制参数
-            recording_device = self.sweep_recording_device_var.get().strip()
-            recording_card = self.sweep_recording_card_var.get().strip()
-            recording_channels = self.sweep_recording_channels_var.get().strip()
-            recording_rate = self.sweep_recording_rate_var.get().strip()
-            recording_bits = self.sweep_recording_bits_var.get().strip()
-            recording_periods = self.sweep_recording_periods_var.get().strip()
-            
-            # 开始录制
-            self.update_sweep_info("开始录制...")
-            
-            # 构建tinycap命令
-            tinycap_cmd = f"shell tinycap {device_recording_path} -d {recording_device} -c {recording_channels} -r {recording_rate} -p {recording_periods}"
-            tinycap_full_cmd = self.get_adb_command(tinycap_cmd)
-            self.update_sweep_info(f"执行录音命令: {tinycap_full_cmd}")
-            self.recording_process = subprocess.Popen(tinycap_full_cmd, shell=True)
-            
-            # 等待录制启动
-            time.sleep(2)
-            
-            # 播放音频
-            self.update_sweep_info("开始播放音频...")
-            
-            # 获取播放参数
-            playback_device = self.sweep_playback_device_var.get().strip()
-            playback_card = self.sweep_playback_card_var.get().strip()
-            playback_channels = self.sweep_playback_channels_var.get().strip()
-            playback_rate = self.sweep_playback_rate_var.get().strip()
-            playback_bits = self.sweep_playback_bits_var.get().strip()
-            
-            # 构建tinyplay命令
-            tinyplay_cmd = f"shell tinyplay {device_audio_path} -d {playback_device}"
-            tinyplay_full_cmd = self.get_adb_command(tinyplay_cmd)
-            self.update_sweep_info(f"执行播放命令: {tinyplay_full_cmd}")
-            self.playback_process = subprocess.Popen(tinyplay_full_cmd, shell=True)
-            
-            # 启动监控线程
-            self.sweep_monitor_thread = threading.Thread(
-                target=self.monitor_sweep_test,
-                args=(device_recording_path, save_dir, recording_filename, sweep_file),
+            # 启动测试线程
+            self.sweep_test_thread = threading.Thread(
+                target=self._run_sweep_test,
+                args=(source_path, sweep_file, save_dir, device_id),
                 daemon=True
             )
-            self.sweep_monitor_thread.start()
+            self.sweep_test_thread.start()
             
         except Exception as e:
             self.sweep_status_var.set(f"测试出错: {str(e)}")
@@ -2311,335 +4158,258 @@ class UIComponents:
             self.start_sweep_button.config(state="normal")
             self.stop_sweep_button.config(state="disabled")
 
-    def monitor_sweep_test(self, device_recording_path, save_dir, recording_filename, sweep_file):
-        """监控播放进程，在播放完成后自动停止录制"""
+    def _run_sweep_test(self, source_path, sweep_file, save_dir, device_id):
+        """执行单个扫频测试"""
         try:
-            # 等待播放进程结束
-            if hasattr(self, 'playback_process') and self.playback_process:
-                self.update_sweep_info("等待播放完成...")
-                self.playback_process.wait()
-                self.update_sweep_info("播放已完成")
+            # 获取录制参数
+            recording_duration = self.sweep_duration_var.get()
             
-            # 等待一段时间确保录制完整
-            time.sleep(3)
+            # 从界面获取录制参数
+            record_device = self.record_device_var.get()  # 录制设备
+            record_card = self.record_card_var.get()      # 卡号
+            channels = self.record_channels_var.get()     # 通道数
+            sample_rate = self.record_rate_var.get()      # 采样率
+            bit_depth = self.record_bits_var.get()        # 位深
             
-            # 停止录制进程
-            if hasattr(self, 'recording_process') and self.recording_process.poll() is None:
-                self.update_sweep_info("正在停止录制...")
-                # 使用killall命令停止tinycap
-                kill_cmd = self.get_adb_command("shell killall tinycap")
-                subprocess.run(kill_cmd, shell=True)
-                self.update_sweep_info("已停止录制")
+            # 播放参数
+            play_device = self.play_device_var.get()
+            play_card = self.play_card_var.get()
             
-            # 拉取录音文件
-            self.pull_sweep_recording()
-            
-            # 恢复按钮状态
-            self.root.after(0, lambda: self.start_sweep_button.config(state="normal"))
-            self.root.after(0, lambda: self.stop_sweep_button.config(state="disabled"))
-            
-        except Exception as e:
-            self.root.after(0, lambda: self.update_sweep_info(f"监控播放过程中出错: {str(e)}"))
-            self.root.after(0, lambda: self.sweep_status_var.set("监控出错"))
-            # 恢复按钮状态
-            self.root.after(0, lambda: self.start_sweep_button.config(state="normal"))
-            self.root.after(0, lambda: self.stop_sweep_button.config(state="disabled"))
-
-    def start_batch_sweep_test(self):
-        """启动批量扫频测试"""
-        if not self.check_device_selected():
-            return
-        
-        # 获取选择的扫频类型
-        sweep_type = self.sweep_type_var.get()
-        
-        # 获取文件列表
-        if sweep_type == "elephant":
-            dir_path = os.path.join(os.getcwd(), "audio", "elephant")
-        else:  # custom
-            dir_path = os.path.join(os.getcwd(), "audio", "custom")
-        
-        if not os.path.exists(dir_path):
-            messagebox.showerror("错误", f"扫频文件目录不存在: {dir_path}")
-            return
-        
-        # 获取所有音频文件
-        files = [f for f in os.listdir(dir_path) if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg'))]
-        
-        if not files:
-            messagebox.showerror("错误", f"未找到任何音频文件")
-            return
-        
-        # 如果文件数量很多，询问用户是否确定
-        if len(files) > 10:
-            if not messagebox.askyesno("确认", f"将对 {len(files)} 个音频文件进行批量测试，可能需要较长时间。\n\n确定要继续吗？"):
-                return
-        
-        # 对文件按频率进行排序
-        files = self.sort_files_by_frequency(files)
-        
-        # 获取保存路径
-        save_dir = self.sweep_save_path_var.get().strip()
-        if not save_dir:
-            save_dir = os.path.join(os.getcwd(), "sweep_recordings")
-        
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # 清空保存目录中的文件
-        if messagebox.askyesno("确认", f"是否清空保存目录({save_dir})中的所有WAV文件？"):
-            try:
-                for file in os.listdir(save_dir):
-                    if file.lower().endswith('.wav'):
-                        os.remove(os.path.join(save_dir, file))
-                self.update_sweep_info(f"已清空保存目录中的WAV文件")
-            except Exception as e:
-                self.update_sweep_info(f"清空目录出错: {str(e)}")
-        
-        # 获取测试间隔时间
-        try:
-            interval = float(self.batch_interval_var.get())
-            if interval < 0:
-                interval = 5
-        except (ValueError, TypeError):
-            interval = 5
-        
-        # 获取录制时长
-        try:
-            recording_duration = float(self.sweep_recording_duration_var.get())
-            if recording_duration <= 0:
-                recording_duration = interval  # 如果未设置录制时长，使用间隔时间
-        except (ValueError, TypeError):
-            recording_duration = interval
-        
-        # 禁用测试按钮
-        self.start_sweep_button.config(state="disabled")
-        self.stop_sweep_button.config(state="normal")
-        
-        # 在单独的线程中运行批量测试
-        self.batch_thread = threading.Thread(
-            target=self._run_batch_tests,
-            args=(files, sweep_type, interval, recording_duration, save_dir),
-            daemon=True
-        )
-        self.batch_thread.start()
-
-    def _run_batch_tests(self, files, sweep_type, interval, recording_duration, save_dir):
-        """在线程中运行批量测试"""
-        try:
-            self.sweep_status_var.set(f"开始批量测试 {len(files)} 个文件")
-            self.update_sweep_info(f"开始批量测试 {len(files)} 个文件")
-            self.update_sweep_info(f"录制时长: {recording_duration}秒, 测试间隔: {interval}秒")
-            
-            total_files = len(files)
-            success_count = 0
-            
-            for i, file in enumerate(files):
-                # 检查是否已请求停止测试
-                if hasattr(self, 'stop_requested') and self.stop_requested:
-                    self.update_sweep_info("批量测试已手动停止")
-                    break
-                
-                # 更新状态
-                self.update_sweep_info(f"===== 测试文件 {i+1}/{total_files}: {file} =====")
-                self.sweep_status_var.set(f"测试 {i+1}/{total_files}: {file}")
-                
-                # 测试单个文件
-                success = self._batch_test_single_file(file, sweep_type, recording_duration, save_dir)
-                
-                if success:
-                    success_count += 1
-                
-                # 如果不是最后一个文件，等待指定的间隔时间
-                if i < total_files - 1:
-                    # 无需额外等待，因为每个测试已经消耗了recording_duration的时间
-                    pass
-            
-            # 测试完成后
-            msg = f"批量测试完成，成功: {success_count}/{total_files}"
-            self.update_sweep_info(msg)
-            self.sweep_status_var.set(msg)
-            
-            # 测试完成
-            self.root.after(0, lambda: messagebox.showinfo("完成", 
-                f"批量扫频测试已完成！\n\n共测试 {total_files} 个文件，成功 {success_count} 个。\n\n录音文件已保存至: {save_dir}"))
-        
-        except Exception as e:
-            self.update_sweep_info(f"批量测试出错: {str(e)}")
-            self.sweep_status_var.set("批量测试出错")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"批量测试过程中出错:\n{str(e)}"))
-        
-        finally:
-            # 恢复按钮状态
-            self.root.after(0, lambda: self.start_sweep_button.config(state="normal"))
-            self.root.after(0, lambda: self.stop_sweep_button.config(state="disabled"))
-            
-            # 清除停止标志
-            if hasattr(self, 'stop_requested'):
-                self.stop_requested = False
-
-    def _batch_test_single_file(self, sweep_file, sweep_type, recording_duration, save_dir):
-        """批量测试中测试单个扫频文件"""
-        try:
-            # 确定源文件路径
-            if sweep_type == "elephant":
-                source_path = os.path.join(os.getcwd(), "audio", "elephant", sweep_file)
-            else:  # custom
-                source_path = os.path.join(os.getcwd(), "audio", "custom", sweep_file)
-            
-            if not os.path.exists(source_path):
-                self.update_sweep_info(f"文件不存在: {source_path}")
-                return False
-            
-            # 获取时间戳
+            # 生成录制文件名
             timestamp = time.strftime("%Y%m%d_%H%M%S")
+            base_name = os.path.splitext(sweep_file)[0]
+            recording_filename = f"{base_name}_{timestamp}.wav"
             
-            # 设置设备上的临时文件路径
+            # 设备上的录制路径
+            device_recording_path = f"/sdcard/{recording_filename}"
             device_audio_path = f"/sdcard/{sweep_file}"
             
+            # 确保设备上的目录存在
+            if device_id:
+                mkdir_cmd = f"adb -s {device_id} shell mkdir -p /sdcard"
+            else:
+                mkdir_cmd = "adb shell mkdir -p /sdcard"
+            subprocess.run(mkdir_cmd, shell=True)
+            
             # 推送音频文件到设备
-            self.update_sweep_info(f"正在推送音频文件: {sweep_file}")
-            push_cmd = self.get_adb_command(f"push \"{source_path}\" {device_audio_path}")
-            result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在推送音频文件: {sweep_file}"))
             
-            if result.returncode != 0:
-                self.update_sweep_info(f"推送音频文件失败")
-                return False
+            if device_id:
+                push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path}"
+            else:
+                push_cmd = f"adb push \"{source_path}\" {device_audio_path}"
             
-            # 设置录制文件名
-            file_base_name = os.path.splitext(sweep_file)[0]  # 获取不带扩展名的文件名
-            recording_filename = f"{file_base_name}_recording_{timestamp}.wav"
-            device_recording_path = f"/sdcard/{recording_filename}"
-            local_path = os.path.join(save_dir, recording_filename)
-            
-            # 重命名文件如果已存在
-            count = 1
-            while os.path.exists(local_path):
-                recording_filename = f"{file_base_name}_recording_{timestamp}_{count}.wav"
-                local_path = os.path.join(save_dir, recording_filename)
-                count += 1
-            
-            # 获取录制参数
-            recording_device = self.sweep_recording_device_var.get().strip()
-            recording_channels = self.sweep_recording_channels_var.get().strip()
-            recording_rate = self.sweep_recording_rate_var.get().strip()
-            recording_periods = self.sweep_recording_periods_var.get().strip()
-            
-            # 为了确保设备就绪，先重启audioserver
-            for _ in range(2):
-                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
-                time.sleep(0.5)
+            push_result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+            if push_result.returncode != 0:
+                raise Exception(f"推送音频文件失败: {push_result.stderr}")
             
             # 开始录制
-            self.update_sweep_info("开始录制...")
-            tinycap_cmd = f"shell tinycap {device_recording_path} -d {recording_device} -c {recording_channels} -r {recording_rate} -p {recording_periods}"
-            tinycap_full_cmd = self.get_adb_command(tinycap_cmd)
-            self.update_sweep_info(f"执行录音命令: {tinycap_cmd}")
-            recording_process = subprocess.Popen(tinycap_full_cmd, shell=True)
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"开始录制音频，时长: {recording_duration}秒"))
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"录制参数: 设备{record_device} 卡{record_card} {channels}通道 {sample_rate}Hz {bit_depth}bit"))
             
-            # 等待录制启动
-            time.sleep(1)
+            # 构建录制命令
+            if device_id:
+                record_cmd = f"adb -s {device_id} shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate}"
+            else:
+                record_cmd = f"adb shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate}"
             
-            # 播放音频
-            self.update_sweep_info("开始播放音频...")
-            tinyplay_cmd = f"shell tinyplay {device_audio_path} -d 0"
-            tinyplay_full_cmd = self.get_adb_command(tinyplay_cmd)
-            self.update_sweep_info(f"执行播放命令: {tinyplay_cmd}")
-            playback_process = subprocess.Popen(tinyplay_full_cmd, shell=True)
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"启动录制命令: {record_cmd}"))
             
-            # 等待指定的录制时长
-            self.update_sweep_info(f"录制中，将在 {recording_duration} 秒后停止...")
-            time.sleep(recording_duration)
-            
-            # 停止播放和录制
-            self.update_sweep_info("停止播放...")
-            subprocess.run(self.get_adb_command("shell killall tinyplay"), shell=True)
-            
-            self.update_sweep_info("停止录制...")
-            subprocess.run(self.get_adb_command("shell killall tinycap"), shell=True)
-            
-            # 等待进程结束
+            # 启动录制进程
             try:
-                playback_process.wait(timeout=2)
-            except:
-                pass
+                record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
-            try:
-                recording_process.wait(timeout=2)
-            except:
-                pass
+                # 等待一下让录制启动
+                time.sleep(0.5)
+                
+                # 检查录制进程是否正常启动
+                if record_process.poll() is not None:
+                    stdout, stderr = record_process.communicate()
+                    if stderr:
+                        # 如果录制失败，尝试重启audioserver
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver..."))
+                        
+                        if device_id:
+                            killall_cmd = f"adb -s {device_id} shell killall audioserver"
+                        else:
+                            killall_cmd = "adb shell killall audioserver"
+                        
+                        subprocess.run(killall_cmd, shell=True)
+                        time.sleep(2)  # 等待audioserver重启
+                        
+                        # 重新尝试录制
+                        record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        time.sleep(0.5)
+                        
+                        # 再次检查
+                        if record_process.poll() is not None:
+                            stdout, stderr = record_process.communicate()
+                            raise Exception(f"录制命令启动失败: {stderr.decode()}")
             
-            # 拉取录制文件
-            self.update_sweep_info(f"拉取录制文件到: {local_path}")
-            pull_cmd = self.get_adb_command(f"pull {device_recording_path} \"{local_path}\"")
+            except Exception as e:
+                raise Exception(f"录制命令启动失败: {str(e)}")
+            
+            # 开始播放
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"开始播放: {sweep_file}"))
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"播放参数: 设备{play_device} 卡{play_card}"))
+            
+            # 构建播放命令
+            if device_id:
+                play_cmd = f"adb -s {device_id} shell tinyplay {device_audio_path} -D {play_device} -d {play_card}"
+            else:
+                play_cmd = f"adb shell tinyplay {device_audio_path} -D {play_device} -d {play_card}"
+            
+            try:
+                play_result = subprocess.run(play_cmd, shell=True, capture_output=True, text=True, timeout=30)
+                if play_result.returncode != 0:
+                    # 如果播放失败，也尝试重启audioserver
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放失败，正在重启audioserver..."))
+                    
+                    if device_id:
+                        killall_cmd = f"adb -s {device_id} shell killall audioserver"
+                    else:
+                        killall_cmd = "adb shell killall audioserver"
+                    
+                    subprocess.run(killall_cmd, shell=True)
+                    time.sleep(2)
+                    
+                    # 重新尝试播放
+                    play_result = subprocess.run(play_cmd, shell=True, capture_output=True, text=True, timeout=30)
+                    if play_result.returncode != 0:
+                        raise Exception(f"播放失败: {play_result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放超时，继续录制..."))
+            except Exception as e:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"播放出错: {str(e)}，继续录制..."))
+            
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放完成"))
+            
+            # 等待录制完成
+            remaining_time = recording_duration
+            while remaining_time > 0 and record_process.poll() is None:
+                getattr(self, "root", self.parent).after(0, lambda t=remaining_time: self.update_sweep_info(f"等待录制完成，剩余: {t:.1f} 秒"))
+                time.sleep(0.5)
+                remaining_time -= 0.5
+            
+            # 停止录制
+            if record_process.poll() is None:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("正在停止录制..."))
+                record_process.terminate()
+                try:
+                    record_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    record_process.kill()
+            
+            # 检查录制结果
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("检查录制文件..."))
+            
+            # 拉取录制文件到本地
+            local_file_path = os.path.join(save_dir, recording_filename)
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在拉取录制文件到本地..."))
+            
+            if device_id:
+                pull_cmd = f"adb -s {device_id} pull {device_recording_path} \"{local_file_path}\""
+            else:
+                pull_cmd = f"adb pull {device_recording_path} \"{local_file_path}\""
+            
             pull_result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            if pull_result.returncode != 0:
+                raise Exception(f"拉取录制文件失败: {pull_result.stderr}")
+            
+            # 验证本地文件
+            if os.path.exists(local_file_path):
+                local_file_size = os.path.getsize(local_file_path)
+                
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"✓ 测试完成: {recording_filename} ({local_file_size} bytes)"))
+                getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("测试完成"))
+            else:
+                raise Exception("本地录制文件不存在")
             
             # 清理设备上的临时文件
-            subprocess.run(self.get_adb_command(f"shell rm {device_audio_path}"), shell=True)
-            subprocess.run(self.get_adb_command(f"shell rm {device_recording_path}"), shell=True)
-            
-            # 检查文件是否存在且大小合适
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
-                self.update_sweep_info(f"测试成功: {sweep_file}")
-                return True
+            if device_id:
+                cleanup_cmd = f"adb -s {device_id} shell rm {device_recording_path} {device_audio_path}"
             else:
-                self.update_sweep_info(f"测试失败: 录制文件不存在或太小")
-                return False
+                cleanup_cmd = f"adb shell rm {device_recording_path} {device_audio_path}"
+            subprocess.run(cleanup_cmd, shell=True)
+            
+            # 恢复按钮状态
+            getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
+            
+            return True
                 
         except Exception as e:
-            self.update_sweep_info(f"测试 {sweep_file} 出错: {str(e)}")
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"✗ 测试失败: {str(e)}"))
+            # 恢复按钮状态
+            getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
             return False
 
-    def stop_sweep_test(self, auto_pull=False):
+    def stop_sweep_test(self, handler=None):
         """停止扫频测试"""
         try:
-            self.update_sweep_info("正在停止测试...")
+            # 停止批量测试
+            if hasattr(self, 'batch_testing') and self.batch_testing:
+                self.batch_testing = False
+                self.update_sweep_info("正在停止批量测试...")
             
-            # 设置停止标志，用于批量测试
-            self.stop_requested = True
+            # 停止当前播放
+            device_id = self.device_var.get() if hasattr(self, "device_var") else ""
+            if device_id:
+                stop_cmd = f"adb -s {device_id} shell am force-stop com.android.music"
+            else:
+                stop_cmd = "adb shell am force-stop com.android.music"
+            subprocess.run(stop_cmd, shell=True)
             
-            # 停止播放进程
-            subprocess.run(self.get_adb_command("shell killall tinyplay"), shell=True)
+            # 尝试停止其他可能的音频播放器
+            players = ["com.google.android.music", "com.android.mediacenter", "com.miui.player"]
+            for player in players:
+                if device_id:
+                    stop_cmd = f"adb -s {device_id} shell am force-stop {player}"
+                else:
+                    stop_cmd = f"adb shell am force-stop {player}"
+                subprocess.run(stop_cmd, shell=True)
                 
-            # 停止录制进程
-            subprocess.run(self.get_adb_command("shell killall tinycap"), shell=True)
+            # 停止可能正在运行的录制进程
+            if device_id:
+                kill_cmd = f"adb -s {device_id} shell pkill tinycap"
+            else:
+                kill_cmd = "adb shell pkill tinycap"
+            subprocess.run(kill_cmd, shell=True)
             
-            # 恢复按钮状态
-            self.start_sweep_button.config(state="normal")
-            self.stop_sweep_button.config(state="disabled")
+            # 更新UI状态
+            if hasattr(self, 'start_sweep_button'):
+                self.start_sweep_button.config(state="normal")
+            if hasattr(self, 'stop_sweep_button'):
+                self.stop_sweep_button.config(state="disabled")
+            if hasattr(self, 'start_batch_button'):
+                self.start_batch_button.config(state="normal")
+            if hasattr(self, 'stop_batch_button'):
+                self.stop_batch_button.config(state="disabled")
             
-            # 更新状态
-            self.sweep_status_var.set("测试已停止")
-            self.update_sweep_info("扫频测试已手动停止")
+            self.update_sweep_info("已停止扫频测试")
             
         except Exception as e:
-            self.sweep_status_var.set(f"停止测试出错: {str(e)}")
-            self.update_sweep_info(f"停止测试出错: {str(e)}")
-            messagebox.showerror("错误", f"停止扫频测试时出错:\n{str(e)}")
-            
-            # 恢复按钮状态
-            self.start_sweep_button.config(state="normal")
-            self.stop_sweep_button.config(state="disabled")
+            self.update_sweep_info(f"停止测试时出错: {str(e)}")
+            messagebox.showerror("错误", f"停止测试时出错:\n{str(e)}")
 
-    def pull_sweep_recording(self):
-        """拉取扫频录音文件 - 参考Loopback测试的拉取逻辑"""
+    def pull_sweep_recording(self, device_id=None):
+        """拉取扫频录音文件"""
         if not hasattr(self, 'sweep_filename'):
             self.update_sweep_info("没有找到需要拉取的录音文件")
             return
         
         try:
-            self.update_sweep_info("检查设备上的录制文件，路径信息:")
-            
-            # 检查/sdcard目录结构
-            self.update_sweep_info("查看/sdcard目录结构:")
-            ls_cmd = self.get_adb_command("shell ls -la /sdcard/")
-            ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
-            if ls_result.returncode == 0:
-                self.update_sweep_info(f"/sdcard目录内容:\n{ls_result.stdout}")
-            
             # 检查录制文件是否存在
             device_recording_path = f"/sdcard/{self.sweep_filename}"
             self.update_sweep_info(f"检查录制文件: {device_recording_path}")
-            check_cmd = self.get_adb_command(f"shell ls -la {device_recording_path}")
+            
+            if device_id:
+                check_cmd = f"adb -s {device_id} shell ls -la {device_recording_path}"
+            else:
+                check_cmd = f"adb shell ls -la {device_recording_path}"
+            
             check_result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
             
             if check_result.returncode == 0:
@@ -2649,14 +4419,18 @@ class UIComponents:
                 # 获取保存路径
                 save_dir = self.sweep_save_path_var.get().strip()
                 if not save_dir:
-                    save_dir = os.path.join(os.getcwd(), "sweep_recordings")
+                    save_dir = get_output_dir(DIR_SWEEP_RECORDINGS)
                 
                 os.makedirs(save_dir, exist_ok=True)
                 local_path = os.path.join(save_dir, self.sweep_filename)
                 
                 # 拉取文件到本地
                 self.update_sweep_info(f"正在拉取录制文件到: {local_path}")
-                pull_cmd = self.get_adb_command(f"pull {device_recording_path} \"{local_path}\"")
+                if device_id:
+                    pull_cmd = f"adb -s {device_id} pull {device_recording_path} \"{local_path}\""
+                else:
+                    pull_cmd = f"adb pull {device_recording_path} \"{local_path}\""
+                
                 result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
                 
                 if result.returncode != 0:
@@ -2697,7 +4471,7 @@ class UIComponents:
         """打开Loopback测试保存文件夹"""
         save_dir = self.loopback_save_path_var.get().strip()
         if not save_dir:
-            save_dir = os.path.join(os.getcwd(), "test")
+            save_dir = OUTPUT_ROOT
         
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
@@ -2808,33 +4582,67 @@ class UIComponents:
             self.status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
     
-    def _loopback_test_thread(self, device, channels, rate, audio_source):
+    def _loopback_test_thread(self, device, channels, rate, audio_source, device_id):
         try:
+            # 规范化参数（避免空字符串导致命令异常）
+            device = (str(device).strip() or "0")
+            channels = (str(channels).strip() or "2")
+            rate = (str(rate).strip() or "48000")
+
             # 准备工作
-            subprocess.run(self.get_adb_command("root"), shell=True)
+            if device_id:
+                subprocess.run(f"adb -s {device_id} root", shell=True)
+            else:
+                subprocess.run("adb root", shell=True)
             
             # 根据选择的音频源处理
             if audio_source == "default":
                 # 使用默认7.1声道测试音频
                 audio_file = "audio/Nums_7dot1_16_48000.wav"
                 if not os.path.exists(audio_file):
-                    raise FileNotFoundError(f"默认测试音频文件不存在: {audio_file}")
+                    msg = (
+                        "默认测试音频不存在：audio/Nums_7dot1_16_48000.wav\n\n"
+                        "请把对应的测试音频放到 audio 目录，或切换为“自定义音频”。"
+                    )
+                    getattr(self, "root", self.parent).after(0, lambda: messagebox.showerror("缺少音频文件", msg))
+                    getattr(self, "root", self.parent).after(0, lambda: self.start_loopback_button.config(state="normal"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.stop_loopback_button.config(state="disabled"))
+                    return
                 
-                subprocess.run(self.get_adb_command(f"push {audio_file} /sdcard/test_audio.wav"), shell=True)
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} push \"{audio_file}\" /sdcard/test_audio.wav", shell=True)
+                else:
+                    subprocess.run(f"adb push \"{audio_file}\" /sdcard/test_audio.wav", shell=True)
                 remote_audio_file = "/sdcard/test_audio.wav"
             else:
                 # 使用自定义音频文件
+                if not getattr(self, "selected_audio_file", None):
+                    getattr(self, "root", self.parent).after(0, lambda: messagebox.showerror("错误", "请先选择自定义音频文件"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.start_loopback_button.config(state="normal"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.stop_loopback_button.config(state="disabled"))
+                    return
+                if not os.path.exists(self.selected_audio_file):
+                    getattr(self, "root", self.parent).after(0, lambda: messagebox.showerror("错误", f"自定义音频文件不存在:\n{self.selected_audio_file}"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.start_loopback_button.config(state="normal"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.stop_loopback_button.config(state="disabled"))
+                    return
                 # 获取文件扩展名
                 _, ext = os.path.splitext(self.selected_audio_file)
                 remote_filename = f"test_audio{ext}"
                 
-                self.root.after(0, lambda: self.status_var.set("正在推送自定义音频文件到设备..."))
-                subprocess.run(self.get_adb_command(f"push \"{self.selected_audio_file}\" /sdcard/{remote_filename}"), shell=True)
+                getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set("正在推送自定义音频文件到设备..."))
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} push \"{self.selected_audio_file}\" /sdcard/{remote_filename}", shell=True)
+                else:
+                    subprocess.run(f"adb push \"{self.selected_audio_file}\" /sdcard/{remote_filename}", shell=True)
                 remote_audio_file = f"/sdcard/{remote_filename}"
             
             # 重启audioserver
             for _ in range(3):
-                subprocess.run(self.get_adb_command("shell killall audioserver"), shell=True)
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} shell killall audioserver", shell=True)
+                else:
+                    subprocess.run("adb shell killall audioserver", shell=True)
                 time.sleep(0.5)
             
             # 开始录制 - 使用正确的参数格式
@@ -2842,47 +4650,77 @@ class UIComponents:
             self.loopback_filename = f"test_{channels}ch.wav"
             
             # 使用完整的录制命令
-            record_cmd = self.get_adb_command(f"shell tinycap /sdcard/{self.loopback_filename} -D 0 -d {device} -c {channels} -r {rate} -p 480 -b 16")
+            if device_id:
+                record_cmd = f"adb -s {device_id} shell tinycap /sdcard/{self.loopback_filename} -D 0 -d {device} -c {channels} -r {rate} -p 480 -b 16"
+            else:
+                record_cmd = f"adb shell tinycap /sdcard/{self.loopback_filename} -D 0 -d {device} -c {channels} -r {rate} -p 480 -b 16"
             
             # 开始录制进程
             self.loopback_process = subprocess.Popen(record_cmd, shell=True)
             
             # 更新状态
-            self.root.after(0, lambda: self.status_var.set("正在录制通道音频..."))
-            self.root.after(0, lambda: self.loopback_status_var.set("录制中..."))
+            getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set("正在录制通道音频..."))
             
             # 等待录制启动
             time.sleep(2)
             
             # 播放音频
-            self.root.after(0, lambda: self.status_var.set("正在播放音频..."))
+            getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set("正在播放音频..."))
             
             # 根据文件类型选择播放方式
             if remote_audio_file.endswith('.wav'):
-                # 使用tinyplay播放WAV文件
-                play_cmd = self.get_adb_command(f"shell tinyplay {remote_audio_file} -D 0 -d 0")
-                subprocess.run(play_cmd, shell=True)
+                # 使用 tinyplay 播放 WAV
+                # 关键修复：优先“像多声道测试一样”不指定 -D/-d，让系统走默认输出（这是你多声道能播的原因）
+                # 失败再回退到显式指定（有些设备需要）
+                if device_id:
+                    candidates = [
+                        f"adb -s {device_id} shell tinyplay {remote_audio_file}",
+                        f"adb -s {device_id} shell tinyplay {remote_audio_file} -D 0 -d 0",
+                        f"adb -s {device_id} shell tinyplay {remote_audio_file} -D 0 -d {device}",
+                    ]
+                else:
+                    candidates = [
+                        f"adb shell tinyplay {remote_audio_file}",
+                        f"adb shell tinyplay {remote_audio_file} -D 0 -d 0",
+                        f"adb shell tinyplay {remote_audio_file} -D 0 -d {device}",
+                    ]
+
+                last_err = ""
+                for idx, play_cmd in enumerate(candidates, start=1):
+                    getattr(self, "root", self.parent).after(0, lambda c=play_cmd, i=idx: self.loopback_status_var.set(f"正在播放音频...（方案{i}）"))
+                    r = subprocess.run(play_cmd, shell=True, capture_output=True, text=True)
+                    if r.returncode == 0:
+                        last_err = ""
+                        break
+                    last_err = (r.stderr or r.stdout or "").strip()
+
+                if last_err:
+                    getattr(self, "root", self.parent).after(
+                        0,
+                        lambda: self.loopback_status_var.set(f"播放失败（tinyplay）: {last_err[:160]}"),
+                    )
             else:
                 # 对于其他格式，尝试使用系统媒体播放器
-                play_cmd = self.get_adb_command(f"shell am start -a android.intent.action.VIEW -d file://{remote_audio_file} -t audio/*")
+                if device_id:
+                    play_cmd = f"adb -s {device_id} shell am start -a android.intent.action.VIEW -d file://{remote_audio_file} -t audio/*"
+                else:
+                    play_cmd = f"adb shell am start -a android.intent.action.VIEW -d file://{remote_audio_file} -t audio/*"
                 subprocess.run(play_cmd, shell=True)
                 
                 # 等待一段时间让音频播放完成
-                self.root.after(0, lambda: self.status_var.set("正在播放音频，请等待..."))
+                getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set("正在播放音频，请等待..."))
                 time.sleep(30)  # 假设音频不超过30秒
             
             # 更新状态
-            self.root.after(0, lambda: self.status_var.set("音频播放完成，录制继续进行中..."))
-            self.root.after(0, lambda: self.loopback_status_var.set("音频播放完成，录制继续进行中..."))
+            getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set("音频播放完成，录制继续进行中..."))
             
         except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
-            self.root.after(0, lambda: self.loopback_status_var.set("测试出错"))
+            getattr(self, "root", self.parent).after(0, lambda: self.loopback_status_var.set(f"测试出错: {str(e)}"))
             messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
             
             # 恢复按钮状态
-            self.root.after(0, lambda: self.start_loopback_button.config(state="normal"))
-            self.root.after(0, lambda: self.stop_loopback_button.config(state="disabled"))
+            getattr(self, "root", self.parent).after(0, lambda: self.start_loopback_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_loopback_button.config(state="disabled"))
 
     def run_loopback_test(self):
         """运行Loopback或Ref通道测试"""
@@ -2895,19 +4733,22 @@ class UIComponents:
         audio_source = self.audio_source_var.get()
         
         # 检查自定义音频文件
-        if audio_source == "custom" and not hasattr(self, 'selected_audio_file'):
+        if audio_source == "custom" and not getattr(self, 'selected_audio_file', None):
             messagebox.showerror("错误", "请先选择自定义音频文件")
             return
         
-        self.status_var.set("正在执行通道测试...")
+        self.loopback_status_var.set("正在执行通道测试...")
         
         # 禁用开始按钮，启用停止按钮
         self.start_loopback_button.config(state="disabled")
         self.stop_loopback_button.config(state="normal")
         
+        # 获取设备ID
+        device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
+        
         # 在新线程中运行测试，避免GUI冻结
         self.loopback_thread = threading.Thread(target=self._loopback_test_thread, 
-                                          args=(device, channels, rate, audio_source), 
+                                          args=(device, channels, rate, audio_source, device_id), 
                                           daemon=True)
         self.loopback_thread.start()
     
@@ -2939,6 +4780,19 @@ class UIComponents:
 
     def add_prop_to_ui(self, prop_name, prop_value="1"):
         """将属性添加到UI界面"""
+        # 兼容两种输入：
+        # - add_prop_to_ui("vendor.xxx.prop", "1")
+        # - add_prop_to_ui("vendor.xxx.prop 1")
+        try:
+            if isinstance(prop_name, str) and (" " in prop_name) and (prop_value == "1" or prop_value is None):
+                parts = prop_name.split()
+                if len(parts) >= 2:
+                    prop_name, prop_value = parts[0], parts[1]
+                else:
+                    prop_name, prop_value = parts[0], "1"
+        except Exception:
+            pass
+
         if prop_name in self.hal_props and hasattr(self.hal_props[prop_name], 'frame'):
             return  # 属性已存在
         
@@ -3020,4 +4874,786 @@ class UIComponents:
         self.logcat_status_text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
         self.logcat_status_text.see(tk.END)
         self.logcat_status_text.config(state="disabled")
+    
+    # 需要添加这些方法的引用，确保各个功能窗口能正常工作
+    def check_device_selected(self):
+        """检查是否选择了设备"""
+        # UIComponents 不应覆盖 DeviceOperations 的真实实现；这里委托给父类
+        try:
+            return super().check_device_selected()
+        except Exception:
+            # 兜底：至少保证不会因为 UI mixin 覆盖导致直接崩溃
+            return hasattr(self, 'device_var') and bool(self.device_var.get().strip())
+    
+    def get_adb_command(self, cmd):
+        """获取ADB命令"""
+        # UIComponents 不应覆盖 DeviceOperations 的真实实现；这里委托给父类
+        try:
+            return super().get_adb_command(cmd)
+        except Exception:
+            return f"adb {cmd}"
+    
+    def take_screenshot(self):
+        """截取屏幕截图"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            self.screenshot_status_var.set("正在截取屏幕...")
+            self.update_screenshot_info("正在截取屏幕...")
+            
+            # 获取保存路径
+            save_dir = self.screenshot_save_path_var.get().strip()
+            if not save_dir:
+                save_dir = get_output_dir(DIR_SCREENSHOTS)
+            
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir, exist_ok=True)
+            
+            # 生成文件名
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"screenshot_{timestamp}.png"
+            local_path = os.path.join(save_dir, filename)
+            
+            # 直接构建adb命令，避免递归调用
+            device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
+            if device_id:
+                cmd = f"adb -s {device_id} exec-out screencap -p"
+            else:
+                cmd = "adb exec-out screencap -p"
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"截图命令执行失败: {result.stderr.decode() if result.stderr else '未知错误'}")
+            
+            # 保存截图数据
+            with open(local_path, 'wb') as f:
+                f.write(result.stdout)
+            
+            # 检查文件是否保存成功
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                self.update_screenshot_info(f"截图成功保存: {filename}")
+                self.update_screenshot_info(f"文件路径: {local_path}")
+                self.screenshot_status_var.set("截图完成")
+                
+                # 询问是否打开文件夹
+                if messagebox.askyesno("截图完成", f"截图已保存为:\n{local_path}\n\n是否打开文件夹？"):
+                    self.open_screenshot_folder()
+            else:
+                raise Exception("截图文件保存失败或文件为空")
+            
+        except Exception as e:
+            error_msg = f"截图出错: {str(e)}"
+            self.screenshot_status_var.set(error_msg)
+            self.update_screenshot_info(error_msg)
+            messagebox.showerror("错误", f"截图时出错:\n{str(e)}")
+
+    def open_screenshot_folder(self):
+        """打开截图保存文件夹"""
+        save_dir = self.screenshot_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = get_output_dir(DIR_SCREENSHOTS)
+        
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.screenshot_status_var.set(f"打开文件夹出错: {str(e)}")
+            self.update_screenshot_info(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def send_keycode(self, keycode):
+        """发送遥控器按键"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(f"正在发送按键: {keycode}")
+            
+            # 直接构建adb命令，避免递归调用
+            device_id = self.parent.device_var.get() if hasattr(self.parent, 'device_var') else ""
+            if device_id:
+                cmd = f"adb -s {device_id} shell input keyevent KEYCODE_{keycode}"
+            else:
+                cmd = f"adb shell input keyevent KEYCODE_{keycode}"
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"发送按键失败: {result.stderr}")
+            
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(f"已发送按键: {keycode}")
+            
+        except Exception as e:
+            error_msg = f"发送按键出错: {str(e)}"
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(error_msg)
+            messagebox.showerror("错误", f"发送按键时出错:\n{str(e)}")
+
+    def launch_quick_action(self, label: str, spec):
+        """
+        快捷应用/动作统一入口：
+        - ("package", [pkg1, pkg2, ...])：用 monkey 启动（不依赖 Activity）
+        - ("activity", "pkg/.Activity")：用 am start -n 精确启动
+        - ("shell", "am start -n ...")：直接执行 shell 指令（会自动补全为 adb shell）
+        """
+        if not self.check_device_selected():
+            return
+
+        try:
+            kind = spec[0]
+            payload = spec[1]
+
+            if hasattr(self, "remote_status_var"):
+                self.remote_status_var.set(f"正在执行: {label} ...")
+
+            if kind == "activity":
+                component = str(payload).strip()
+                cmd = self.get_adb_command(f"shell am start -n {component}")
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise Exception((r.stderr or r.stdout or "").strip() or "am start 失败")
+                if hasattr(self, "remote_status_var"):
+                    self.remote_status_var.set(f"已启动: {label}")
+                return
+
+            if kind == "shell":
+                raw = str(payload or "").strip()
+                if not raw:
+                    raise Exception("shell 指令为空")
+                # 允许用户输入 "shell xxx" 或直接 "am start -n ..."
+                if raw.startswith("adb "):
+                    # 用户提供了完整 adb 命令：直接执行（不自动补 -s）
+                    cmd = raw
+                else:
+                    raw_shell = raw if raw.startswith("shell ") else f"shell {raw}"
+                    cmd = self.get_adb_command(raw_shell)
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                if r.returncode != 0:
+                    raise Exception((r.stderr or r.stdout or "").strip() or f"执行失败: {cmd}")
+                if hasattr(self, "remote_status_var"):
+                    self.remote_status_var.set(f"已执行: {label}")
+                return
+
+            # kind == "package"
+            package_candidates = payload or []
+            last_err = ""
+            for pkg in package_candidates:
+                pkg = (pkg or "").strip()
+                if not pkg:
+                    continue
+                cmd = self.get_adb_command(f"shell monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+                if r.returncode == 0 and ("No activities found" not in out) and ("Error" not in out):
+                    if hasattr(self, "remote_status_var"):
+                        self.remote_status_var.set(f"已启动: {label}（{pkg}）")
+                    return
+                last_err = out or f"returncode={r.returncode}"
+
+            if hasattr(self, "remote_status_var"):
+                self.remote_status_var.set(f"启动失败: {label}")
+            messagebox.showerror(
+                "启动失败",
+                f"无法启动 {label}。\n\n"
+                f"尝试的包名：{', '.join(package_candidates)}\n\n"
+                f"最后一次输出：\n{last_err[:600]}",
+            )
+
+        except Exception as e:
+            if hasattr(self, "remote_status_var"):
+                self.remote_status_var.set(f"执行失败: {label}")
+            messagebox.showerror("错误", f"执行 {label} 时出错:\n{str(e)}")
+
+    def adapt_remote_controller(self):
+        """重新适配设备的遥控器"""
+        if not self.check_device_selected():
+            return
+        
+        try:
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set("正在适配遥控器...")
+            
+            # 直接构建adb命令，避免递归调用
+            device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
+            if device_id:
+                cmd = f"adb -s {device_id} shell am broadcast -a com.nes.intent.action.NES_RESET_LONGPRESS"
+            else:
+                cmd = "adb shell am broadcast -a com.nes.intent.action.NES_RESET_LONGPRESS"
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise Exception(f"适配命令执行失败: {result.stderr}")
+            
+            # 简单更新状态
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set("遥控器适配已启动")
+            
+        except Exception as e:
+            error_msg = f"适配遥控器失败: {str(e)}"
+            if hasattr(self, 'remote_status_var'):
+                self.remote_status_var.set(error_msg)
+            messagebox.showerror("错误", f"适配遥控器时出错:\n{str(e)}")
+
+    def sort_files_by_frequency(self, files):
+        """按照频率排序文件（从低频到高频）"""
+        # 定义频率顺序的正则表达式模式
+        freq_patterns = [
+            r'(\d+)[-_](\d+)hz', 
+            r'(\d+)[-_](\d+)khz',
+            r'(\d+)hz[-_](\d+)hz',
+            r'(\d+)hz[-_](\d+)khz',
+            r'(\d+)[-_](\d+)[k]?'  # 更通用的模式，如20_20k
+        ]
+        
+        # 为文件创建排序键
+        def get_sort_key(filename):
+            filename_lower = filename.lower()
+            
+            # 特殊情况：如果是 custom 样式的文件，应该排在最前面
+            if "custom" in filename_lower:
+                return (20, 20000)
+                
+            # 尝试从文件名中提取频率信息
+            for pattern in freq_patterns:
+                match = re.search(pattern, filename_lower)
+                if match:
+                    start_freq = int(match.group(1))
+                    end_freq = int(match.group(2))
+                    
+                    # 转换单位：如果是kHz，转换为Hz
+                    if 'khz' in match.group(0) or 'k' in match.group(0):
+                        if end_freq < 1000:
+                            end_freq *= 1000
+                        if start_freq < 1000 and end_freq >= 1000:
+                            start_freq *= 1000
+                    
+                    return (start_freq, end_freq)
+            
+            # 尝试匹配单个频率数字
+            single_freq_match = re.search(r'(\d+)(hz|khz|k)?', filename_lower)
+            if single_freq_match:
+                freq = int(single_freq_match.group(1))
+                unit = single_freq_match.group(2) if single_freq_match.group(2) else ""
+                
+                if 'khz' in unit or 'k' in unit:
+                    freq *= 1000
+                    
+                return (freq, freq)
+            
+            # 如果没有匹配的频率模式，使用文件名进行排序，但优先级最低
+            return (999999, filename)
+        
+        # 按照起始频率和结束频率排序
+        return sorted(files, key=get_sort_key)
+
+    def update_sweep_info(self, message):
+        """更新扫频测试信息"""
+        if hasattr(self, 'sweep_info_text'):
+            self.sweep_info_text.config(state="normal")
+            self.sweep_info_text.insert("end", message + "\n")
+            self.sweep_info_text.see("end")  # 滚动到底部
+            self.sweep_info_text.config(state="disabled")
+
+    def start_batch_sweep_test(self, handler=None):
+        """启动批量扫频测试"""
+        if handler is None:
+            handler = self.parent
+        
+        if not handler.check_device_selected():
+            return
+        
+        # 获取选择的扫频类型
+        sweep_type = self.sweep_type_var.get()
+        
+        # 获取文件列表
+        if sweep_type == "elephant":
+            dir_path = os.path.join(os.getcwd(), "audio", "大象扫频文件")
+        else:  # custom
+            dir_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
+        
+        if not os.path.exists(dir_path):
+            messagebox.showerror("错误", f"扫频文件目录不存在: {dir_path}")
+            return
+        
+        # 获取所有音频文件
+        files = [f for f in os.listdir(dir_path) if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg'))]
+        
+        if not files:
+            messagebox.showerror("错误", f"未找到任何音频文件")
+            return
+        
+        # 如果文件数量很多，询问用户是否确定
+        if len(files) > 10:
+            if not messagebox.askyesno("确认", f"将对 {len(files)} 个音频文件进行批量测试，可能需要较长时间。\n\n确定要继续吗？"):
+                return
+        
+        # 对文件按频率进行排序
+        files = self.sort_files_by_frequency(files)
+        
+        # 获取保存路径
+        save_dir = self.sweep_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = get_output_dir(DIR_SWEEP_RECORDINGS)
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 清空保存目录中的文件
+        if messagebox.askyesno("确认", f"是否清空保存目录({save_dir})中的所有WAV文件？"):
+            try:
+                for file in os.listdir(save_dir):
+                    if file.lower().endswith('.wav'):
+                        os.remove(os.path.join(save_dir, file))
+                self.update_sweep_info(f"已清空保存目录中的WAV文件")
+            except Exception as e:
+                self.update_sweep_info(f"清空目录出错: {str(e)}")
+        
+        # 获取测试间隔时间
+        try:
+            interval = float(self.batch_interval_var.get())
+            if interval < 0:
+                interval = 5
+        except (ValueError, TypeError):
+            interval = 5
+        
+        # 获取录制时长
+        try:
+            recording_duration = float(self.sweep_recording_duration_var.get())
+            if recording_duration <= 0:
+                recording_duration = interval  # 如果未设置录制时长，使用间隔时间
+        except (ValueError, TypeError):
+            recording_duration = interval
+        
+        # 禁用测试按钮
+        self.start_sweep_button.config(state="disabled")
+        self.stop_sweep_button.config(state="normal")
+        
+        # 获取设备ID
+        device_id = handler.device_var.get() if hasattr(handler, 'device_var') else ""
+        
+        # 在单独的线程中运行批量测试
+        self.batch_thread = threading.Thread(
+            target=self._run_batch_tests,
+            args=(files, sweep_type, interval, recording_duration, save_dir, device_id),
+            daemon=True
+        )
+        self.batch_thread.start()
+
+    def _run_batch_tests(self, files, sweep_type, interval, recording_duration, save_dir, device_id):
+        """在线程中运行批量测试"""
+        try:
+            self.sweep_status_var.set(f"开始批量测试 {len(files)} 个文件")
+            self.update_sweep_info(f"开始批量测试 {len(files)} 个文件")
+            self.update_sweep_info(f"录制时长: {recording_duration}秒, 测试间隔: {interval}秒")
+            
+            total_files = len(files)
+            success_count = 0
+            
+            for i, file in enumerate(files):
+                # 检查是否已请求停止测试
+                if hasattr(self, 'stop_requested') and self.stop_requested:
+                    self.update_sweep_info("批量测试已手动停止")
+                    break
+                
+                # 更新状态
+                self.update_sweep_info(f"===== 测试文件 {i+1}/{total_files}: {file} =====")
+                self.sweep_status_var.set(f"测试 {i+1}/{total_files}: {file}")
+                
+                # 测试单个文件
+                success = self._batch_test_single_file(file, sweep_type, recording_duration, save_dir, device_id)
+                
+                if success:
+                    success_count += 1
+                
+                # 如果不是最后一个文件，等待指定的间隔时间
+                if i < total_files - 1:
+                    # 无需额外等待，因为每个测试已经消耗了recording_duration的时间
+                    pass
+            
+            # 测试完成后
+            msg = f"批量测试完成，成功: {success_count}/{total_files}"
+            self.update_sweep_info(msg)
+            self.sweep_status_var.set(msg)
+            
+            # 测试完成
+            getattr(self, "root", self.parent).after(0, lambda: messagebox.showinfo("完成", 
+                f"批量扫频测试已完成！\n\n共测试 {total_files} 个文件，成功 {success_count} 个。\n\n录音文件已保存至: {save_dir}"))
+        
+        except Exception as e:
+            self.update_sweep_info(f"批量测试出错: {str(e)}")
+            self.sweep_status_var.set("批量测试出错")
+            getattr(self, "root", self.parent).after(0, lambda: messagebox.showerror("错误", f"批量测试过程中出错:\n{str(e)}"))
+        
+        finally:
+            # 恢复按钮状态
+            getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
+            
+            # 清除停止标志
+            if hasattr(self, 'stop_requested'):
+                self.stop_requested = False
+
+    def _batch_test_single_file(self, sweep_file, sweep_type, recording_duration, save_dir, device_id):
+        """批量测试中测试单个扫频文件"""
+        try:
+            # 确定源文件路径
+            if sweep_type == "elephant":
+                source_path = os.path.join(os.getcwd(), "audio", "大象扫频文件", sweep_file)
+            else:  # custom
+                source_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB", sweep_file)
+            
+            if not os.path.exists(source_path):
+                self.update_sweep_info(f"文件不存在: {source_path}")
+                return False
+            
+            # 获取时间戳
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
+            # 设置设备上的临时文件路径
+            device_audio_path = f"/sdcard/{sweep_file}"
+            
+            # 推送音频文件到设备
+            self.update_sweep_info(f"正在推送音频文件: {sweep_file}")
+            if device_id:
+                push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path}"
+            else:
+                push_cmd = f"adb push \"{source_path}\" {device_audio_path}"
+            result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                self.update_sweep_info(f"推送音频文件失败")
+                return False
+            
+            # 设置录制文件名
+            file_base_name = os.path.splitext(sweep_file)[0]  # 获取不带扩展名的文件名
+            recording_filename = f"{file_base_name}_recording_{timestamp}.wav"
+            device_recording_path = f"/sdcard/{recording_filename}"
+            local_path = os.path.join(save_dir, recording_filename)
+            
+            # 重命名文件如果已存在
+            count = 1
+            while os.path.exists(local_path):
+                recording_filename = f"{file_base_name}_recording_{timestamp}_{count}.wav"
+                local_path = os.path.join(save_dir, recording_filename)
+                count += 1
+            
+            # 获取录制参数
+            recording_device = self.sweep_recording_device_var.get().strip()
+            recording_channels = self.sweep_recording_channels_var.get().strip()
+            recording_rate = self.sweep_recording_rate_var.get().strip()
+            recording_periods = self.sweep_recording_periods_var.get().strip()
+            
+            # 为了确保设备就绪，先重启audioserver
+            for _ in range(2):
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} shell killall audioserver", shell=True)
+                else:
+                    subprocess.run("adb shell killall audioserver", shell=True)
+                time.sleep(0.5)
+            
+            # 开始录制
+            self.update_sweep_info("开始录制...")
+            if device_id:
+                tinycap_cmd = f"adb -s {device_id} shell tinycap {device_recording_path} -d {recording_device} -c {recording_channels} -r {recording_rate} -p {recording_periods}"
+            else:
+                tinycap_cmd = f"adb shell tinycap {device_recording_path} -d {recording_device} -c {recording_channels} -r {recording_rate} -p {recording_periods}"
+            
+            self.update_sweep_info(f"执行录音命令: {tinycap_cmd}")
+            recording_process = subprocess.Popen(tinycap_cmd, shell=True)
+            
+            # 等待录制启动
+            time.sleep(1)
+            
+            # 播放音频
+            self.update_sweep_info("开始播放音频...")
+            if device_id:
+                tinyplay_cmd = f"adb -s {device_id} shell tinyplay {device_audio_path} -d 0"
+            else:
+                tinyplay_cmd = f"adb shell tinyplay {device_audio_path} -d 0"
+            
+            self.update_sweep_info(f"执行播放命令: {tinyplay_cmd}")
+            playback_process = subprocess.Popen(tinyplay_cmd, shell=True)
+            
+            # 等待指定的录制时长
+            self.update_sweep_info(f"录制中，将在 {recording_duration} 秒后停止...")
+            time.sleep(recording_duration)
+            
+            # 停止播放和录制
+            self.update_sweep_info("停止播放...")
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True)
+            else:
+                subprocess.run("adb shell killall tinyplay", shell=True)
+            
+            self.update_sweep_info("停止录制...")
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinycap", shell=True)
+            else:
+                subprocess.run("adb shell killall tinycap", shell=True)
+            
+            # 等待进程结束
+            try:
+                playback_process.wait(timeout=2)
+            except:
+                pass
+                
+            try:
+                recording_process.wait(timeout=2)
+            except:
+                pass
+            
+            # 拉取录制文件
+            self.update_sweep_info(f"拉取录制文件到: {local_path}")
+            if device_id:
+                pull_cmd = f"adb -s {device_id} pull {device_recording_path} \"{local_path}\""
+            else:
+                pull_cmd = f"adb pull {device_recording_path} \"{local_path}\""
+            pull_result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            
+            # 清理设备上的临时文件
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell rm {device_audio_path}", shell=True)
+                subprocess.run(f"adb -s {device_id} shell rm {device_recording_path}", shell=True)
+            else:
+                subprocess.run(f"adb shell rm {device_audio_path}", shell=True)
+                subprocess.run(f"adb shell rm {device_recording_path}", shell=True)
+            
+            # 检查文件是否存在且大小合适
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+                self.update_sweep_info(f"测试成功: {sweep_file}")
+                return True
+            else:
+                self.update_sweep_info(f"测试失败: 录制文件不存在或太小")
+                return False
+                
+        except Exception as e:
+            self.update_sweep_info(f"测试 {sweep_file} 出错: {str(e)}")
+            return False
+
+    def monitor_sweep_test(self, device_recording_path, save_dir, recording_filename, sweep_file):
+        """监控播放进程，在播放完成后自动停止录制"""
+        try:
+            # 等待播放进程结束
+            if hasattr(self, 'playback_process') and self.playback_process:
+                self.update_sweep_info("等待播放完成...")
+                self.playback_process.wait()
+                self.update_sweep_info("播放已完成")
+            
+            # 等待一段时间确保录制完整
+            time.sleep(3)
+            
+            # 停止录制进程
+            if hasattr(self, 'recording_process') and self.recording_process.poll() is None:
+                self.update_sweep_info("正在停止录制...")
+                # 直接构建adb命令，避免递归调用
+                device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
+                if device_id:
+                    kill_cmd = f"adb -s {device_id} shell killall tinycap"
+                else:
+                    kill_cmd = "adb shell killall tinycap"
+                subprocess.run(kill_cmd, shell=True)
+                self.update_sweep_info("已停止录制")
+            
+            # 拉取录音文件
+            self.pull_sweep_recording()
+            
+            # 恢复按钮状态
+            getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
+            
+        except Exception as e:
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"监控播放过程中出错: {str(e)}"))
+            getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("监控出错"))
+            # 恢复按钮状态
+            getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
+            getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
+
+    def stop_sweep_test(self, handler=None):
+        """停止扫频测试"""
+        try:
+            self.update_sweep_info("正在停止测试...")
+            
+            # 设置停止标志，用于批量测试
+            self.stop_requested = True
+            
+            # 直接构建adb命令，避免递归调用
+            device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
+            
+            # 停止播放进程
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True)
+            else:
+                subprocess.run("adb shell killall tinyplay", shell=True)
+                
+            # 停止录制进程
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinycap", shell=True)
+            else:
+                subprocess.run("adb shell killall tinycap", shell=True)
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+            
+            # 更新状态
+            self.sweep_status_var.set("测试已停止")
+            self.update_sweep_info("扫频测试已手动停止")
+            
+        except Exception as e:
+            self.sweep_status_var.set(f"停止测试出错: {str(e)}")
+            self.update_sweep_info(f"停止测试出错: {str(e)}")
+            messagebox.showerror("错误", f"停止扫频测试时出错:\n{str(e)}")
+            
+            # 恢复按钮状态
+            self.start_sweep_button.config(state="normal")
+            self.stop_sweep_button.config(state="disabled")
+
+    def open_sweep_folder(self):
+        """打开扫频测试保存文件夹"""
+        save_dir = self.sweep_save_path_var.get().strip()
+        if not save_dir:
+            save_dir = get_output_dir(DIR_SWEEP_RECORDINGS)
+        
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", save_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.sweep_status_var.set(f"打开文件夹出错: {str(e)}")
+            self.update_sweep_info(f"打开文件夹出错: {str(e)}")
+            messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def browse_sweep_save_path(self):
+        """浏览扫频测试保存路径"""
+        folder = filedialog.askdirectory(initialdir=self.sweep_save_path_var.get())
+        if folder:
+            self.sweep_save_path_var.set(folder)
+            self.update_sweep_info(f"已设置保存路径: {folder}")
+
+    def browse_audio_file(self):
+        """浏览音频文件"""
+        file_types = [
+            ('音频文件', '*.wav;*.mp3;*.flac;*.ogg;*.m4a'),
+            ('WAV文件', '*.wav'),
+            ('MP3文件', '*.mp3'),
+            ('FLAC文件', '*.flac'),
+            ('OGG文件', '*.ogg'),
+            ('M4A文件', '*.m4a'),
+            ('所有文件', '*.*')
+        ]
+        
+        file = filedialog.askopenfilename(
+            title="选择音频文件",
+            filetypes=file_types
+        )
+        
+        if file:
+            self.file_path_var.set(file)
+            self.selected_audio_file = file
+
+    def play_local_audio(self):
+        """播放本地音频"""
+        # 直接委托给 TestOperations（避免错误地使用 self.parent=Tk root）
+        try:
+            return super().play_local_audio()
+        except Exception as e:
+            messagebox.showerror("错误", f"播放失败:\n{str(e)}")
+
+    def start_hal_recording(self):
+        """开始HAL录音"""
+        try:
+            return super().start_hal_recording()
+        except Exception as e:
+            messagebox.showerror("错误", f"开始HAL录音失败:\n{str(e)}")
+
+    def stop_hal_recording(self):
+        """停止HAL录音"""
+        try:
+            return super().stop_hal_recording()
+        except Exception as e:
+            messagebox.showerror("错误", f"停止HAL录音失败:\n{str(e)}")
+    
+    def check_audio_devices(self, handler=None):
+        """检查可用的音频设备"""
+        if handler is None:
+            handler = self.parent
+        
+        if not handler.check_device_selected():
+            return
+        
+        try:
+            device_id = handler.device_var.get() if hasattr(handler, 'device_var') else ""
+            
+            self.update_sweep_info("正在检查可用的音频设备...")
+            
+            # 检查录制设备
+            if device_id:
+                check_cmd = f"adb -s {device_id} shell find /proc/asound -name 'pcm*c' -type f"
+            else:
+                check_cmd = "adb shell find /proc/asound -name 'pcm*c' -type f"
+            
+            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                capture_devices = result.stdout.strip().split('\n')
+                capture_info = "可用录制设备:\n"
+                for device in capture_devices:
+                    if device.strip():
+                        # 解析设备信息 /proc/asound/card0/pcm0c/info
+                        parts = device.split('/')
+                        if len(parts) >= 5:
+                            card = parts[3].replace('card', '')
+                            pcm = parts[4].replace('pcm', '').replace('c', '')
+                            capture_info += f"  卡{card} 设备{pcm}\n"
+            else:
+                capture_info = "无法获取录制设备信息\n"
+            
+            # 检查播放设备
+            if device_id:
+                play_cmd = f"adb -s {device_id} shell find /proc/asound -name 'pcm*p' -type f"
+            else:
+                play_cmd = "adb shell find /proc/asound -name 'pcm*p' -type f"
+            
+            play_result = subprocess.run(play_cmd, shell=True, capture_output=True, text=True)
+            
+            if play_result.returncode == 0:
+                playback_devices = play_result.stdout.strip().split('\n')
+                playback_info = "可用播放设备:\n"
+                for device in playback_devices:
+                    if device.strip():
+                        # 解析设备信息
+                        parts = device.split('/')
+                        if len(parts) >= 5:
+                            card = parts[3].replace('card', '')
+                            pcm = parts[4].replace('pcm', '').replace('p', '')
+                            playback_info += f"  卡{card} 设备{pcm}\n"
+            else:
+                playback_info = "无法获取播放设备信息\n"
+            
+            # 显示设备信息
+            device_info = capture_info + "\n" + playback_info
+            self.update_sweep_info(device_info)
+            
+            # 弹出详细信息窗口
+            messagebox.showinfo("音频设备信息", device_info)
+            
+        except Exception as e:
+            self.update_sweep_info(f"检查音频设备失败: {str(e)}")
     
