@@ -15,11 +15,12 @@ from devices_operations import DeviceOperations
 from test_operations import TestOperations
 from optional_deps import try_import_pygame
 from output_paths import get_output_dir, DIR_MIC_TEST
+from feature_config import APP_VERSION
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
         self.root = root
-        self.root.title("声测大师(AcouTest)V1.6")
+        self.root.title(f"声测大师(AcouTest) v{APP_VERSION}")
         self.root.geometry("750x650")
         self.root.resizable(False, False)
 
@@ -297,6 +298,45 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         network_btn.pack(side="left", padx=(0, 5))
         network_btn.configure(style="Small.TButton")
         
+        # 软件信息：小问号图标 + 悬停提示「查看软件信息」+ 点击弹窗
+        about_icon = tk.Label(
+            device_frame, text="?", font=("Arial", 10, "bold"), fg="#0066cc", bg="#cce5ff",
+            width=2, cursor="hand2", relief="flat", bd=0,
+            highlightthickness=1, highlightbackground="#99ccff"
+        )
+        about_icon.pack(side="left", padx=(0, 5), ipady=1, ipadx=1)
+        about_icon.bind("<Button-1>", lambda e: self.show_software_info())
+        self._about_tooltip_after = None
+        self._about_tooltip_win = None
+        def _show_about_tooltip():
+            self._about_tooltip_after = None
+            if not about_icon.winfo_exists():
+                return
+            self._about_tooltip_win = tk.Toplevel(about_icon)
+            self._about_tooltip_win.overrideredirect(True)
+            self._about_tooltip_win.wm_attributes("-topmost", True)
+            lbl = tk.Label(self._about_tooltip_win, text="查看软件信息", font=("Arial", 9),
+                           bg="#ffffe0", fg="#333", relief="solid", bd=1, padx=6, pady=3)
+            lbl.pack()
+            self._about_tooltip_win.update_idletasks()
+            tw = self._about_tooltip_win.winfo_reqwidth()
+            x = about_icon.winfo_rootx() + about_icon.winfo_width() // 2 - tw // 2
+            y = about_icon.winfo_rooty() + about_icon.winfo_height() + 4
+            self._about_tooltip_win.geometry(f"+{max(0, x)}+{y}")
+        def _on_about_enter(e):
+            if self._about_tooltip_after:
+                self.root.after_cancel(self._about_tooltip_after)
+            self._about_tooltip_after = self.root.after(500, _show_about_tooltip)
+        def _on_about_leave(e):
+            if self._about_tooltip_after:
+                self.root.after_cancel(self._about_tooltip_after)
+                self._about_tooltip_after = None
+            if self._about_tooltip_win and self._about_tooltip_win.winfo_exists():
+                self._about_tooltip_win.destroy()
+                self._about_tooltip_win = None
+        about_icon.bind("<Enter>", _on_about_enter)
+        about_icon.bind("<Leave>", _on_about_leave)
+        
         # 创建小字体样式
         style = ttk.Style()
         style.configure("Small.TButton", font=("Arial", 9))
@@ -315,8 +355,9 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         status_label = ttk.Label(status_bar, textvariable=self.status_var, font=("Arial", 9))
         status_label.pack(side="left")
         
-        version_label = ttk.Label(status_bar, text="V1.6", font=("Arial", 9))
+        version_label = ttk.Label(status_bar, text=f"V{APP_VERSION} | 软件信息", font=("Arial", 9), cursor="hand2")
         version_label.pack(side="right")
+        version_label.bind("<Button-1>", lambda e: self.show_software_info())
 
     def init_mic_variables(self):
         """初始化麦克风测试相关变量"""

@@ -32,12 +32,13 @@ from output_paths import (
 
 # 功能开关：未找到 feature_config 或出错时默认全部显示
 try:
-    from feature_config import is_main_tab_enabled, is_sub_tab_enabled
+    from feature_config import is_main_tab_enabled, is_sub_tab_enabled, APP_VERSION
 except Exception:
     def is_main_tab_enabled(_name):
         return True
     def is_sub_tab_enabled(_main, _sub):
         return True
+    APP_VERSION = "1.6"
 
 
 def fix_wav_header_after_tinycap(file_path, channels, sample_rate, bits_per_sample):
@@ -440,6 +441,100 @@ class UIComponents:
             self.setup_keyburn_tab(keyburn_frame)
 
         return self.main_notebook
+
+    def show_software_info(self):
+        """弹出软件信息窗口：版本号、作者、邮箱及功能简要说明"""
+        root = getattr(self, "root", self.parent)
+        win = tk.Toplevel(root)
+        win.title("软件信息")
+        win.geometry("480x420")
+        win.resizable(True, True)
+        win.transient(root)
+        win.grab_set()
+        # 与主窗口一致的图标（AcouTest logo）
+        try:
+            base_dir = self._get_runtime_base_dir()
+            png_paths = [
+                os.path.join(base_dir, "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
+            ]
+            for path in png_paths:
+                if path and os.path.exists(path):
+                    try:
+                        icon_img = tk.PhotoImage(file=path)
+                        win.iconphoto(True, icon_img)
+                        win._icon_image = icon_img  # 保持引用，避免被回收
+                        break
+                    except Exception:
+                        pass
+            if platform.system() == "Windows":
+                ico_paths = [
+                    os.path.join(base_dir, "logo", "AcouTest.ico"),
+                    os.path.join("logo", "AcouTest.ico"),
+                ]
+                for ico_path in ico_paths:
+                    if os.path.exists(ico_path):
+                        try:
+                            win.iconbitmap(ico_path)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        f = ttk.Frame(win, padding=15)
+        f.pack(fill="both", expand=True)
+        # 版本号、作者、邮箱
+        ttk.Label(f, text="版本号:", font=("Arial", 10)).pack(anchor="w")
+        ttk.Label(f, text=f"v{APP_VERSION}", font=("Arial", 10), foreground="#0066cc").pack(anchor="w", pady=(0, 4))
+        ttk.Label(f, text="作者:", font=("Arial", 10)).pack(anchor="w")
+        ttk.Label(f, text="liangk", font=("Arial", 10), foreground="#0066cc").pack(anchor="w", pady=(0, 4))
+        ttk.Label(f, text="邮箱:", font=("Arial", 10)).pack(anchor="w")
+        email_text = "807946809@qq.com"
+        email_lbl = ttk.Label(f, text=email_text, font=("Arial", 10), foreground="#0066cc", cursor="hand2")
+        email_lbl.pack(anchor="w", pady=(0, 8))
+        try:
+            import webbrowser
+            email_lbl.bind("<Button-1>", lambda e: webbrowser.open("mailto:" + email_text))
+        except Exception:
+            pass
+        ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
+        # 功能说明（可滚动）
+        ttk.Label(f, text="功能说明", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        desc_frame = ttk.Frame(f)
+        desc_frame.pack(fill="both", expand=True, pady=4)
+        scrollbar = ttk.Scrollbar(desc_frame)
+        scrollbar.pack(side="right", fill="y")
+        txt = tk.Text(desc_frame, wrap="word", font=("Arial", 9), height=12, yscrollcommand=scrollbar.set, state="disabled")
+        txt.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=txt.yview)
+        desc = (
+            "声测大师(AcouTest) 面向 Android 设备的音频测试与远程控制，支持 ADB，便于设备管理与调试。\n\n"
+            "【硬件测试】\n"
+            "• 麦克风测试：多麦录音与自定义参数配置\n"
+            "• 雷达检查：雷达传感器检测\n"
+            "• 喇叭测试：喇叭播放测试\n"
+            "• 多声道测试：多声道播放与测试\n\n"
+            "【声学测试】\n"
+            "• 扫频测试：大象扫频文件播放与录制\n\n"
+            "【音频调试】\n"
+            "• Loopback和Ref测试：回路与参考通道测试\n"
+            "• HAL录音：HAL 录音与拉取\n"
+            "• Logcat日志：日志抓取与查看\n"
+            "• 唤醒监测：Google语音助手唤醒监测\n"
+            "• 系统指令：常用dumpsys/tinymix 及自定义 shell指令\n\n"
+            "【常用功能】\n"
+            "• 遥控器：常用遥控器按键模拟\n"
+            "• 截图功能：设备截图\n"
+            "• 账号登录：账号密码输入辅助\n\n"
+            "【烧大象key】\n"
+            "• u盘烧key\n"
+            "• sn烧key"
+        )
+        txt.config(state="normal")
+        txt.insert("1.0", desc)
+        txt.config(state="disabled")
+        ttk.Button(f, text="确定", command=win.destroy, width=8).pack(pady=(12, 0))
 
     def setup_keyburn_tab(self, parent):
         """设置烧大象key标签页"""
