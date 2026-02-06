@@ -125,10 +125,8 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         
     def ensure_directories(self):
         """确保必要的目录结构存在"""
-        # 创建测试结果目录
-        if not os.path.exists("test"):
-            os.makedirs("test")
-        
+        # Loopback/Ref 等测试录音已统一保存到 output/loopback/（见 output_paths），不再创建旧版 test/ 目录
+
         # audio/ 作为用户可放置自定义文件的入口（文件夹可以为空）
         if not os.path.exists("audio"):
             os.makedirs("audio")

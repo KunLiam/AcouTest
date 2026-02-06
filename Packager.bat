@@ -81,8 +81,7 @@ if exist "dist\声测大师(AcouTest).exe" (
     if not exist "dist\logo" mkdir "dist\logo"
     xcopy /E /Y "logo" "dist\logo\" >nul 2>nul
     
-    :: 创建test目录
-    if not exist "dist\test" mkdir "dist\test"
+    :: Loopback/Ref 录音已保存到 dist\output\loopback\，不再创建 dist\test
 
     :: 复制 elevoc_ukey（不内置到 exe，避免 onefile 体积膨胀；运行时与 exe 同级目录读取）
     if exist "elevoc_ukey" (

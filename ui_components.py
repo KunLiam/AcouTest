@@ -1,6 +1,8 @@
+import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
+import struct
 import threading
 import time
 import subprocess
@@ -28,6 +30,375 @@ from output_paths import (
     DIR_LOOPBACK,
 )
 
+# 功能开关：未找到 feature_config 或出错时默认全部显示
+try:
+    from feature_config import is_main_tab_enabled, is_sub_tab_enabled
+except Exception:
+    def is_main_tab_enabled(_name):
+        return True
+    def is_sub_tab_enabled(_main, _sub):
+        return True
+
+
+def fix_wav_header_after_tinycap(file_path, channels, sample_rate, bits_per_sample):
+    """
+    修正由 tinycap 在被外部 kill 时未回写或写错的 WAV 头。
+    tinycap 被 terminate 后可能只留下空白/错误的 fmt，导致编辑器报「未知格式」或损坏。
+    直接重写完整的 44 字节 PCM WAV 头（含格式与长度），保证任何播放器/编辑器都能正确打开。
+    """
+    try:
+        ch = int(channels)
+        rate = int(sample_rate)
+        bits = int(bits_per_sample)
+    except (TypeError, ValueError):
+        return False
+    if ch <= 0 or rate <= 0 or bits not in (16, 24, 32):
+        return False
+    size = os.path.getsize(file_path)
+    header_size = 44
+    if size <= header_size:
+        return False
+    data_sz = size - header_size
+    riff_sz = size - 8
+    byte_rate = rate * ch * (bits // 8)
+    block_align = ch * (bits // 8)
+    # 完整 PCM WAV 头 44 字节，避免设备端头不完整导致「未知格式」
+    header = (
+        b"RIFF" +
+        struct.pack("<I", riff_sz) +
+        b"WAVE" +
+        b"fmt " +
+        struct.pack("<I", 16) +           # fmt chunk size
+        struct.pack("<H", 1) +            # audio format = PCM
+        struct.pack("<H", ch) +
+        struct.pack("<I", rate) +
+        struct.pack("<I", byte_rate) +
+        struct.pack("<H", block_align) +
+        struct.pack("<H", bits) +
+        b"data" +
+        struct.pack("<I", data_sz)
+    )
+    assert len(header) == 44, "WAV header must be 44 bytes"
+    with open(file_path, "r+b") as f:
+        f.write(header)
+    return True
+
+
+class LogcatViewerWindow(tk.Toplevel):
+    """独立弹窗：日志查看器 (Logcat Viewer)，表格显示、实时滚动、过滤、级别、暂停"""
+
+    LEVEL_PRI = {"V": 0, "D": 1, "I": 2, "W": 3, "E": 4, "F": 5}
+    MAX_ROWS = 8000
+    MAX_PROCESS_PER_TICK = 300  # 每轮最多处理条数，避免界面卡顿
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("日志查看器 (Logcat Viewer)")
+        self.geometry("1000x580")
+        self.minsize(800, 400)
+
+        self._process = None
+        self._stop = False
+        self._paused = False
+        self._queue = queue.Queue()
+        self._total_count = 0
+        self._displayed_count = 0
+        self._after_id = None
+
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.focus_set()
+
+    def _build_ui(self):
+        # 工具栏
+        toolbar = ttk.Frame(self, padding=5)
+        toolbar.pack(fill="x")
+
+        ttk.Label(toolbar, text="Filter:").pack(side="left", padx=(0, 4))
+        self._filter_var = tk.StringVar()
+        ttk.Entry(toolbar, textvariable=self._filter_var, width=18).pack(side="left", padx=(0, 8))
+
+        ttk.Label(toolbar, text="级别:").pack(side="left", padx=(0, 4))
+        self._level_var = tk.StringVar(value="V")
+        level_combo = ttk.Combobox(toolbar, textvariable=self._level_var, values=["V", "D", "I", "W", "E", "F"], width=6, state="readonly")
+        level_combo.pack(side="left", padx=(0, 8))
+
+        self._auto_scroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="自动滚动", variable=self._auto_scroll_var).pack(side="left", padx=(0, 8))
+
+        self._pause_btn = ttk.Button(toolbar, text="暂停", width=6, command=self._toggle_pause)
+        self._pause_btn.pack(side="left", padx=(0, 8))
+
+        ttk.Button(toolbar, text="清空", width=6, command=self._clear).pack(side="left", padx=(0, 8))
+
+        self._start_btn = ttk.Button(toolbar, text="开始查看", width=8, command=self._start)
+        self._start_btn.pack(side="left", padx=(0, 6))
+        self._stop_btn = ttk.Button(toolbar, text="停止查看", width=8, command=self._stop_viewer, state="disabled")
+        self._stop_btn.pack(side="left")
+
+        # 表格区域
+        table_frame = ttk.Frame(self, padding=5)
+        table_frame.pack(fill="both", expand=True)
+
+        columns = ("时间", "PID", "TID", "级别", "标签", "包名", "消息")
+        self._tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=22, selectmode="extended")
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self._tree.xview)
+        self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        for col in columns:
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=140 if col == "时间" else (60 if col in ("PID", "TID", "级别") else (100 if col in ("标签", "包名") else 400)))
+        self._tree.column("消息", width=400)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self._tree.pack(side="left", fill="both", expand=True)
+
+        self._tree.tag_configure("level_v", foreground="#666666")
+        self._tree.tag_configure("level_d", foreground="#0066cc")
+        self._tree.tag_configure("level_i", foreground="#000000")
+        self._tree.tag_configure("level_w", foreground="#b8860b")
+        self._tree.tag_configure("level_e", foreground="#cc0000")
+        self._tree.tag_configure("level_f", foreground="#cc0000")
+
+        # 状态栏
+        status_frame = ttk.Frame(self, padding=5)
+        status_frame.pack(fill="x")
+        self._total_var = tk.StringVar(value="总计:0")
+        self._displayed_var = tk.StringVar(value="显示:0")
+        self._state_var = tk.StringVar(value="已停止（点击「开始查看」可实时刷新）")
+        ttk.Label(status_frame, textvariable=self._total_var).pack(side="left", padx=(0, 16))
+        ttk.Label(status_frame, textvariable=self._displayed_var).pack(side="left", padx=(0, 16))
+        ttk.Label(status_frame, textvariable=self._state_var).pack(side="left")
+
+    @staticmethod
+    def _parse_threadtime(line):
+        """解析 logcat 行，兼容 threadtime 及 [n Ttid] [tag] 等格式 -> (time, pid, tid, level, tag, pkg, msg)"""
+        line = line.rstrip("\n\r")
+        if not line:
+            return ("", "", "", "V", "", "", "")
+        parts = line.split(None, 5)
+        # 标准 threadtime: MM-DD HH:MM:SS.mmm  pid  tid  L  Tag: msg
+        if len(parts) >= 6 and len(parts[4]) == 1 and parts[4] in "VDIWEF":
+            date, tim, pid, tid, level, rest = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+            time_str = f"{date} {tim}"
+            tag, msg = "", rest
+            if ": " in rest:
+                tag, _, msg = rest.partition(": ")
+            return (time_str, pid, tid, level, tag, "", msg)
+        # 兼容 [level Ttid] [tag] 或仅有时间+消息等格式
+        time_str = ""
+        pid_str = ""
+        tid_str = ""
+        level = "V"
+        tag = ""
+        msg = line
+        if len(parts) >= 2 and re.match(r"^\d{2}-\d{2}$", parts[0]) and re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3}", parts[1]):
+            time_str = f"{parts[0]} {parts[1]}"
+            msg = parts[5] if len(parts) > 5 else (" ".join(parts[2:]) if len(parts) > 2 else line)
+        # 从整行提取级别：[0]-[5] 或 [V]/[D]/[I]/[W]/[E]/[F] 或空格+单字母
+        for m in re.finditer(r"\[([0-5VDIWEF])\]", line):
+            c = m.group(1)
+            if c in "VDIWEF":
+                level = c
+                break
+            if c in "012345":
+                level = "VDIWEF"[int(c)]
+                break
+        for m in re.finditer(r"\s([VDIWEF])\s", line):
+            level = m.group(1)
+            break
+        # TID: T 后跟数字，如 T484
+        tid_m = re.search(r"\bT(\d+)\b", line)
+        if tid_m:
+            tid_str = tid_m.group(1)
+        # PID: 时间后的第一组纯数字（且不是 T 后的）
+        if len(parts) >= 4 and parts[2].isdigit():
+            pid_str = parts[2]
+        if len(parts) >= 4 and parts[3].isdigit():
+            tid_str = tid_str or parts[3]
+        # 标签：方括号内非 [数字 T...] 的如 [led]
+        for tag_m in re.finditer(r"\[\s*([^\]\s]+)\s*\]", line):
+            s = tag_m.group(1).strip()
+            if s and not re.match(r"^[0-5VDIWEF]$", s) and "T" not in s:
+                tag = s[:32]
+                break
+        if ": " in line and not tag:
+            p = line.split(": ", 1)
+            if len(p) == 2:
+                tag = (p[0].strip().split()[-1] or "")[:32]
+        return (time_str or (line[:23] if len(line) >= 23 else line), pid_str, tid_str, level, tag, "", msg if msg else line)
+
+    def _level_priority(self, c):
+        return self.LEVEL_PRI.get(c, 0)
+
+    def _clear(self):
+        for i in self._tree.get_children():
+            self._tree.delete(i)
+        self._total_count = 0
+        self._displayed_count = 0
+        self._total_var.set("总计:0")
+        self._displayed_var.set("显示:0")
+
+    def _toggle_pause(self):
+        self._paused = not self._paused
+        self._pause_btn.config(text="继续" if self._paused else "暂停")
+
+    def _on_close(self):
+        self._stop_viewer()
+        if self._after_id:
+            self.after_cancel(self._after_id)
+        self.destroy()
+
+    def _start(self):
+        try:
+            if self._process is not None and self._process.poll() is None:
+                return
+            # 安全获取设备 ID，不依赖 check_device_selected 的弹窗（避免被主窗口挡住）
+            device_var = getattr(self.app, "device_var", None)
+            device_id = (device_var.get().strip() if device_var else "") or ""
+            argv = ["adb"]
+            if device_id:
+                argv.extend(["-s", device_id])
+            argv.extend(["logcat", "-v", "threadtime", "*:V"])
+            kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True, "bufsize": 1}
+            # Windows 下用 shell 启动，避免 adb 子进程被立即关闭
+            if platform.system() == "Windows":
+                cmd_str = subprocess.list2cmdline(argv)
+                kwargs["shell"] = True
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                self._process = subprocess.Popen(cmd_str, **kwargs)
+            else:
+                kwargs["shell"] = False
+                self._process = subprocess.Popen(argv, **kwargs)
+            time.sleep(0.3)
+            if self._process.poll() is not None:
+                err = "adb logcat 已退出，请检查：1) 是否已选择设备 2) 设备是否连接 3) ADB 是否可用"
+                self._process = None
+                messagebox.showerror("错误", err, parent=self)
+                return
+            self._stop = False
+            self._queue = queue.Queue()
+            self._start_btn.config(state="disabled")
+            self._stop_btn.config(state="normal")
+            self._state_var.set("运行中")
+            threading.Thread(target=self._read_thread, daemon=True).start()
+            self._schedule_process()
+        except FileNotFoundError:
+            messagebox.showerror("错误", "未找到 adb 命令，请确保 ADB 已安装并在 PATH 中", parent=self)
+        except Exception as e:
+            messagebox.showerror("错误", f"启动失败: {str(e)}", parent=self)
+
+    def _stop_viewer(self):
+        self._stop = True
+        if self._process and self._process.poll() is None:
+            try:
+                if platform.system() == "Windows":
+                    subprocess.run(f"taskkill /F /T /PID {self._process.pid}", shell=True)
+                else:
+                    self._process.terminate()
+            except Exception:
+                pass
+            self._process = None
+        self._start_btn.config(state="normal")
+        self._stop_btn.config(state="disabled")
+        self._state_var.set("已停止（点击「开始查看」可实时刷新）")
+        self._paused = False
+        self._pause_btn.config(text="暂停")
+
+    def _read_thread(self):
+        exit_code = None
+        try:
+            if not self._process or not getattr(self._process, "stdout", None):
+                return
+            for line in self._process.stdout:
+                if self._stop:
+                    break
+                if line:
+                    try:
+                        self._queue.put_nowait(line)
+                    except queue.Full:
+                        pass
+        except Exception:
+            pass
+        finally:
+            if self._process is not None:
+                try:
+                    exit_code = self._process.poll()
+                except Exception:
+                    exit_code = -1
+                self._process = None
+            self._reader_exit_code = exit_code
+            if self.winfo_exists():
+                self.after(0, self._on_reader_ended)
+
+    def _on_reader_ended(self):
+        self._stop = True
+        self._start_btn.config(state="normal")
+        self._stop_btn.config(state="disabled")
+        self._state_var.set("已停止（点击「开始查看」可实时刷新）")
+        # 若非用户点击停止且进程异常退出，提示可能原因
+        code = getattr(self, "_reader_exit_code", None)
+        if code is not None and code != 0 and self.winfo_exists():
+            msg = (
+                "logcat 进程已意外退出（退出码: {}）。\n\n"
+                "常见原因：\n"
+                "1) 设备未连接或未选中 — 请在主界面选择设备\n"
+                "2) 设备未授权 USB 调试 — 请在设备上点「允许」\n"
+                "3) ADB 版本或权限问题 — 可尝试重启 ADB 或插拔 USB\n\n"
+                "请检查后再次点击「开始查看」。"
+            ).format(code)
+            self.after(100, lambda: messagebox.showwarning("日志查看器", msg, parent=self))
+
+    def _schedule_process(self):
+        if self._stop or not self.winfo_exists():
+            return
+        self._process_queue()
+        if not self._stop and self.winfo_exists():
+            self._after_id = self.after(80, self._schedule_process)
+
+    def _process_queue(self):
+        keyword = (self._filter_var.get() or "").strip().lower()
+        level_sel = (self._level_var.get() or "V").upper()
+        level_pri = self._level_priority(level_sel)
+        processed = 0
+        try:
+            while processed < self.MAX_PROCESS_PER_TICK:
+                try:
+                    line = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._total_count += 1
+                time_str, pid, tid, level, tag, pkg, msg = self._parse_threadtime(line)
+                if keyword and keyword not in (time_str + pid + tid + level + tag + pkg + msg).lower():
+                    continue
+                if self._level_priority(level) < level_pri:
+                    continue
+                if self._paused:
+                    continue
+                self._displayed_count += 1
+                tag_name = f"level_{level.lower()}" if level.lower() in "vdiwef" else "level_i"
+                self._tree.insert("", "end", values=(time_str, pid, tid, level, tag, pkg, msg), tags=(tag_name,))
+                processed += 1
+            # 超出最大行数时批量删除旧行，保证持续实时刷新
+            children = self._tree.get_children()
+            if len(children) > self.MAX_ROWS:
+                to_remove = min(len(children) - self.MAX_ROWS, 500)
+                for _ in range(to_remove):
+                    c = self._tree.get_children()
+                    if not c:
+                        break
+                    self._tree.delete(c[0])
+            if self._auto_scroll_var.get():
+                children = self._tree.get_children()
+                if children:
+                    self._tree.see(children[-1])
+        except Exception:
+            pass
+        self._total_var.set(f"总计:{self._total_count}")
+        self._displayed_var.set(f"显示:{self._displayed_count}")
+
+
 class UIComponents:
     def __init__(self, parent):
         self.parent = parent
@@ -38,31 +409,36 @@ class UIComponents:
         self.main_notebook = ttk.Notebook(parent)
         self.main_notebook.pack(fill="both", expand=True)
         
-        # 1. 声学测试大类
-        acoustic_frame = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(acoustic_frame, text="声学测试")
-        self.setup_acoustic_tab(acoustic_frame)
-        
-        # 2. 硬件测试大类  
-        hardware_frame = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(hardware_frame, text="硬件测试")
-        self.setup_hardware_tab(hardware_frame)
-        
+        # 1. 硬件测试大类（首页）
+        if is_main_tab_enabled("硬件测试"):
+            hardware_frame = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(hardware_frame, text="硬件测试")
+            self.setup_hardware_tab(hardware_frame)
+
+        # 2. 声学测试大类
+        if is_main_tab_enabled("声学测试"):
+            acoustic_frame = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(acoustic_frame, text="声学测试")
+            self.setup_acoustic_tab(acoustic_frame)
+
         # 3. 音频调试大类
-        debug_frame = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(debug_frame, text="音频调试")
-        self.setup_debug_tab(debug_frame)
-        
+        if is_main_tab_enabled("音频调试"):
+            debug_frame = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(debug_frame, text="音频调试")
+            self.setup_debug_tab(debug_frame)
+
         # 4. 常用功能大类
-        common_frame = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(common_frame, text="常用功能")
-        self.setup_common_tab(common_frame)
+        if is_main_tab_enabled("常用功能"):
+            common_frame = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(common_frame, text="常用功能")
+            self.setup_common_tab(common_frame)
 
         # 5. 烧大象key（U盘/设备key相关）
-        keyburn_frame = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(keyburn_frame, text="烧大象key")
-        self.setup_keyburn_tab(keyburn_frame)
-        
+        if is_main_tab_enabled("烧大象key"):
+            keyburn_frame = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(keyburn_frame, text="烧大象key")
+            self.setup_keyburn_tab(keyburn_frame)
+
         return self.main_notebook
 
     def setup_keyburn_tab(self, parent):
@@ -70,13 +446,15 @@ class UIComponents:
         nb = ttk.Notebook(parent)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        ukey_frame = ttk.Frame(nb)
-        nb.add(ukey_frame, text="u盘烧key")
-        self.setup_ukey_burn_tab(ukey_frame)
+        if is_sub_tab_enabled("烧大象key", "u盘烧key"):
+            ukey_frame = ttk.Frame(nb)
+            nb.add(ukey_frame, text="u盘烧key")
+            self.setup_ukey_burn_tab(ukey_frame)
 
-        sn_frame = ttk.Frame(nb)
-        nb.add(sn_frame, text="sn烧key")
-        self.setup_sn_key_burn_tab(sn_frame)
+        if is_sub_tab_enabled("烧大象key", "sn烧key"):
+            sn_frame = ttk.Frame(nb)
+            nb.add(sn_frame, text="sn烧key")
+            self.setup_sn_key_burn_tab(sn_frame)
 
     def _get_runtime_base_dir(self) -> str:
         """返回运行时基准目录（支持 PyInstaller onefile）"""
@@ -855,84 +1233,94 @@ class UIComponents:
         acoustic_notebook = ttk.Notebook(parent)
         acoustic_notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # 扫频测试子标签
-        sweep_frame = ttk.Frame(acoustic_notebook)
-        acoustic_notebook.add(sweep_frame, text="扫频测试")
-        self.setup_sweep_tab(sweep_frame)
-        
+        if is_sub_tab_enabled("声学测试", "扫频测试"):
+            sweep_frame = ttk.Frame(acoustic_notebook)
+            acoustic_notebook.add(sweep_frame, text="扫频测试")
+            self.setup_sweep_tab(sweep_frame)
+
     def setup_hardware_tab(self, parent):
         """设置硬件测试标签页"""
         # 创建子标签页
         hardware_notebook = ttk.Notebook(parent)
         hardware_notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # 麦克风测试子标签
-        mic_frame = ttk.Frame(hardware_notebook)
-        hardware_notebook.add(mic_frame, text="麦克风测试")
-        self.setup_mic_tab(mic_frame)
-        
-        # 雷达检查子标签
-        radar_frame = ttk.Frame(hardware_notebook)
-        hardware_notebook.add(radar_frame, text="雷达检查")
-        self.setup_radar_tab(radar_frame)
-        
-        # 喇叭测试子标签
-        speaker_frame = ttk.Frame(hardware_notebook)
-        hardware_notebook.add(speaker_frame, text="喇叭测试")
-        self.setup_speaker_tab(speaker_frame)
-        
-        # 多声道测试子标签
-        multichannel_frame = ttk.Frame(hardware_notebook)
-        hardware_notebook.add(multichannel_frame, text="多声道测试")
-        self.setup_multichannel_tab(multichannel_frame)
-        
+        if is_sub_tab_enabled("硬件测试", "麦克风测试"):
+            mic_frame = ttk.Frame(hardware_notebook)
+            hardware_notebook.add(mic_frame, text="麦克风测试")
+            self.setup_mic_tab(mic_frame)
+
+        if is_sub_tab_enabled("硬件测试", "雷达检查"):
+            radar_frame = ttk.Frame(hardware_notebook)
+            hardware_notebook.add(radar_frame, text="雷达检查")
+            self.setup_radar_tab(radar_frame)
+
+        if is_sub_tab_enabled("硬件测试", "喇叭测试"):
+            speaker_frame = ttk.Frame(hardware_notebook)
+            hardware_notebook.add(speaker_frame, text="喇叭测试")
+            self.setup_speaker_tab(speaker_frame)
+
+        if is_sub_tab_enabled("硬件测试", "多声道测试"):
+            multichannel_frame = ttk.Frame(hardware_notebook)
+            hardware_notebook.add(multichannel_frame, text="多声道测试")
+            self.setup_multichannel_tab(multichannel_frame)
+
     def setup_debug_tab(self, parent):
         """设置音频调试标签页"""
         # 创建子标签页
         debug_notebook = ttk.Notebook(parent)
         debug_notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Loopback和Ref测试子标签
-        loopback_frame = ttk.Frame(debug_notebook)
-        debug_notebook.add(loopback_frame, text="Loopback和Ref测试")
-        self.setup_loopback_tab(loopback_frame)
-        
-        # HAL录音子标签
-        hal_frame = ttk.Frame(debug_notebook)
-        debug_notebook.add(hal_frame, text="HAL录音")
-        self.setup_hal_recording_tab(hal_frame)
-        
-        # Logcat日志子标签
-        logcat_frame = ttk.Frame(debug_notebook)
-        debug_notebook.add(logcat_frame, text="Logcat日志")
-        self.setup_logcat_tab(logcat_frame)
+        if is_sub_tab_enabled("音频调试", "Loopback和Ref测试"):
+            loopback_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(loopback_frame, text="Loopback和Ref测试")
+            self.setup_loopback_tab(loopback_frame)
 
-        # 系统指令子标签（独立页面：dumpsys/tinymix/getprop 等）
-        syscmd_frame = ttk.Frame(debug_notebook)
-        debug_notebook.add(syscmd_frame, text="系统指令")
-        self.setup_system_cmd_tab(syscmd_frame)
-        
+        if is_sub_tab_enabled("音频调试", "HAL录音"):
+            hal_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(hal_frame, text="HAL录音")
+            self.setup_hal_recording_tab(hal_frame)
+
+        if is_sub_tab_enabled("音频调试", "Logcat日志"):
+            logcat_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(logcat_frame, text="Logcat日志")
+            self.setup_logcat_tab(logcat_frame)
+
+        if is_sub_tab_enabled("音频调试", "唤醒监测"):
+            hotword_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(hotword_frame, text="唤醒监测")
+            self.setup_hotword_monitor_tab(hotword_frame)
+
+        if is_sub_tab_enabled("音频调试", "系统指令"):
+            syscmd_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(syscmd_frame, text="系统指令")
+            self.setup_system_cmd_tab(syscmd_frame)
+
     def setup_common_tab(self, parent):
         """设置常用功能标签页"""
         # 创建子标签页
         common_notebook = ttk.Notebook(parent)
         common_notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # 本地播放子标签
-        playback_frame = ttk.Frame(common_notebook)
-        common_notebook.add(playback_frame, text="本地播放")
-        self.setup_local_playback_tab(playback_frame)
-        
-        # 截图功能子标签
-        screenshot_frame = ttk.Frame(common_notebook)
-        common_notebook.add(screenshot_frame, text="截图功能")
-        self.setup_screenshot_tab(screenshot_frame)
-        
-        # 遥控器子标签
-        remote_frame = ttk.Frame(common_notebook)
-        common_notebook.add(remote_frame, text="遥控器")
-        self.setup_remote_tab(remote_frame)
-    
+        if is_sub_tab_enabled("常用功能", "遥控器"):
+            remote_frame = ttk.Frame(common_notebook)
+            common_notebook.add(remote_frame, text="遥控器")
+            self.setup_remote_tab(remote_frame)
+
+        if is_sub_tab_enabled("常用功能", "本地播放"):
+            playback_frame = ttk.Frame(common_notebook)
+            common_notebook.add(playback_frame, text="本地播放")
+            self.setup_local_playback_tab(playback_frame)
+
+        if is_sub_tab_enabled("常用功能", "截图功能"):
+            screenshot_frame = ttk.Frame(common_notebook)
+            common_notebook.add(screenshot_frame, text="截图功能")
+            self.setup_screenshot_tab(screenshot_frame)
+
+        if is_sub_tab_enabled("常用功能", "账号登录"):
+            account_login_frame = ttk.Frame(common_notebook)
+            common_notebook.add(account_login_frame, text="账号登录")
+            self.setup_account_login_tab(account_login_frame)
+
     def setup_acoustic_category(self, parent):
         """设置声学测试分类"""
         # 说明文字
@@ -1014,6 +1402,12 @@ class UIComponents:
                               font=("Arial", 9), foreground="gray")
         desc_label.pack(pady=(0, 10))
         
+        # 遥控器
+        remote_button = ttk.Button(parent, text="遥控器", 
+                                  command=self.open_remote_window,
+                                  width=20)
+        remote_button.pack(pady=2, fill="x")
+        
         # 本地播放
         playback_button = ttk.Button(parent, text="本地播放", 
                                     command=self.open_playback_window,
@@ -1025,12 +1419,6 @@ class UIComponents:
                                       command=self.open_screenshot_window,
                                       width=20)
         screenshot_button.pack(pady=2, fill="x")
-        
-        # 遥控器
-        remote_button = ttk.Button(parent, text="遥控器", 
-                                  command=self.open_remote_window,
-                                  width=20)
-        remote_button.pack(pady=2, fill="x")
     
     # 以下是各个功能窗口的打开方法
     def open_sweep_window(self):
@@ -1539,7 +1927,7 @@ class UIComponents:
         
         self.sweep_file_var = tk.StringVar()
         self.sweep_file_combobox = ttk.Combobox(file_frame, textvariable=self.sweep_file_var, 
-                                           width=50, state="readonly")
+                                           width=50)
         self.sweep_file_combobox.pack(side="left", padx=(10, 5))
         
         self.add_custom_sweep_button = ttk.Button(file_frame, text="添加文件", 
@@ -1556,22 +1944,27 @@ class UIComponents:
         ttk.Label(record_line1, text="设备:", font=("Arial", 8)).pack(side="left")
         self.record_device_var = tk.StringVar(value="0")  # 修正为设备0
         ttk.Combobox(record_line1, textvariable=self.record_device_var, 
-                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
+                    values=["0", "1", "2", "3"], width=5).pack(side="left", padx=(5, 10))
         
         ttk.Label(record_line1, text="卡号:", font=("Arial", 8)).pack(side="left")
         self.record_card_var = tk.StringVar(value="3")  # 修正为卡3
         ttk.Combobox(record_line1, textvariable=self.record_card_var, 
-                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
+                    values=["0", "1", "2", "3"], width=5).pack(side="left", padx=(5, 10))
         
         ttk.Label(record_line1, text="通道:", font=("Arial", 8)).pack(side="left")
         self.record_channels_var = tk.StringVar(value="4")
         ttk.Combobox(record_line1, textvariable=self.record_channels_var, 
-                    values=["1", "2", "4", "8"], width=5, state="readonly").pack(side="left", padx=(5, 10))
+                    values=["1", "2", "4", "8"], width=5).pack(side="left", padx=(5, 10))
         
         ttk.Label(record_line1, text="采样率:", font=("Arial", 8)).pack(side="left")
         self.record_rate_var = tk.StringVar(value="16000")
         ttk.Combobox(record_line1, textvariable=self.record_rate_var, 
-                    values=["8000", "16000", "44100", "48000"], width=8, state="readonly").pack(side="left", padx=5)
+                    values=["8000", "16000", "44100", "48000"], width=8).pack(side="left", padx=5)
+        
+        ttk.Label(record_line1, text="位深:", font=("Arial", 8)).pack(side="left")
+        self.record_bits_var = tk.StringVar(value="16")
+        ttk.Combobox(record_line1, textvariable=self.record_bits_var, 
+                    values=["16", "24", "32"], width=4).pack(side="left", padx=(5, 10))
         
         # 播放设置
         play_frame = ttk.LabelFrame(frame, text="播放设置")
@@ -1583,12 +1976,12 @@ class UIComponents:
         ttk.Label(play_line1, text="设备:", font=("Arial", 8)).pack(side="left")
         self.play_device_var = tk.StringVar(value="0")  # 播放设备0
         ttk.Combobox(play_line1, textvariable=self.play_device_var, 
-                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=(5, 10))
+                    values=["0", "1", "2", "3"], width=5).pack(side="left", padx=(5, 10))
         
         ttk.Label(play_line1, text="卡号:", font=("Arial", 8)).pack(side="left")
         self.play_card_var = tk.StringVar(value="0")  # 播放卡0
         ttk.Combobox(play_line1, textvariable=self.play_card_var, 
-                    values=["0", "1", "2", "3"], width=5, state="readonly").pack(side="left", padx=5)
+                    values=["0", "1", "2", "3"], width=5).pack(side="left", padx=5)
         
         # 测试设置
         test_frame = ttk.LabelFrame(frame, text="测试设置")
@@ -1727,6 +2120,7 @@ class UIComponents:
         self.hal_props = {}  # 存储属性和对应的变量
         default_props = [
             "vendor.media.audiohal.vpp.dump 1",
+            "vendor.media.audiohal.speech.dump 1",
             "vendor.media.audiohal.indump 1",
             "vendor.media.audiohal.dspc 1",
             "vendor.media.audiohal.loopback 1",
@@ -1927,6 +2321,7 @@ class UIComponents:
         # 添加默认属性
         default_props = [
             "vendor.media.audiohal.vpp.dump",
+            "vendor.media.audiohal.speech.dump",
             "vendor.media.audiohal.indump",
             "vendor.media.audiohal.outdump"
         ]
@@ -2133,6 +2528,305 @@ class UIComponents:
         status_label = ttk.Label(frame, textvariable=self.screenshot_status_var, font=("Arial", 9))
         status_label.pack(pady=2)
     
+    def setup_account_login_tab(self, parent):
+        """设置账号登录小类：预设账号或手动添加的自定义账号，执行「输入账号 -> 点 Next -> 输入密码」"""
+        # 外层：上方可滚动区域 + 底部固定「设备登录操作」，避免按钮被遮挡
+        outer = ttk.Frame(parent, padding=10)
+        outer.pack(fill="both", expand=True)
+        
+        # 可滚动内容区（选择账号、详情、添加新账号）
+        scroll_container = ttk.Frame(outer)
+        scroll_container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(scroll_container, highlightthickness=0)
+        vsb = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        scroll_container.grid_rowconfigure(0, weight=1)
+        scroll_container.grid_columnconfigure(0, weight=1)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=vsb.set)
+        
+        frame = ttk.Frame(canvas)
+        canvas_frame_id = canvas.create_window((0, 0), window=frame, anchor="nw")
+        def _on_frame_configure(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            canvas.itemconfig(canvas_frame_id, width=e.width)
+        frame.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        
+        desc = ttk.Label(
+            frame,
+            text="请先在设备上打开对应应用的登录页，光标放在账号输入框内。\n操作：点击「输入账号」→ 在设备上手动点击 Next → 再点击「输入密码」。",
+            font=("Arial", 9),
+            foreground="gray",
+            justify="left",
+            wraplength=480,
+        )
+        desc.pack(pady=(0, 10))
+        
+        # 预设 + 自定义 统一用下拉选择
+        if not hasattr(self, "_custom_accounts"):
+            self._custom_accounts = []  # [{"name": str, "email": str, "password": str}, ...]
+        
+        account_frame = ttk.LabelFrame(frame, text="选择账号", padding=8)
+        account_frame.pack(fill="x", pady=4)
+        
+        self._account_preset_labels = ["Google 账号", "Netflix 账号", "ART 账号"]
+        self._account_preset_keys = ["google", "netflix", "art"]
+        self.account_login_var = tk.StringVar(value=self._account_preset_labels[0])
+        
+        def refresh_account_combo():
+            vals = list(self._account_preset_labels) + [a["name"] for a in self._custom_accounts]
+            self._account_combo["values"] = vals
+            if vals and self.account_login_var.get() not in vals:
+                self.account_login_var.set(vals[0])
+        
+        ttk.Label(account_frame, text="账号:", font=("Arial", 9)).pack(side="left", padx=(0, 5))
+        self._account_combo = ttk.Combobox(
+            account_frame,
+            textvariable=self.account_login_var,
+            values=self._account_preset_labels + [a["name"] for a in self._custom_accounts],
+            width=28,
+            state="readonly",
+        )
+        self._account_combo.pack(side="left", padx=2, pady=2)
+        
+        # 当前选中账号的详情（查看/编辑）
+        detail_frame = ttk.LabelFrame(frame, text="当前账号详情（可查看与修改）", padding=8)
+        detail_frame.pack(fill="x", pady=4)
+        
+        row1 = ttk.Frame(detail_frame)
+        row1.pack(fill="x", pady=2)
+        ttk.Label(row1, text="名称:", width=6, font=("Arial", 9)).pack(side="left", padx=(0, 2))
+        self._custom_name_var = tk.StringVar()
+        self._custom_name_entry = ttk.Entry(row1, textvariable=self._custom_name_var, width=20)
+        self._custom_name_entry.pack(side="left", padx=2)
+        ttk.Label(row1, text="邮箱:", width=6, font=("Arial", 9)).pack(side="left", padx=(10, 2))
+        self._custom_email_var = tk.StringVar()
+        self._custom_email_entry = ttk.Entry(row1, textvariable=self._custom_email_var, width=28)
+        self._custom_email_entry.pack(side="left", padx=2)
+        
+        row2 = ttk.Frame(detail_frame)
+        row2.pack(fill="x", pady=2)
+        ttk.Label(row2, text="密码:", width=6, font=("Arial", 9)).pack(side="left", padx=(0, 2))
+        self._custom_password_var = tk.StringVar()
+        self._custom_password_entry = ttk.Entry(row2, textvariable=self._custom_password_var, width=20, show="*")
+        self._custom_password_entry.pack(side="left", padx=2)
+        self._show_password_var = tk.BooleanVar(value=False)
+        def toggle_show_password():
+            if self._show_password_var.get():
+                self._custom_password_entry.configure(show="")
+            else:
+                self._custom_password_entry.configure(show="*")
+        ttk.Checkbutton(row2, text="显示密码", variable=self._show_password_var, command=toggle_show_password).pack(side="left", padx=(10, 0))
+        ttk.Frame(row2, width=1).pack(side="left", fill="x", expand=True)
+        
+        def on_account_selected(event=None):
+            """选择账号时填充详情区，预设只读、自定义可编辑"""
+            sel = (self.account_login_var.get() or "").strip()
+            if not sel:
+                self._custom_name_var.set("")
+                self._custom_email_var.set("")
+                self._custom_password_var.set("")
+                self._custom_name_entry.config(state="normal")
+                self._custom_email_entry.config(state="normal")
+                self._custom_password_entry.config(state="normal")
+                if hasattr(self, "_btn_save_account"):
+                    self._btn_save_account.pack_forget()
+                return
+            email, password = self._get_selected_account_credentials()
+            self._custom_name_var.set(sel)
+            self._custom_email_var.set(email or "")
+            self._custom_password_var.set(password or "")
+            if sel in self._account_preset_labels:
+                self._custom_name_entry.config(state="disabled")
+                self._custom_email_entry.config(state="disabled")
+                self._custom_password_entry.config(state="disabled")
+                if hasattr(self, "_btn_save_account"):
+                    self._btn_save_account.pack_forget()
+            else:
+                self._custom_name_entry.config(state="normal")
+                self._custom_email_entry.config(state="normal")
+                self._custom_password_entry.config(state="normal")
+                if hasattr(self, "_btn_save_account"):
+                    self._btn_save_account.pack(side="right", padx=(8, 0))
+        
+        self._account_combo.bind("<<ComboboxSelected>>", on_account_selected)
+        
+        def save_custom_account():
+            sel = (self.account_login_var.get() or "").strip()
+            if sel in self._account_preset_labels:
+                messagebox.showinfo("保存", "预设账号不可修改")
+                return
+            new_name = (self._custom_name_var.get() or "").strip()
+            email = (self._custom_email_var.get() or "").strip()
+            password = (self._custom_password_var.get() or "").strip()
+            if not new_name:
+                messagebox.showwarning("保存", "名称不能为空")
+                return
+            if not email:
+                messagebox.showwarning("保存", "邮箱不能为空")
+                return
+            if not password:
+                messagebox.showwarning("保存", "密码不能为空")
+                return
+            if new_name in self._account_preset_labels:
+                messagebox.showwarning("保存", "名称不能与预设账号相同")
+                return
+            for a in self._custom_accounts:
+                if a["name"] == sel:
+                    if new_name != sel and any(a2["name"] == new_name for a2 in self._custom_accounts if a2 != a):
+                        messagebox.showwarning("保存", "该名称已被其他账号使用")
+                        return
+                    a["name"] = new_name
+                    a["email"] = email
+                    a["password"] = password
+                    refresh_account_combo()
+                    self.account_login_var.set(new_name)
+                    messagebox.showinfo("保存", f"已保存「{new_name}」的修改")
+                    return
+            messagebox.showwarning("保存", "未找到当前选中的自定义账号")
+        self._btn_save_account = ttk.Button(row2, text="保存修改", command=save_custom_account, width=10)
+        # 初始不显示，选择自定义账号时由 on_account_selected 显示
+        
+        # 手动添加账号（新增账号）
+        custom_frame = ttk.LabelFrame(frame, text="手动添加新账号", padding=8)
+        custom_frame.pack(fill="x", pady=6)
+        
+        add_row1 = ttk.Frame(custom_frame)
+        add_row1.pack(fill="x", pady=2)
+        ttk.Label(add_row1, text="名称:", width=6, font=("Arial", 9)).pack(side="left", padx=(0, 2))
+        self._add_name_var = tk.StringVar()
+        ttk.Entry(add_row1, textvariable=self._add_name_var, width=20).pack(side="left", padx=2)
+        ttk.Label(add_row1, text="邮箱:", width=6, font=("Arial", 9)).pack(side="left", padx=(10, 2))
+        self._add_email_var = tk.StringVar()
+        ttk.Entry(add_row1, textvariable=self._add_email_var, width=28).pack(side="left", padx=2)
+        
+        add_row2 = ttk.Frame(custom_frame)
+        add_row2.pack(fill="x", pady=2)
+        ttk.Label(add_row2, text="密码:", width=6, font=("Arial", 9)).pack(side="left", padx=(0, 2))
+        self._add_password_var = tk.StringVar()
+        ttk.Entry(add_row2, textvariable=self._add_password_var, width=20, show="*").pack(side="left", padx=2)
+        
+        def add_custom_account():
+            name = (self._add_name_var.get() or "").strip()
+            email = (self._add_email_var.get() or "").strip()
+            password = (self._add_password_var.get() or "").strip()
+            if not name:
+                messagebox.showwarning("添加账号", "请填写名称（用于在列表中区分）")
+                return
+            if not email:
+                messagebox.showwarning("添加账号", "请填写邮箱")
+                return
+            if not password:
+                messagebox.showwarning("添加账号", "请填写密码")
+                return
+            if name in self._account_preset_labels:
+                messagebox.showwarning("添加账号", "该名称与预设账号冲突，请换一个名称")
+                return
+            for a in self._custom_accounts:
+                if a["name"] == name:
+                    messagebox.showwarning("添加账号", "已存在同名账号，请换一个名称或删除后重加")
+                    return
+            self._custom_accounts.append({"name": name, "email": email, "password": password})
+            refresh_account_combo()
+            self.account_login_var.set(name)
+            self._add_name_var.set("")
+            self._add_email_var.set("")
+            self._add_password_var.set("")
+            on_account_selected()
+            messagebox.showinfo("添加账号", f"已添加「{name}」，可在上方选择后执行登录。")
+        
+        def remove_custom_account():
+            sel = self.account_login_var.get().strip()
+            if sel in self._account_preset_labels:
+                messagebox.showinfo("删除账号", "预设账号不可删除")
+                return
+            for i, a in enumerate(self._custom_accounts):
+                if a["name"] == sel:
+                    self._custom_accounts.pop(i)
+                    refresh_account_combo()
+                    if self._account_combo["values"]:
+                        self.account_login_var.set(self._account_combo["values"][0])
+                    on_account_selected()
+                    messagebox.showinfo("删除账号", f"已删除「{sel}」")
+                    return
+            messagebox.showinfo("删除账号", "请先在上方选择要删除的自定义账号")
+        
+        add_btn_row = ttk.Frame(custom_frame)
+        add_btn_row.pack(fill="x", pady=5)
+        ttk.Frame(add_btn_row, width=1).pack(side="left", fill="x", expand=True)  # 占位，把按钮推到右侧
+        btn_add = ttk.Button(add_btn_row, text="添加", command=add_custom_account, width=8)
+        btn_add.pack(side="right", padx=(8, 0), pady=0)
+        ttk.Button(add_btn_row, text="删除选中", command=remove_custom_account, width=10).pack(side="right", padx=2, pady=0)
+        
+        # 初始化：显示当前选中账号的详情
+        on_account_selected()
+        
+        # 底部固定区域：设备登录操作（始终可见，不被上方内容遮挡）
+        bottom_bar = ttk.Frame(outer)
+        bottom_bar.pack(side="bottom", fill="x", pady=(10, 0))
+        action_frame = ttk.LabelFrame(bottom_bar, text="设备登录操作", padding=10)
+        action_frame.pack(fill="x")
+        action_btn_row = ttk.Frame(action_frame)
+        action_btn_row.pack(fill="x")
+        ttk.Button(action_btn_row, text="输入账号", command=self._do_account_login_email_only, width=12).pack(side="left", padx=(0, 8))
+        ttk.Button(action_btn_row, text="输入密码", command=self._do_account_login_password_only, width=12).pack(side="left", padx=0)
+        
+        self.account_login_status_var = tk.StringVar(value="")
+        ttk.Label(bottom_bar, textvariable=self.account_login_status_var, font=("Arial", 9), foreground="gray").pack(pady=4)
+    
+    def _get_selected_account_credentials(self):
+        """返回当前选中账号的 (email, password)，若无效返回 (None, None)。"""
+        ACCOUNT_LOGINS = {
+            "google": ("sei2020atv@gmail.com", "A26613121"),
+            "netflix": ("tester_mediateam@netflix.com", "deD2@icE"),
+            "art": ("sei2021art@gmail.com", "cTC77kMw"),
+        }
+        sel = (self.account_login_var.get() or "").strip()
+        if sel in self._account_preset_labels:
+            idx = self._account_preset_labels.index(sel)
+            key = self._account_preset_keys[idx]
+            return ACCOUNT_LOGINS[key]
+        for a in getattr(self, "_custom_accounts", []):
+            if a["name"] == sel:
+                return a["email"], a["password"]
+        return None, None
+    
+    def _do_account_login_email_only(self):
+        """只向当前焦点输入账号，不发送任何按键（避免设备误把 keyevent 当成字符产生 11）。"""
+        if not self.check_device_selected():
+            return
+        email, _ = self._get_selected_account_credentials()
+        if not email:
+            self.account_login_status_var.set("未选择有效账号")
+            return
+        device_id = (self.device_var.get() or "").strip() if hasattr(self, "device_var") else ""
+        if device_id:
+            subprocess.run(["adb", "-s", device_id, "shell", "input", "text", email], capture_output=True)
+        else:
+            subprocess.run(["adb", "shell", "input", "text", email], capture_output=True)
+        self.account_login_status_var.set("已输入账号，请在设备上手动点击 Next，再点击「输入密码」。")
+    
+    def _do_account_login_password_only(self):
+        """只向当前焦点输入密码，不发送任何按键（避免设备误把 keyevent 当成字符产生 1）。"""
+        if not self.check_device_selected():
+            return
+        _, password = self._get_selected_account_credentials()
+        if not password:
+            self.account_login_status_var.set("未选择有效账号")
+            return
+        device_id = (self.device_var.get() or "").strip() if hasattr(self, "device_var") else ""
+        if device_id:
+            subprocess.run(["adb", "-s", device_id, "shell", "input", "text", password], capture_output=True)
+        else:
+            subprocess.run(["adb", "shell", "input", "text", password], capture_output=True)
+        self.account_login_status_var.set("已输入密码，请在设备上手动点击登录/确认。")
+    
     def browse_screenshot_save_path(self):
         """浏览截图保存路径"""
         folder = filedialog.askdirectory(initialdir=self.screenshot_save_path_var.get())
@@ -2211,7 +2905,7 @@ class UIComponents:
         default_status_label.pack(anchor="w", padx=5)
 
         # 默认音频路径显示（让用户清楚“默认音频放哪里/当前路径是什么”）
-        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "speaker_default.wav")
         self.default_speaker_audio_path_var = tk.StringVar(value=default_audio_path)
 
         default_path_frame = ttk.Frame(audio_frame)
@@ -2237,7 +2931,7 @@ class UIComponents:
                                                 command=self.add_default_audio_file,
                                                 style="Small.TButton")
         self.add_default_audio_button.pack(side="left", padx=5)
-        if os.path.exists(os.path.join(os.getcwd(), "audio", "speaker", "test.wav")):
+        if os.path.exists(os.path.join(os.getcwd(), "audio", "speaker", "speaker_default.wav")):
             self.add_default_audio_button.config(state="disabled")
         
         # 状态显示
@@ -2417,7 +3111,7 @@ class UIComponents:
         # 操作按钮：两行用 grid 对齐，上下列对齐、间距一致
         btn_container = ttk.Frame(control_frame)
         btn_container.pack(fill="x", padx=5, pady=5)
-        # 第一行：放开打印、停止打印
+        # 第一行：放开打印、停止打印、实时logcat（在停止打印右边，打开文件夹上方）
         self.enable_debug_button = ttk.Button(btn_container, text="放开打印",
                                             command=self.enable_logcat_debug,
                                             style="Small.TButton", width=8)
@@ -2427,18 +3121,25 @@ class UIComponents:
                                              style="Small.TButton", width=8)
         self.disable_debug_button.grid(row=0, column=1, padx=(0, 6), pady=(0, 4), sticky="w")
         self.disable_debug_button.config(state="disabled")
-        # 第二行：开始抓取、停止抓取、打开文件夹（与第一行列对齐）
+        open_viewer_button = ttk.Button(
+            btn_container,
+            text="实时logcat",
+            command=self.open_logcat_viewer_window,
+            style="Small.TButton",
+            width=11,
+        )
+        open_viewer_button.grid(row=0, column=2, padx=(0, 6), pady=(0, 4), sticky="w")
+
+        # 第二行：开始抓取、停止抓取、打开文件夹
         self.start_capture_button = ttk.Button(btn_container, text="开始抓取",
                                              command=self.start_logcat_capture,
                                              style="Small.TButton", width=8)
         self.start_capture_button.grid(row=1, column=0, padx=(0, 6), pady=(0, 0), sticky="w")
-        
         self.stop_capture_button = ttk.Button(btn_container, text="停止抓取",
                                             command=self.stop_logcat_capture,
                                             style="Small.TButton", width=8)
         self.stop_capture_button.grid(row=1, column=1, padx=(0, 6), pady=(0, 0), sticky="w")
         self.stop_capture_button.config(state="disabled")
-        
         open_folder_button = ttk.Button(
             btn_container,
             text="打开文件夹",
@@ -2446,7 +3147,6 @@ class UIComponents:
             style="Small.TButton",
             width=9,
         )
-        # 放到同一排按钮组里，避免“孤零零靠右”造成割裂感
         open_folder_button.grid(row=1, column=2, padx=(0, 0), pady=(0, 0), sticky="w")
 
         # 状态显示
@@ -2463,6 +3163,232 @@ class UIComponents:
         
         # 清理已有的删除按钮
         self.root.after(100, self.clean_logcat_delete_buttons)
+
+    def open_logcat_viewer_window(self):
+        """打开独立弹窗「日志查看器 (Logcat Viewer)」"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if root and root.winfo_exists():
+            LogcatViewerWindow(root, self)
+
+    def setup_hotword_monitor_tab(self, parent):
+        """唤醒监测：过滤 logcat 中 Detected hotword，统计唤醒次数，支持重置"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+        
+        # 说明
+        desc = ttk.Label(frame, text="监测设备 logcat 中「Detected hotword」的日志行，每次唤醒计 1 次；开始监测前会清空设备 log 缓冲，只统计本次唤醒。", style="Muted.TLabel")
+        desc.pack(anchor="w", pady=(0, 10))
+        
+        # 唤醒次数显示
+        count_frame = ttk.LabelFrame(frame, text="唤醒次数")
+        count_frame.pack(fill="x", pady=5)
+        self.hotword_count_var = tk.StringVar(value="0")
+        self.hotword_count_label = ttk.Label(count_frame, textvariable=self.hotword_count_var, font=("Arial", 24))
+        self.hotword_count_label.pack(pady=15, padx=20)
+        
+        # 按钮
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", pady=10)
+        self.hotword_start_btn = ttk.Button(btn_frame, text="开始监测", command=self.start_hotword_monitor)
+        self.hotword_start_btn.pack(side="left", padx=5)
+        self.hotword_stop_btn = ttk.Button(btn_frame, text="停止监测", command=self.stop_hotword_monitor, state="disabled")
+        self.hotword_stop_btn.pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="重置计数", command=self.reset_hotword_count).pack(side="left", padx=5)
+        
+        # 可选：唤醒后发送系统返回键（相当于遥控器返回键）
+        self.hotword_send_back_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="唤醒后发送返回键（勾选后，每次检测到唤醒会向设备发送 KEYCODE_BACK）", variable=self.hotword_send_back_var).pack(anchor="w", pady=(5, 0))
+        
+        # 最近唤醒日志（只读）
+        log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（Detected hotword）")
+        log_frame.pack(fill="both", expand=True, pady=5)
+        self.hotword_log_text = tk.Text(log_frame, height=12, font=("Consolas", 9), state="disabled")
+        vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.hotword_log_text.yview)
+        self.hotword_log_text.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.hotword_log_text.pack(side="left", fill="both", expand=True)
+        
+        # 进程/线程/计数（用于监测逻辑）
+        self.hotword_count = 0
+        self.hotword_monitor_process = None
+        self.hotword_monitor_stop = False
+        self.hotword_monitor_thread = None
+        self._hotword_log_max_lines = 200
+        self._hotword_last_detected_time = 0.0  # 用于同一唤醒只计一次（去重时间窗）
+        self._hotword_debounce_seconds = 1.5   # 此时间内只计 1 次
+
+    def start_hotword_monitor(self):
+        """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，只统计「Detected hotword」一次/唤醒"""
+        if not self.check_device_selected():
+            return
+        self.hotword_monitor_stop = False
+        self._hotword_ui_buffer = []
+        self._hotword_ui_flush_scheduled = False
+        self.hotword_count = 0
+        self._hotword_last_detected_time = 0.0
+        self._hotword_monitor_start_time = time.time()  # 启动后前 1 秒内忽略，避免旧缓冲被计入
+        if hasattr(self, "hotword_count_var"):
+            self.hotword_count_var.set("0")
+        if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+            self.hotword_log_text.config(state="normal")
+            self.hotword_log_text.delete("1.0", "end")
+            self.hotword_log_text.config(state="disabled")
+        try:
+            device_id = (self.device_var.get() or "").strip()
+            clear_argv = ["adb"]
+            if device_id:
+                clear_argv.extend(["-s", device_id])
+            clear_argv.append("logcat")
+            clear_argv.append("-c")
+            subprocess.run(clear_argv, shell=False, capture_output=True, timeout=5)
+            argv = ["adb"]
+            if device_id:
+                argv.extend(["-s", device_id])
+            argv.extend(["logcat", "-v", "threadtime", "native:I", "*:S"])
+            self.hotword_monitor_process = subprocess.Popen(
+                argv,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            time.sleep(0.3)
+            if self.hotword_monitor_process.poll() is not None:
+                out = ""
+                try:
+                    if self.hotword_monitor_process.stdout:
+                        out = (self.hotword_monitor_process.stdout.read() or "").strip()
+                except Exception:
+                    pass
+                self.hotword_monitor_process = None
+                messagebox.showerror("错误", out or "adb logcat 进程已退出，请检查设备连接与 adb")
+                return
+            self.hotword_start_btn.config(state="disabled")
+            self.hotword_stop_btn.config(state="normal")
+            self.hotword_monitor_thread = threading.Thread(target=self._read_hotword_logcat, daemon=True)
+            self.hotword_monitor_thread.start()
+        except Exception as e:
+            messagebox.showerror("错误", f"启动唤醒监测失败: {str(e)}")
+
+    def stop_hotword_monitor(self):
+        """停止唤醒监测"""
+        self.hotword_monitor_stop = True
+        if self.hotword_monitor_process and self.hotword_monitor_process.poll() is None:
+            try:
+                if platform.system() == "Windows":
+                    subprocess.run(f"taskkill /F /T /PID {self.hotword_monitor_process.pid}", shell=True)
+                else:
+                    self.hotword_monitor_process.terminate()
+            except Exception:
+                pass
+            self.hotword_monitor_process = None
+        if hasattr(self, "hotword_start_btn") and self.hotword_start_btn.winfo_exists():
+            self.hotword_start_btn.config(state="normal")
+        if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
+            self.hotword_stop_btn.config(state="disabled")
+
+    def reset_hotword_count(self):
+        """重置唤醒次数为 0"""
+        self.hotword_count = 0
+        if hasattr(self, "hotword_count_var"):
+            self.hotword_count_var.set("0")
+        if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+            self.hotword_log_text.config(state="normal")
+            self.hotword_log_text.delete("1.0", "end")
+            self.hotword_log_text.config(state="disabled")
+
+    def _read_hotword_logcat(self):
+        """实时迭代 process.stdout 行，仅含「Detected hotword」计 1 次（同一唤醒的 Fired hotword 不重复计）"""
+        keyword = "Detected hotword"
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+
+        def _ui_append(count_val, line_text):
+            """线程安全：缓冲计数与日志，批量刷新（约 100ms），避免卡顿"""
+            try:
+                buf = getattr(self, "_hotword_ui_buffer", None)
+                if buf is None:
+                    self._hotword_ui_buffer = []
+                    buf = self._hotword_ui_buffer
+                buf.append((count_val, line_text))
+            except Exception:
+                return
+            if getattr(self, "_hotword_ui_flush_scheduled", False):
+                return
+            self._hotword_ui_flush_scheduled = True
+
+            def _flush():
+                try:
+                    buf = getattr(self, "_hotword_ui_buffer", None) or []
+                    self._hotword_ui_buffer = []
+                    self._hotword_ui_flush_scheduled = False
+                    if not buf or not root or not root.winfo_exists():
+                        return
+                    last_count = buf[-1][0] if buf else 0
+                    if hasattr(self, "hotword_count_var"):
+                        self.hotword_count_var.set(str(last_count))
+                    if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+                        self.hotword_log_text.config(state="normal")
+                        for _, s in buf:
+                            self.hotword_log_text.insert("end", s + "\n")
+                        n = int(self.hotword_log_text.index("end-1c").split(".")[0])
+                        if n > getattr(self, "_hotword_log_max_lines", 200):
+                            self.hotword_log_text.delete("1.0", "2.0")
+                        self.hotword_log_text.see("end")
+                        self.hotword_log_text.config(state="disabled")
+                except Exception:
+                    try:
+                        self._hotword_ui_flush_scheduled = False
+                    except Exception:
+                        pass
+
+            root.after(100, _flush)
+
+        try:
+            if not self.hotword_monitor_process or not getattr(self.hotword_monitor_process, "stdout", None):
+                if root and root.winfo_exists():
+                    root.after(0, lambda: self._hotword_monitor_ended())
+                return
+            # 与雷达一致：用 for line in process.stdout 实时迭代，不用 iter(readline, "")
+            for line in self.hotword_monitor_process.stdout:
+                if self.hotword_monitor_stop:
+                    break
+                if not self.hotword_monitor_process or self.hotword_monitor_process.poll() is not None:
+                    break
+                if not line or keyword not in line:
+                    continue
+                now = time.time()
+                # 启动后 1 秒内不计数，避免 logcat -c 后设备仍输出的旧缓冲被计入
+                if now - getattr(self, "_hotword_monitor_start_time", 0) < 1.0:
+                    continue
+                # 同一唤醒可能有多条 Detected hotword，时间窗内只计 1 次
+                debounce = getattr(self, "_hotword_debounce_seconds", 1.5)
+                if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
+                    continue
+                self._hotword_last_detected_time = now
+                self.hotword_count += 1
+                _ui_append(self.hotword_count, line.strip())
+                # 可选：唤醒后发送系统返回键
+                if getattr(self, "hotword_send_back_var", None) and self.hotword_send_back_var.get():
+                    try:
+                        cmd = getattr(self, "get_adb_command", lambda c: f"adb {c}")("shell input keyevent KEYCODE_BACK")
+                        subprocess.run(cmd, shell=True, timeout=3, capture_output=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            if not self.hotword_monitor_stop and root and root.winfo_exists():
+                root.after(0, self._hotword_monitor_ended)
+            self.hotword_monitor_process = None
+
+    def _hotword_monitor_ended(self):
+        """监测进程已结束：仅恢复 UI"""
+        if hasattr(self, "hotword_start_btn") and self.hotword_start_btn.winfo_exists():
+            self.hotword_start_btn.config(state="normal")
+        if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
+            self.hotword_stop_btn.config(state="disabled")
+        self.hotword_monitor_process = None
 
     def setup_system_cmd_tab(self, parent):
         """系统指令（独立子标签页）"""
@@ -2514,21 +3440,122 @@ class UIComponents:
             command=self.open_device_unlock_window,
         ).pack(fill="x", padx=8, pady=8)
 
-        # 自定义指令
-        custom_lf = ttk.LabelFrame(lf, text="自定义指令")
-        custom_lf.pack(fill="x", padx=8, pady=(0, 8))
+        # 自定义指令：输入 + 添加/运行；下方固定高度的 Listbox 显示已添加项，选中后可运行/删除
+        custom_lf = ttk.LabelFrame(lf, text="自定义指令（可新增/删除）")
+        custom_lf.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        if not hasattr(self, "_syscmd_custom_list") or self._syscmd_custom_list is None:
+            self._syscmd_custom_list = []
 
         self._syscmd_custom_var = getattr(self, "_syscmd_custom_var", tk.StringVar())
-        entry = ttk.Entry(custom_lf, textvariable=self._syscmd_custom_var)
-        entry.pack(side="left", fill="x", expand=True, padx=(8, 6), pady=6)
+        row1 = ttk.Frame(custom_lf)
+        row1.pack(fill="x", padx=8, pady=(6, 4))
+        ttk.Label(row1, text="指令:").pack(side="left")
+        entry = ttk.Entry(row1, textvariable=self._syscmd_custom_var)
+        entry.pack(side="left", fill="x", expand=True, padx=(6, 12))
+        ttk.Button(row1, text="添加", style="Small.TButton", width=6, command=self._syscmd_add_custom).pack(side="left", padx=(0, 4))
+        ttk.Button(row1, text="运行", style="Small.TButton", width=6, command=lambda: self._syscmd_run_custom((self._syscmd_custom_var.get() or "").strip())).pack(side="left", padx=(0, 4))
 
-        ttk.Button(
-            custom_lf,
-            text="运行",
-            style="Small.TButton",
-            command=lambda: self.open_system_cmd_window("custom", (self._syscmd_custom_var.get() or "").strip()),
-            width=6,
-        ).pack(side="right", padx=(0, 8), pady=6)
+        # 已添加的指令：用固定高度的 Listbox，保证始终可见；添加时直接 insert，不依赖动态重绘
+        list_lf = ttk.LabelFrame(custom_lf, text="已添加的指令（选中后点「运行选中」或「删除选中」）")
+        list_lf.pack(fill="x", padx=8, pady=(6, 4))
+        list_inner = ttk.Frame(list_lf)
+        list_inner.pack(fill="x", padx=4, pady=4)
+        self._syscmd_listbox = tk.Listbox(list_inner, height=6, font=("Consolas", 9), selectmode="single")
+        syscmd_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self._syscmd_listbox.yview)
+        self._syscmd_listbox.configure(yscrollcommand=syscmd_scroll.set)
+        syscmd_scroll.pack(side="right", fill="y")
+        self._syscmd_listbox.pack(side="left", fill="both", expand=True)
+        for cmd in self._syscmd_custom_list:
+            self._syscmd_listbox.insert(tk.END, cmd)
+
+        btn_row = ttk.Frame(custom_lf)
+        btn_row.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(btn_row, text="运行选中", style="Small.TButton", width=8, command=self._syscmd_run_selected).pack(side="left", padx=(0, 6))
+        ttk.Button(btn_row, text="删除选中", style="Small.TButton", width=8, command=self._syscmd_delete_selected).pack(side="left", padx=(0, 6))
+
+    def _syscmd_add_custom(self):
+        """将当前输入框内容添加到自定义指令列表，并同步到 Listbox"""
+        try:
+            cmd = (self._syscmd_custom_var.get() or "").strip()
+        except Exception:
+            cmd = ""
+        if not cmd:
+            messagebox.showinfo("提示", "请输入要添加的指令内容")
+            return
+        if not hasattr(self, "_syscmd_custom_list"):
+            self._syscmd_custom_list = []
+        self._syscmd_custom_list.append(cmd)
+        self._syscmd_custom_var.set("")
+        lb = getattr(self, "_syscmd_listbox", None)
+        if lb is not None and lb.winfo_exists():
+            lb.insert(tk.END, cmd)
+            lb.see(tk.END)
+
+    def _syscmd_run_selected(self):
+        """运行列表中选中的一条指令（直接执行不弹窗）"""
+        lb = getattr(self, "_syscmd_listbox", None)
+        if lb is None or not lb.winfo_exists():
+            messagebox.showinfo("提示", "请先在列表中选中一条指令")
+            return
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在列表中选中一条指令")
+            return
+        idx = int(sel[0])
+        lst = getattr(self, "_syscmd_custom_list", None) or []
+        if idx < len(lst):
+            self._syscmd_run_one(lst[idx])
+
+    def _syscmd_delete_selected(self):
+        """删除列表中选中的一条指令"""
+        lb = getattr(self, "_syscmd_listbox", None)
+        if lb is None or not lb.winfo_exists():
+            messagebox.showinfo("提示", "请先在列表中选中要删除的指令")
+            return
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在列表中选中要删除的指令")
+            return
+        idx = int(sel[0])
+        if not hasattr(self, "_syscmd_custom_list") or idx >= len(self._syscmd_custom_list):
+            return
+        self._syscmd_custom_list.pop(idx)
+        lb.delete(idx)
+
+    def _syscmd_run_custom(self, cmd: str):
+        """运行输入框中的指令，直接执行不弹窗"""
+        cmd = (cmd or "").strip()
+        if not cmd:
+            messagebox.showinfo("提示", "请输入要执行的指令")
+            return
+        self._syscmd_run_one(cmd)
+
+    def _syscmd_run_one(self, cmd: str):
+        """在设备上执行一条指令，后台运行不弹窗（与快捷应用「运行」一致）"""
+        cmd = (cmd or "").strip()
+        if not cmd:
+            return
+        if hasattr(self, "check_device_selected") and not self.check_device_selected():
+            return
+        serial = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        if not serial:
+            messagebox.showerror("错误", "请先选择设备")
+            return
+
+        def _run():
+            try:
+                subprocess.run(
+                    ["adb", "-s", serial, "shell"] + shlex.split(cmd),
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("执行失败", str(e)))
+                return
+            self.root.after(0, lambda: messagebox.showinfo("已执行", f"指令已发送：{cmd[:50]}{'...' if len(cmd) > 50 else ''}"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def open_system_cmd_window(self, title: str, shell_cmd: str):
         """打开系统指令结果弹窗并执行"""
@@ -3365,13 +4392,13 @@ class UIComponents:
         apps_grid = ttk.Frame(quick_content)
         apps_grid.pack(fill="x", pady=(0, 6))
 
-        # 内置快捷项（按你的要求：Prime Video 用 am start -n；去掉 设置/Disney/Spotify）
+        # 内置快捷项（按你的要求：Prime Video 用 am start -n；）
         builtin_quick_apps = [
             ("YouTube", ("package", ["com.google.android.youtube.tv", "com.google.android.youtube"])),
             ("Netflix", ("package", ["com.netflix.ninja", "com.netflix.mediaclient"])),
             ("Prime Video", ("shell", "am start -n com.amazon.amazonvideo.livingroom/com.amazon.ignition.IgnitionActivity")),
             ("HPlayer", ("activity", "com.nes.seihplayer/.ui.MainActivity")),
-            ("Humming EQ", ("package", ["com.nes.sound"])),
+            ("Humming EQ", ("activity", "com.nes.sound/.component.activity.AllPanelActivity")),
         ]
 
         # 自定义快捷项：名称 + 打开指令，可新增/删除（仅运行期保存）
@@ -3987,7 +5014,7 @@ class UIComponents:
             self.add_custom_sweep_button.config(state="disabled")
             
             # 查找audio目录下的大象扫频文件
-            elephant_dir = os.path.join(os.getcwd(), "audio", "大象扫频文件")
+            elephant_dir = os.path.join(os.getcwd(), "audio", "elephant")
             if not os.path.exists(elephant_dir):
                 os.makedirs(elephant_dir, exist_ok=True)
             
@@ -4004,14 +5031,14 @@ class UIComponents:
                     self.update_sweep_info(f"已加载 {len(sorted_files)} 个大象扫频文件")
             else:
                 if hasattr(self, 'update_sweep_info'):
-                    self.update_sweep_info("未找到大象扫频文件，请在audio/大象扫频文件目录中添加.wav文件")
+                    self.update_sweep_info("未找到大象扫频文件，请在audio/elephant目录中添加.wav文件")
         
         else:  # custom
             # 启用添加文件按钮
             self.add_custom_sweep_button.config(state="normal")
             
             # 查找audio目录下的自定义扫频文件
-            custom_dir = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
+            custom_dir = os.path.join(os.getcwd(), "audio", "custom")
             if not os.path.exists(custom_dir):
                 os.makedirs(custom_dir, exist_ok=True)
             
@@ -4054,7 +5081,7 @@ class UIComponents:
             return
         
         # 确保自定义目录存在
-        custom_dir = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
+        custom_dir = os.path.join(os.getcwd(), "audio", "custom")
         if not os.path.exists(custom_dir):
             os.makedirs(custom_dir, exist_ok=True)
         
@@ -4101,9 +5128,9 @@ class UIComponents:
             
             # 确定源文件路径
             if sweep_type == "elephant":
-                source_path = os.path.join(os.getcwd(), "audio", "大象扫频文件", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "elephant", sweep_file)
             else:  # custom
-                source_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "custom", sweep_file)
             
             if not os.path.exists(source_path):
                 messagebox.showerror("错误", f"文件不存在: {source_path}")
@@ -4132,6 +5159,14 @@ class UIComponents:
             import time
             import subprocess
             
+            # 先结束上次可能残留的 tinyplay/tinycap，避免占用设备导致第二次无声音
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True, capture_output=True)
+                subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True, capture_output=True)
+            else:
+                subprocess.run("adb shell pkill tinyplay", shell=True, capture_output=True)
+                subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
+            time.sleep(0.5)
             # 重启audioserver
             for _ in range(3):
                 if device_id:
@@ -4161,8 +5196,13 @@ class UIComponents:
     def _run_sweep_test(self, source_path, sweep_file, save_dir, device_id):
         """执行单个扫频测试"""
         try:
-            # 获取录制参数
-            recording_duration = self.sweep_duration_var.get()
+            # 获取录制参数（录制时长为数值，用于后续比较与等待）
+            try:
+                recording_duration = float(str(self.sweep_duration_var.get()).strip())
+            except (ValueError, TypeError):
+                raise Exception("录制时长(秒) 请输入有效数字")
+            if recording_duration <= 0:
+                raise Exception("录制时长(秒) 必须大于 0")
             
             # 从界面获取录制参数
             record_device = self.record_device_var.get()  # 录制设备
@@ -4191,147 +5231,213 @@ class UIComponents:
                 mkdir_cmd = "adb shell mkdir -p /sdcard"
             subprocess.run(mkdir_cmd, shell=True)
             
-            # 推送音频文件到设备
+            # 推送音频文件到设备（本地文件必须存在）
+            if not os.path.isfile(source_path):
+                raise Exception(f"本地音频文件不存在: {source_path}")
             getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在推送音频文件: {sweep_file}"))
-            
+            # 设备路径统一加引号，避免 shell 解析问题；本地路径已用双引号包裹
+            device_audio_path_quoted = f'"{device_audio_path}"'
             if device_id:
-                push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path}"
+                push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path_quoted}"
             else:
-                push_cmd = f"adb push \"{source_path}\" {device_audio_path}"
-            
+                push_cmd = f"adb push \"{source_path}\" {device_audio_path_quoted}"
             push_result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
             if push_result.returncode != 0:
-                raise Exception(f"推送音频文件失败: {push_result.stderr}")
+                err_msg = (push_result.stderr or push_result.stdout or "未知错误").strip()
+                raise Exception(f"推送音频文件失败: {err_msg}")
+            # 部分环境 adb 返回 0 但实际未推送成功，用输出二次判断（如 "0 files pushed"）
+            push_out = (push_result.stdout or "") + (push_result.stderr or "")
+            if re.search(r"0\s+files?\s+pushed", push_out):
+                raise Exception(f"推送可能未成功（adb 显示 0 file(s) pushed），请检查设备存储与权限。输出: {push_out.strip()}")
+            
+            # 推送后验证：用 ls -l 确认文件存在且可读，并显示大小
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("验证设备上的文件..."))
+            if device_id:
+                ls_cmd = f"adb -s {device_id} shell ls -l \"{device_audio_path}\""
+            else:
+                ls_cmd = f"adb shell ls -l \"{device_audio_path}\""
+            ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
+            if ls_result.returncode != 0:
+                raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}，请检查 adb 连接与存储权限后再试。")
+            ls_out = (ls_result.stdout or "").strip()
+            if "No such file" in ls_out or not ls_out:
+                raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}。ls 输出: {ls_out or '(空)'}")
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("sdcard 下文件已就绪，继续后续步骤。"))
             
             # 开始录制
             getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"开始录制音频，时长: {recording_duration}秒"))
             getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"录制参数: 设备{record_device} 卡{record_card} {channels}通道 {sample_rate}Hz {bit_depth}bit"))
             
-            # 构建录制命令
+            # 录制命令：仅使用界面设置的 设备/卡号/通道/采样率/位深（-D -d -c -r -b）
             if device_id:
-                record_cmd = f"adb -s {device_id} shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate}"
+                record_cmd = f"adb -s {device_id} shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate} -b {bit_depth}"
             else:
-                record_cmd = f"adb shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate}"
-            
+                record_cmd = f"adb shell tinycap {device_recording_path} -D {record_device} -d {record_card} -c {channels} -r {sample_rate} -b {bit_depth}"
             getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"启动录制命令: {record_cmd}"))
             
-            # 启动录制进程
+            if device_id:
+                killall_cmd = f"adb -s {device_id} shell killall audioserver"
+                root_cmd = f"adb -s {device_id} root"
+                pkill_play = f"adb -s {device_id} shell pkill tinyplay"
+                pkill_cap = f"adb -s {device_id} shell pkill tinycap"
+            else:
+                killall_cmd = "adb shell killall audioserver"
+                root_cmd = "adb root"
+                pkill_play = "adb shell pkill tinyplay"
+                pkill_cap = "adb shell pkill tinycap"
+            # 先结束上次可能残留的播放/录制进程，再 root 和重启 audioserver，避免第二次无声音
+            subprocess.run(pkill_play, shell=True, capture_output=True)
+            subprocess.run(pkill_cap, shell=True, capture_output=True)
+            time.sleep(0.5)
+            # 获取 root 并重启 audioserver，以便 tinyplay/tinycap 能打开设备
+            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("获取 root 并重启 audioserver..."))
+            subprocess.run(root_cmd, shell=True, capture_output=True, text=True)
+            time.sleep(2)
+            subprocess.run(killall_cmd, shell=True)
+            time.sleep(3)
+            
+            # 先启动播放再启动录制；若界面设置的 设备/卡号 打开失败，则自动尝试其他常见组合
+            play_candidates = [
+                (play_device, play_card, f"设备{play_device} 卡{play_card}"),
+                ("0", "1", "设备0 卡1"),
+                ("0", "2", "设备0 卡2"),
+                ("1", "0", "设备1 卡0"),
+                ("1", "1", "设备1 卡1"),
+                (None, None, "默认设备(无 -D -d)"),
+            ]
+            play_process = None
+            play_used_desc = None
+            adb_prefix = f"adb -s {device_id} shell " if device_id else "adb shell "
+            for d_val, c_val, desc in play_candidates:
+                getattr(self, "root", self.parent).after(0, lambda d=desc: self.update_sweep_info(f"启动播放: {sweep_file}（尝试 {d}）"))
+                if d_val is not None and c_val is not None:
+                    play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted} -D {d_val} -d {c_val}"
+                else:
+                    play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted}"
+                proc = subprocess.Popen(play_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                time.sleep(0.6)
+                if proc.poll() is None:
+                    play_process = proc
+                    play_used_desc = desc
+                    getattr(self, "root", self.parent).after(0, lambda d=desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
+                    break
+                try:
+                    _, stderr = proc.communicate(timeout=1)
+                    err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() or "进程已退出"
+                except Exception:
+                    err_text = "进程已退出"
+                getattr(self, "root", self.parent).after(0, lambda msg=err_text, d=desc: self.update_sweep_info(f"播放尝试失败（{d}）: {msg}"))
+            if play_process is None:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(
+                    "所有播放设备尝试均失败。建议：在扫频设置中点击「检查音频设备」查看本机可用播放设备（卡X 设备Y），再将播放的「设备/卡号」改为对应值。"))
+            
+            # 播放已启动时多等一会再开录制，减少「Device or resource busy」
+            if play_process is not None:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放已稳定，1.2 秒后启动录制..."))
+                time.sleep(1.2)
+            
+            # 使用界面设置的录制参数单次启动；失败时重启 audioserver 再重试
+            record_started_ok = False
+            record_failed_msg = ""
+            record_process = None
             try:
                 record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # 等待一下让录制启动
                 time.sleep(0.5)
-                
-                # 检查录制进程是否正常启动
                 if record_process.poll() is not None:
                     stdout, stderr = record_process.communicate()
-                    if stderr:
-                        # 如果录制失败，尝试重启audioserver
-                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver..."))
-                        
-                        if device_id:
-                            killall_cmd = f"adb -s {device_id} shell killall audioserver"
-                        else:
-                            killall_cmd = "adb shell killall audioserver"
-                        
-                        subprocess.run(killall_cmd, shell=True)
-                        time.sleep(2)  # 等待audioserver重启
-                        
-                        # 重新尝试录制
-                        record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        time.sleep(0.5)
-                        
-                        # 再次检查
-                        if record_process.poll() is not None:
-                            stdout, stderr = record_process.communicate()
-                            raise Exception(f"录制命令启动失败: {stderr.decode()}")
-            
-            except Exception as e:
-                raise Exception(f"录制命令启动失败: {str(e)}")
-            
-            # 开始播放
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"开始播放: {sweep_file}"))
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"播放参数: 设备{play_device} 卡{play_card}"))
-            
-            # 构建播放命令
-            if device_id:
-                play_cmd = f"adb -s {device_id} shell tinyplay {device_audio_path} -D {play_device} -d {play_card}"
-            else:
-                play_cmd = f"adb shell tinyplay {device_audio_path} -D {play_device} -d {play_card}"
-            
-            try:
-                play_result = subprocess.run(play_cmd, shell=True, capture_output=True, text=True, timeout=30)
-                if play_result.returncode != 0:
-                    # 如果播放失败，也尝试重启audioserver
-                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放失败，正在重启audioserver..."))
-                    
-                    if device_id:
-                        killall_cmd = f"adb -s {device_id} shell killall audioserver"
-                    else:
-                        killall_cmd = "adb shell killall audioserver"
-                    
+                    err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver(第1次)..."))
                     subprocess.run(killall_cmd, shell=True)
                     time.sleep(2)
-                    
-                    # 重新尝试播放
-                    play_result = subprocess.run(play_cmd, shell=True, capture_output=True, text=True, timeout=30)
-                    if play_result.returncode != 0:
-                        raise Exception(f"播放失败: {play_result.stderr}")
-                    
-            except subprocess.TimeoutExpired:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放超时，继续录制..."))
+                    record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(0.5)
+                if record_process.poll() is not None:
+                    stdout, stderr = record_process.communicate()
+                    err_text = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
+                    if "Permission denied" in err_text or "Unable to open PCM" in err_text:
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("仍失败，正在重启audioserver(第2、3次)..."))
+                        subprocess.run(killall_cmd, shell=True)
+                        time.sleep(1)
+                        subprocess.run(killall_cmd, shell=True)
+                        time.sleep(2)
+                        record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        time.sleep(0.5)
+                    if record_process.poll() is not None:
+                        stdout, stderr = record_process.communicate()
+                        err_text = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
+                        _hint = "\n\n建议：本机 tinycap 需要权限才能打开 PCM 设备。可尝试：1) 先执行 adb root 后再进行扫频测试；2) 检查录制设置中的「设备/卡号」是否为当前设备实际可用的 PCM 编号（如 0/1/2 等）。"
+                        record_started_ok = False
+                        record_failed_msg = f"录制命令启动失败: {err_text}{_hint}"
+                    else:
+                        record_started_ok = True
+                else:
+                    record_started_ok = True
             except Exception as e:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"播放出错: {str(e)}，继续录制..."))
+                record_started_ok = False
+                record_failed_msg = str(e)
+                record_process = None
             
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放完成"))
-            
-            # 等待录制完成
-            remaining_time = recording_duration
-            while remaining_time > 0 and record_process.poll() is None:
-                getattr(self, "root", self.parent).after(0, lambda t=remaining_time: self.update_sweep_info(f"等待录制完成，剩余: {t:.1f} 秒"))
-                time.sleep(0.5)
-                remaining_time -= 0.5
-            
-            # 停止录制
-            if record_process.poll() is None:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("正在停止录制..."))
-                record_process.terminate()
-                try:
-                    record_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    record_process.kill()
-            
-            # 检查录制结果
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("检查录制文件..."))
-            
-            # 拉取录制文件到本地
-            local_file_path = os.path.join(save_dir, recording_filename)
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在拉取录制文件到本地..."))
-            
-            if device_id:
-                pull_cmd = f"adb -s {device_id} pull {device_recording_path} \"{local_file_path}\""
-            else:
-                pull_cmd = f"adb pull {device_recording_path} \"{local_file_path}\""
-            
-            pull_result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
-            if pull_result.returncode != 0:
-                raise Exception(f"拉取录制文件失败: {pull_result.stderr}")
-            
-            # 验证本地文件
-            if os.path.exists(local_file_path):
-                local_file_size = os.path.getsize(local_file_path)
+            if record_started_ok and record_process is not None:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制已启动，与播放同时进行中..."))
+                # 等待录制完成（recording_duration 已转为 float）
+                remaining_time = float(recording_duration)
+                while remaining_time > 0 and record_process.poll() is None:
+                    getattr(self, "root", self.parent).after(0, lambda t=remaining_time: self.update_sweep_info(f"等待录制完成，剩余: {t:.1f} 秒"))
+                    time.sleep(0.5)
+                    remaining_time -= 0.5
                 
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"✓ 测试完成: {recording_filename} ({local_file_size} bytes)"))
-                getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("测试完成"))
+                # 停止录制
+                if record_process.poll() is None:
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("正在停止录制..."))
+                    record_process.terminate()
+                    try:
+                        record_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        record_process.kill()
+                
+                # 检查录制结果并拉取
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("检查录制文件..."))
+                local_file_path = os.path.join(save_dir, recording_filename)
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在拉取录制文件到本地..."))
+                if device_id:
+                    pull_cmd = f"adb -s {device_id} pull {device_recording_path} \"{local_file_path}\""
+                else:
+                    pull_cmd = f"adb pull {device_recording_path} \"{local_file_path}\""
+                pull_result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+                if pull_result.returncode != 0:
+                    raise Exception(f"拉取录制文件失败: {pull_result.stderr}")
+                
+                # 验证本地文件并修正 WAV 头（tinycap 被 terminate 时不会回写 data_sz，导致时长/波形显示为空）
+                if os.path.exists(local_file_path):
+                    if fix_wav_header_after_tinycap(local_file_path, channels, sample_rate, bit_depth):
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("已修正录制文件 WAV 头，时长与波形可正常显示。"))
+                    local_file_size = os.path.getsize(local_file_path)
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"✓ 测试完成: {recording_filename} ({local_file_size} bytes)"))
+                    getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("测试完成"))
+                else:
+                    raise Exception("本地录制文件不存在")
+                
+                # 清理设备上的临时文件
+                if device_id:
+                    cleanup_cmd = f"adb -s {device_id} shell rm {device_recording_path} {device_audio_path}"
+                else:
+                    cleanup_cmd = f"adb shell rm {device_recording_path} {device_audio_path}"
+                subprocess.run(cleanup_cmd, shell=True)
             else:
-                raise Exception("本地录制文件不存在")
-            
-            # 清理设备上的临时文件
-            if device_id:
-                cleanup_cmd = f"adb -s {device_id} shell rm {device_recording_path} {device_audio_path}"
-            else:
-                cleanup_cmd = f"adb shell rm {device_recording_path} {device_audio_path}"
-            subprocess.run(cleanup_cmd, shell=True)
+                # 录制未成功，但播放已执行；结束设备上的 tinyplay/tinycap，避免占用导致下次无声音
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True, capture_output=True)
+                    subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True, capture_output=True)
+                else:
+                    subprocess.run("adb shell pkill tinyplay", shell=True, capture_output=True)
+                    subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"录制未成功，无录音文件；播放已完成。{record_failed_msg}"))
+                getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("播放完成(录制未成功)"))
+                if device_id:
+                    cleanup_cmd = f"adb -s {device_id} shell rm -f {device_audio_path_quoted}"
+                else:
+                    cleanup_cmd = f"adb shell rm -f {device_audio_path_quoted}"
+                subprocess.run(cleanup_cmd, shell=True)
             
             # 恢复按钮状态
             getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
@@ -4371,12 +5477,13 @@ class UIComponents:
                     stop_cmd = f"adb shell am force-stop {player}"
                 subprocess.run(stop_cmd, shell=True)
                 
-            # 停止可能正在运行的录制进程
+            # 停止可能正在运行的录制与播放进程
             if device_id:
-                kill_cmd = f"adb -s {device_id} shell pkill tinycap"
+                subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True)
+                subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True)
             else:
-                kill_cmd = "adb shell pkill tinycap"
-            subprocess.run(kill_cmd, shell=True)
+                subprocess.run("adb shell pkill tinycap", shell=True)
+                subprocess.run("adb shell pkill tinyplay", shell=True)
             
             # 更新UI状态
             if hasattr(self, 'start_sweep_button'):
@@ -5179,9 +6286,9 @@ class UIComponents:
         
         # 获取文件列表
         if sweep_type == "elephant":
-            dir_path = os.path.join(os.getcwd(), "audio", "大象扫频文件")
+            dir_path = os.path.join(os.getcwd(), "audio", "elephant")
         else:  # custom
-            dir_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB")
+            dir_path = os.path.join(os.getcwd(), "audio", "custom")
         
         if not os.path.exists(dir_path):
             messagebox.showerror("错误", f"扫频文件目录不存在: {dir_path}")
@@ -5309,9 +6416,9 @@ class UIComponents:
         try:
             # 确定源文件路径
             if sweep_type == "elephant":
-                source_path = os.path.join(os.getcwd(), "audio", "大象扫频文件", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "elephant", sweep_file)
             else:  # custom
-                source_path = os.path.join(os.getcwd(), "audio", "自定义扫频文件20Hz-20KHz_0dB", sweep_file)
+                source_path = os.path.join(os.getcwd(), "audio", "custom", sweep_file)
             
             if not os.path.exists(source_path):
                 self.update_sweep_info(f"文件不存在: {source_path}")

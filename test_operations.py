@@ -1,3 +1,4 @@
+import queue
 import subprocess
 import threading
 import time
@@ -1543,6 +1544,7 @@ class TestOperations:
             
             # 启用 HAL 录音
             subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.vpp.dump 1"), shell=True)
+            subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.speech.dump 1"), shell=True)
             subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.indump 1"), shell=True)
             
             self.status_var.set("HAL 录音已启用，请进行音频操作...")
@@ -1568,6 +1570,7 @@ class TestOperations:
             
             # 禁用 HAL 录音
             subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.vpp.dump 0"), shell=True)
+            subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.speech.dump 0"), shell=True)
             subprocess.run(self.get_adb_command("shell setprop vendor.media.audiohal.indump 0"), shell=True)
             
             self.status_var.set("HAL 录音已停止")
@@ -1889,6 +1892,7 @@ class TestOperations:
         # 添加默认属性
         default_props = [
             "vendor.media.audiohal.vpp.dump 1",
+            "vendor.media.audiohal.speech.dump 1",
             "vendor.media.audiohal.indump 1",
             "vendor.media.audiohal.dspc 1",
             "vendor.media.audiohal.loopback 1",
@@ -2767,151 +2771,219 @@ class TestOperations:
             messagebox.showerror("错误", f"启动录音时出错:\n{str(e)}")
 
     def stop_hal_recording(self):
-        """停止HAL录音并自动拉取文件"""
+        """停止HAL录音并自动拉取文件（耗时操作在后台线程，避免界面卡顿与重复点击）"""
         if not self.check_device_selected():
             return
-        
-        try:
-            # 更新状态
-            self.hal_status_var.set("正在停止录音...")
-            self.hal_recording_status_var.set("正在停止...")
-            
-            # 取消定时器（如果存在）
-            if hasattr(self, 'hal_timer') and self.hal_timer:
-                self.hal_timer.cancel()
-                self.hal_timer = None
-            
-            # 获取所有属性
-            all_props = list(self.hal_props.keys())
-            
-            # 禁用所有属性
-            for prop in all_props:
-                set_cmd = self.get_adb_command(f"shell setprop {prop} 0")
-                subprocess.run(set_cmd, shell=True)
-            
-            # 等待一段时间确保文件写入完成
-            time.sleep(1)
-            
-            # 恢复按钮状态
-            self.start_hal_button.config(state="normal")
-            self.stop_hal_button.config(state="disabled")
-            
-            # 记录结束时间
-            end_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-            # 计算持续时间
-            start_time = self.hal_start_time_var.get()
-            if start_time != "-":
-                duration = self.calculate_duration(start_time, end_time)
-            else:
-                duration = "未知"
-            
-            # 更新状态
-            self.hal_status_var.set(f"录音已停止，持续时间: {duration}")
-            self.hal_recording_status_var.set("已停止")
-            
-            # 自动拉取文件
-            self.update_info_text(f"录音已停止，持续时间: {duration}\n正在拉取录音文件...")
-            self.auto_pull_hal_files()
-            
-        except Exception as e:
-            self.hal_status_var.set(f"停止录音出错: {str(e)}")
-            self.hal_recording_status_var.set("停止失败")
-            messagebox.showerror("错误", f"停止录音时出错:\n{str(e)}")
-            
-            # 恢复按钮状态
-            self.start_hal_button.config(state="normal")
-            self.stop_hal_button.config(state="disabled")
+        if getattr(self, "_hal_stopping", False):
+            return  # 防止重复点击
+        self._hal_stopping = True
 
-    def auto_pull_hal_files(self):
-        """自动拉取HAL录音文件"""
+        # 立即更新 UI：禁用停止按钮、显示“正在停止”
+        self.hal_status_var.set("正在停止录音...")
+        self.hal_recording_status_var.set("正在停止...")
+        self.stop_hal_button.config(state="disabled")
+
+        start_hal_button = self.start_hal_button
+        stop_hal_button = self.stop_hal_button
+
+        def _worker():
+            try:
+                # 取消定时器（如果存在）
+                if hasattr(self, 'hal_timer') and self.hal_timer:
+                    try:
+                        self.hal_timer.cancel()
+                    except Exception:
+                        pass
+                    self.hal_timer = None
+
+                # 获取所有属性并禁用
+                all_props = list(self.hal_props.keys())
+                self._safe_update_info("正在关闭录音属性...")
+                for prop in all_props:
+                    set_cmd = self.get_adb_command(f"shell setprop {prop} 0")
+                    subprocess.run(set_cmd, shell=True)
+                self._safe_update_info("属性已关闭，等待文件写入...")
+                time.sleep(1)
+
+                # 记录结束时间与持续时间
+                end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                start_time = getattr(self, "hal_start_time_var", None) and self.hal_start_time_var.get() or "-"
+                if start_time != "-":
+                    duration = self.calculate_duration(start_time, end_time)
+                else:
+                    duration = "未知"
+                self._safe_update_info(f"录音已停止，持续时间: {duration}")
+                self._safe_set_hal_status("正在拉取录音文件...")
+
+                # 自动拉取（内部会通过 _safe_update_info 更新进度）
+                self._auto_pull_hal_files_impl()
+
+                self._safe_finish_stop_hal(
+                    start_hal_button, stop_hal_button,
+                    getattr(self, "_hal_pull_final_status", "就绪"),
+                    "已停止"
+                )
+            except Exception as e:
+                self._safe_update_info(f"停止/拉取出错: {str(e)}")
+                self._safe_finish_stop_hal(
+                    start_hal_button, stop_hal_button,
+                    f"停止录音出错: {str(e)}",
+                    "停止失败"
+                )
+                root = self._get_root()
+                if root:
+                    root.after(0, lambda: messagebox.showerror("错误", f"停止录音时出错:\n{str(e)}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _auto_pull_hal_files_impl(self):
+        """自动拉取HAL录音文件（在后台线程中调用，通过 _safe_update_info 更新录音信息与进度）"""
         if not self.check_device_selected():
             return
-        
-        # 获取录音目录
-        directory = self.hal_dir_var.get().strip()
+
+        directory = (getattr(self, "hal_dir_var", None) and self.hal_dir_var.get() or "").strip()
         if not directory:
-            self.update_info_text("错误: 录音目录未设置")
+            self._safe_update_info("错误: 录音目录未设置")
+            setattr(self, "_hal_pull_final_status", "错误: 录音目录未设置")
             return
-        
-        # 获取本地保存路径
-        base_save_dir = self.hal_save_path_var.get().strip()
+
+        base_save_dir = (getattr(self, "hal_save_path_var", None) and self.hal_save_path_var.get() or "").strip()
         if not base_save_dir:
-            # 默认保存到 output/hal_dump
             base_save_dir = ensure_output_dir(DIR_HAL_DUMP)
-            self.hal_save_path_var.set(base_save_dir)
-        
-        # 创建带时间戳的子文件夹
+            root = self._get_root()
+            if root and getattr(self, "hal_save_path_var", None):
+                root.after(0, lambda: self.hal_save_path_var.set(base_save_dir))
+
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         save_dir = os.path.join(base_save_dir, f"hal_dump_{timestamp}")
-        
+
         try:
-            self.hal_status_var.set("正在拉取录音文件...")
-            
-            # 确保目录存在
+            self._safe_set_hal_status("正在拉取录音文件...")
+            self._safe_update_info("正在获取设备上的文件列表...")
             os.makedirs(save_dir, exist_ok=True)
-            
-            # 获取文件列表
+
             ls_cmd = self.get_adb_command(f"shell ls -la {directory}")
             result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
-            
+
             if result.returncode != 0:
                 raise Exception(f"获取文件列表失败: {result.stderr}")
-            
-            # 解析文件列表
+
             lines = result.stdout.strip().split('\n')
             files_to_pull = []
-            
             for line in lines:
                 if line.endswith('.pcm') or line.endswith('.raw'):
-                    # 提取文件名
                     parts = line.split()
                     if len(parts) >= 8:
-                        filename = parts[-1]
-                        files_to_pull.append(filename)
-            
+                        files_to_pull.append(parts[-1])
+
             if not files_to_pull:
-                self.update_info_text("未找到录音文件")
-                self.hal_status_var.set("未找到录音文件")
+                self._safe_update_info("未找到录音文件")
+                self._safe_set_hal_status("未找到录音文件")
+                setattr(self, "_hal_pull_final_status", "未找到录音文件")
                 return
-            
-            # 拉取文件
+
+            total = len(files_to_pull)
+            self._safe_update_info(f"找到 {total} 个录音文件，开始拉取...")
             success_count = 0
-            self.update_info_text(f"找到 {len(files_to_pull)} 个录音文件，开始拉取...")
-            
-            for filename in files_to_pull:
-                self.update_info_text(f"正在拉取: {filename}")
-                
-                # 拉取文件
+
+            for idx, filename in enumerate(files_to_pull, 1):
+                self._safe_update_info(f"正在拉取 ({idx}/{total}): {filename}")
+                self._safe_set_hal_status(f"正在拉取 ({idx}/{total})...")
+
                 pull_cmd = self.get_adb_command(f"pull {directory}/{filename} \"{os.path.join(save_dir, filename)}\"")
                 result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
-                
                 if result.returncode == 0:
                     success_count += 1
                 else:
-                    self.update_info_text(f"拉取失败: {filename}")
-            
+                    self._safe_update_info(f"拉取失败: {filename}")
+
             if success_count > 0:
-                self.hal_status_var.set(f"成功拉取 {success_count} 个录音文件到 {save_dir}")
-                self.update_info_text(f"成功拉取 {success_count} 个录音文件到:\n{save_dir}")
-                
-                # 打开保存目录
-                if platform.system() == "Windows":
-                    os.startfile(save_dir)
-                elif platform.system() == "Darwin":  # macOS
-                    subprocess.run(["open", save_dir])
-                else:  # Linux
-                    subprocess.run(["xdg-open", save_dir])
+                msg = f"成功拉取 {success_count} 个录音文件到:\n{save_dir}"
+                self._safe_set_hal_status(f"成功拉取 {success_count} 个文件")
+                self._safe_update_info(msg)
+                setattr(self, "_hal_pull_final_status", f"成功拉取 {success_count} 个录音文件到 {save_dir}")
+
+                def _open_dir():
+                    try:
+                        if platform.system() == "Windows":
+                            os.startfile(save_dir)
+                        elif platform.system() == "Darwin":
+                            subprocess.run(["open", save_dir])
+                        else:
+                            subprocess.run(["xdg-open", save_dir])
+                    except Exception:
+                        pass
+                root = self._get_root()
+                if root:
+                    root.after(0, _open_dir)
             else:
-                self.hal_status_var.set("未成功拉取任何文件")
-                self.update_info_text("未成功拉取任何文件")
-        
+                self._safe_set_hal_status("未成功拉取任何文件")
+                self._safe_update_info("未成功拉取任何文件")
+                setattr(self, "_hal_pull_final_status", "未成功拉取任何文件")
+
         except Exception as e:
-            self.hal_status_var.set(f"拉取文件出错: {str(e)}")
-            self.update_info_text(f"拉取文件出错: {str(e)}")
+            self._safe_set_hal_status(f"拉取文件出错: {str(e)}")
+            self._safe_update_info(f"拉取文件出错: {str(e)}")
+            setattr(self, "_hal_pull_final_status", f"拉取文件出错: {str(e)}")
+
+    def auto_pull_hal_files(self):
+        """自动拉取HAL录音文件（主线程可直接调用，内部会区分线程并安全更新UI）"""
+        self._auto_pull_hal_files_impl()
+
+    def _get_root(self):
+        """获取主窗口，用于在主线程调度 UI 更新"""
+        root = getattr(self, "root", None)
+        if root is not None and root.winfo_exists():
+            return root
+        parent = getattr(self, "parent", None)
+        if parent is not None and parent.winfo_exists():
+            return parent.winfo_toplevel()
+        return None
+
+    def _safe_update_info(self, message):
+        """线程安全：在录音信息区域追加内容（若在子线程则投递到主线程）"""
+        def _do():
+            if getattr(self, "hal_info_text", None) and self.hal_info_text.winfo_exists():
+                self.update_info_text(message)
+        root = self._get_root()
+        if root is None:
+            return
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            root.after(0, _do)
+
+    def _safe_set_hal_status(self, text):
+        """线程安全：设置底部 HAL 状态文字"""
+        def _do():
+            if getattr(self, "hal_status_var", None):
+                self.hal_status_var.set(text)
+        root = self._get_root()
+        if root is None:
+            return
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            root.after(0, _do)
+
+    def _safe_finish_stop_hal(self, start_btn, stop_btn, status_msg, recording_status_msg):
+        """线程安全：停止录音流程结束后恢复按钮和状态"""
+        def _do():
+            if start_btn and start_btn.winfo_exists():
+                start_btn.config(state="normal")
+            if stop_btn and stop_btn.winfo_exists():
+                stop_btn.config(state="disabled")
+            if getattr(self, "hal_status_var", None):
+                self.hal_status_var.set(status_msg)
+            if getattr(self, "hal_recording_status_var", None):
+                self.hal_recording_status_var.set(recording_status_msg)
+            setattr(self, "_hal_stopping", False)
+        root = self._get_root()
+        if root is not None:
+            root.after(0, _do)
 
     def update_info_text(self, message):
-        """更新信息文本框"""
+        """更新信息文本框（仅在主线程调用，子线程请用 _safe_update_info）"""
         self.hal_info_text.config(state="normal")
         self.hal_info_text.insert("end", message + "\n")
         self.hal_info_text.see("end")  # 滚动到底部
@@ -2987,7 +3059,7 @@ class TestOperations:
        
     def check_default_audio_file(self):
         """检查默认音频文件是否存在"""
-        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+        default_audio_path = os.path.join(os.getcwd(), "audio", "speaker", "speaker_default.wav")
         if os.path.exists(default_audio_path):
             self.default_audio_status_var.set("默认音频文件已存在")
             if hasattr(self, 'add_default_audio_button'):
@@ -3011,7 +3083,7 @@ class TestOperations:
             
             # 复制文件
             try:
-                shutil.copy(file_path, os.path.join(speaker_dir, "test.wav"))
+                shutil.copy(file_path, os.path.join(speaker_dir, "speaker_default.wav"))
                 messagebox.showinfo("成功", "默认音频文件已添加")
                 self.check_default_audio_file()
             except Exception as e:
@@ -3046,7 +3118,7 @@ class TestOperations:
             # 确定要推送的音频文件
             if self.speaker_audio_source.get() == "default":
                 # 使用默认测试音频
-                audio_file = os.path.join(os.getcwd(), "audio", "speaker", "test.wav")
+                audio_file = os.path.join(os.getcwd(), "audio", "speaker", "speaker_default.wav")
                 if not os.path.exists(audio_file):
                     messagebox.showerror("错误", "默认测试音频文件不存在，请先添加默认音频文件或选择使用自定义音频")
                     self.speaker_status_var.set("错误: 默认测试音频文件不存在")
@@ -3383,7 +3455,202 @@ class TestOperations:
             self.logcat_status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
 
-    
+    def _parse_logcat_level(self, line):
+        """从 threadtime 格式行解析级别：01-02 16:06:24.385  1234  5678 I Tag: msg"""
+        parts = line.split(None, 5)
+        if len(parts) >= 5 and len(parts[4]) == 1 and parts[4] in "VDIWEF":
+            return parts[4]
+        for c in "FEWIDV":
+            if f" {c} " in line or (" " + c + "\t") in line:
+                return c
+        return "V"
+
+    def _level_priority(self, c):
+        """V=0, D=1, I=2, W=3, E=4, F=5"""
+        return {"V": 0, "D": 1, "I": 2, "W": 3, "E": 4, "F": 5}.get(c, 0)
+
+    def clear_logcat_viewer(self):
+        """清空日志查看器内容"""
+        if not getattr(self, "logcat_viewer_text", None) or not self.logcat_viewer_text.winfo_exists():
+            return
+        self.logcat_viewer_text.config(state="normal")
+        self.logcat_viewer_text.delete("1.0", tk.END)
+        self.logcat_viewer_text.config(state="disabled")
+        self.logcat_viewer_total_count = 0
+        self.logcat_viewer_displayed_count = 0
+        if hasattr(self, "logcat_viewer_total_var"):
+            self.logcat_viewer_total_var.set("总计:0")
+        if hasattr(self, "logcat_viewer_displayed_var"):
+            self.logcat_viewer_displayed_var.set("显示:0")
+
+    def toggle_logcat_viewer_pause(self):
+        """暂停/继续日志查看器显示"""
+        self.logcat_viewer_paused = not getattr(self, "logcat_viewer_paused", False)
+        if hasattr(self, "logcat_viewer_pause_btn") and self.logcat_viewer_pause_btn.winfo_exists():
+            self.logcat_viewer_pause_btn.config(text="继续" if self.logcat_viewer_paused else "暂停")
+
+    def start_logcat_viewer(self):
+        """开始实时查看 logcat（独立于抓取到文件）"""
+        if not self.check_device_selected():
+            return
+        if getattr(self, "logcat_viewer_process", None) and self.logcat_viewer_process is not None and self.logcat_viewer_process.poll() is None:
+            return
+        try:
+            device_id = (self.device_var.get() or "").strip()
+            argv = ["adb"]
+            if device_id:
+                argv.extend(["-s", device_id])
+            argv.extend(["logcat", "-v", "threadtime", "*:V"])
+            self._viewer_queue = queue.Queue()
+            self.logcat_viewer_stop = False
+            self.logcat_viewer_process = subprocess.Popen(
+                argv,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            time.sleep(0.2)
+            if self.logcat_viewer_process.poll() is not None:
+                out = ""
+                try:
+                    if self.logcat_viewer_process.stdout:
+                        out = (self.logcat_viewer_process.stdout.read() or "").strip()
+                except Exception:
+                    pass
+                self.logcat_viewer_process = None
+                self.update_logcat_status("日志查看器启动失败，请检查设备连接与 adb")
+                messagebox.showerror("错误", out or "adb logcat 进程已退出")
+                return
+            if hasattr(self, "logcat_viewer_start_btn"):
+                self.logcat_viewer_start_btn.config(state="disabled")
+            if hasattr(self, "logcat_viewer_stop_btn"):
+                self.logcat_viewer_stop_btn.config(state="normal")
+            if hasattr(self, "logcat_viewer_state_var"):
+                self.logcat_viewer_state_var.set("运行中")
+            self.update_logcat_status("日志查看器已启动，实时显示中")
+            self.logcat_viewer_thread = threading.Thread(target=self._read_logcat_viewer, daemon=True)
+            self.logcat_viewer_thread.start()
+            self._schedule_process_logcat_viewer_queue()
+        except Exception as e:
+            self.update_logcat_status(f"启动日志查看器出错: {str(e)}")
+            messagebox.showerror("错误", f"启动日志查看器时出错:\n{str(e)}")
+
+    def stop_logcat_viewer(self):
+        """停止日志查看器"""
+        self.logcat_viewer_stop = True
+        if getattr(self, "logcat_viewer_process", None) and self.logcat_viewer_process is not None and self.logcat_viewer_process.poll() is None:
+            try:
+                if platform.system() == "Windows":
+                    subprocess.run(f"taskkill /F /T /PID {self.logcat_viewer_process.pid}", shell=True)
+                else:
+                    self.logcat_viewer_process.terminate()
+            except Exception:
+                pass
+            self.logcat_viewer_process = None
+        if hasattr(self, "logcat_viewer_start_btn"):
+            self.logcat_viewer_start_btn.config(state="normal")
+        if hasattr(self, "logcat_viewer_stop_btn"):
+            self.logcat_viewer_stop_btn.config(state="disabled")
+        if hasattr(self, "logcat_viewer_state_var"):
+            self.logcat_viewer_state_var.set("已停止")
+        if hasattr(self, "logcat_viewer_pause_btn") and self.logcat_viewer_pause_btn.winfo_exists():
+            self.logcat_viewer_paused = False
+            self.logcat_viewer_pause_btn.config(text="暂停")
+        self.update_logcat_status("日志查看器已停止")
+
+    def _read_logcat_viewer(self):
+        """后台线程：读取 logcat 输出并放入队列"""
+        try:
+            proc = getattr(self, "logcat_viewer_process", None)
+            if not proc or not getattr(proc, "stdout", None):
+                return
+            for line in proc.stdout:
+                if getattr(self, "logcat_viewer_stop", True):
+                    break
+                if not line:
+                    continue
+                level = self._parse_logcat_level(line)
+                q = getattr(self, "_viewer_queue", None)
+                if q is not None:
+                    try:
+                        q.put_nowait((line.rstrip("\n\r"), level))
+                    except queue.Full:
+                        pass
+        except Exception:
+            pass
+        finally:
+            self.logcat_viewer_process = None
+            root = getattr(self, "root", None)
+            if root and root.winfo_exists():
+                root.after(0, self._logcat_viewer_ended)
+
+    def _logcat_viewer_ended(self):
+        """查看器进程结束后的 UI 恢复"""
+        self.logcat_viewer_stop = True
+        self.logcat_viewer_process = None
+        if hasattr(self, "logcat_viewer_start_btn") and self.logcat_viewer_start_btn.winfo_exists():
+            self.logcat_viewer_start_btn.config(state="normal")
+        if hasattr(self, "logcat_viewer_stop_btn") and self.logcat_viewer_stop_btn.winfo_exists():
+            self.logcat_viewer_stop_btn.config(state="disabled")
+        if hasattr(self, "logcat_viewer_state_var"):
+            self.logcat_viewer_state_var.set("已停止")
+
+    def _schedule_process_logcat_viewer_queue(self):
+        """定时从队列取数据并刷新查看器（主线程）"""
+        if getattr(self, "logcat_viewer_stop", True):
+            return
+        self._process_logcat_viewer_queue()
+        root = getattr(self, "root", None)
+        if root and root.winfo_exists() and not getattr(self, "logcat_viewer_stop", True):
+            root.after(80, self._schedule_process_logcat_viewer_queue)
+
+    def _process_logcat_viewer_queue(self):
+        """从队列取行并追加到查看器（应用过滤、级别、暂停、自动滚动）"""
+        q = getattr(self, "_viewer_queue", None)
+        if q is None:
+            return
+        keyword = (getattr(self, "logcat_viewer_filter_var", None) and self.logcat_viewer_filter_var.get() or "").strip().lower()
+        level_sel = (getattr(self, "logcat_viewer_level_var", None) and self.logcat_viewer_level_var.get() or "V").upper()
+        level_pri = self._level_priority(level_sel)
+        auto_scroll = getattr(self, "logcat_viewer_auto_scroll_var", None) and self.logcat_viewer_auto_scroll_var.get()
+        paused = getattr(self, "logcat_viewer_paused", False)
+        max_lines = getattr(self, "_logcat_viewer_max_lines", 5000)
+        txt = getattr(self, "logcat_viewer_text", None)
+        if not txt or not txt.winfo_exists():
+            return
+        added = 0
+        try:
+            while True:
+                try:
+                    line, level = q.get_nowait()
+                except queue.Empty:
+                    break
+                self.logcat_viewer_total_count = getattr(self, "logcat_viewer_total_count", 0) + 1
+                if keyword and keyword not in line.lower():
+                    continue
+                if self._level_priority(level) < level_pri:
+                    continue
+                if paused:
+                    continue
+                self.logcat_viewer_displayed_count = getattr(self, "logcat_viewer_displayed_count", 0) + 1
+                tag = f"level_{level.lower()}" if level.lower() in "vdiwef" else "level_i"
+                txt.config(state="normal")
+                txt.insert(tk.END, line + "\n", tag)
+                n = int(txt.index("end-1c").split(".")[0])
+                if n > max_lines:
+                    txt.delete("1.0", "2.0")
+                if auto_scroll:
+                    txt.see(tk.END)
+                txt.config(state="disabled")
+                added += 1
+        except Exception:
+            pass
+        if hasattr(self, "logcat_viewer_total_var"):
+            self.logcat_viewer_total_var.set(f"总计:{getattr(self, 'logcat_viewer_total_count', 0)}")
+        if hasattr(self, "logcat_viewer_displayed_var"):
+            self.logcat_viewer_displayed_var.set(f"显示:{getattr(self, 'logcat_viewer_displayed_count', 0)}")
 
     def browse_logcat_save_path(self):
         """浏览并选择日志保存路径"""
