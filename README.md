@@ -236,11 +236,11 @@
 
 **给客户发版本时，只需打包「dist 目录」里的内容**（或把整个 dist 打成 zip 发给客户）。
 
-- **必须包含**：`声测大师(AcouTest).exe`、`logo/`、`启动测试工具.bat`；若客户需要烧大象 key，还需带上 `elevoc_ukey/`（含 `soft_encryption.dll` 等）。
+- **必须包含**：`声测大师(AcouTest) v<版本号>.exe`（如 `声测大师(AcouTest) v1.7.1.exe`，版本号来自 `feature_config.py` 的 `APP_VERSION`）、`logo/`、`启动测试工具.bat`；若客户需要烧大象 key，还需带上 `elevoc_ukey/`（含 `soft_encryption.dll` 等）。
 - **可选**：`README.md`、`audio/`（若希望客户自带扫频/测试音频，可把你在本机用的 audio 子目录一并拷贝到 dist 里再打包）。
 - **不需要给客户**：源码（.py）、build/、output/、.git 等。客户运行 exe 后，程序会在**客户自己的安装目录下**自动创建 `output/` 存放测试数据。
 
-客户使用方式：解压你给的 zip，双击 `声测大师(AcouTest).exe` 或 `启动测试工具.bat` 即可；测试产生的 logcat、截图、录音等会出现在**该解压目录下的 output/** 里。
+客户使用方式：解压你给的 zip，双击 `声测大师(AcouTest) v<版本号>.exe` 或 `启动测试工具.bat` 即可；测试产生的 logcat、截图、录音等会出现在**该解压目录下的 output/** 里。
 
 ### 功能开关：发布时隐藏部分功能
 

@@ -34,15 +34,25 @@ if %errorlevel% neq 0 (
     python -m pip install pillow
 )
 
+:: 从 feature_config 读取版本号，打包为 声测大师(AcouTest) v1.7.1.exe
+set "VER="
+for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
+if "%VER%"=="" set "VER=1.0"
+set "EXE_NAME=声测大师(AcouTest) v%VER%"
+echo 当前版本: %VER% ，输出文件名: %EXE_NAME%.exe
+
 :: 先尝试关闭可能正在运行的应用程序
 echo 正在确保没有应用程序在运行...
 taskkill /F /IM "声测大师(AcouTest).exe" > nul 2>&1
+taskkill /F /IM "%EXE_NAME%.exe" > nul 2>&1
 
 :: 删除旧的输出文件和目录
 echo 正在清理旧文件...
 if exist "dist\声测大师(AcouTest).exe" del /F /Q "dist\声测大师(AcouTest).exe" > nul 2>&1
+if exist "dist\%EXE_NAME%.exe" del /F /Q "dist\%EXE_NAME%.exe" > nul 2>&1
 if exist "build" rmdir /S /Q "build" > nul 2>&1
 if exist "声测大师(AcouTest).spec" del /F /Q "声测大师(AcouTest).spec" > nul 2>&1
+if exist "%EXE_NAME%.spec" del /F /Q "%EXE_NAME%.spec" > nul 2>&1
 
 :: 生成高清logo
 echo 正在生成高清logo...
@@ -62,16 +72,16 @@ echo 正在打包应用程序...
 :: 创建dist目录（如果不存在）
 if not exist "dist" mkdir "dist"
 
-:: 确保所有Python模块文件添加到打包中
+:: 确保所有Python模块文件添加到打包中（--name 带版本号，输出 声测大师(AcouTest) v1.7.1.exe）
 python -m PyInstaller --noconsole --onefile --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
-    --name "声测大师(AcouTest)" ^
+    --name "%EXE_NAME%" ^
     main.py
 
 :: 检查打包是否成功
-if exist "dist\声测大师(AcouTest).exe" (
-    echo 打包成功！执行文件已保存到dist目录
+if exist "dist\%EXE_NAME%.exe" (
+    echo 打包成功！执行文件已保存到 dist\%EXE_NAME%.exe
     
     :: 复制必要的文件和目录
     echo 正在复制必要文件...
@@ -90,13 +100,15 @@ if exist "dist\声测大师(AcouTest).exe" (
         xcopy /E /Y "elevoc_ukey" "dist\elevoc_ukey\" >nul 2>nul
     )
     
-    :: 创建启动脚本
+    :: 创建启动脚本（启动带版本号的 exe）
     echo @echo off > "dist\启动测试工具.bat"
     echo chcp 65001 ^> nul >> "dist\启动测试工具.bat"
     echo echo 正在启动声测大师(AcouTest)... >> "dist\启动测试工具.bat"
-    echo start 声测大师(AcouTest).exe >> "dist\启动测试工具.bat"
+    echo start "" "%EXE_NAME%.exe" >> "dist\启动测试工具.bat"
     
-    echo 完成！打包已成功，可以使用dist目录中的程序。
+    echo 完成！打包已成功，可以使用 dist 目录中的程序。
+) else (
+    echo 打包可能失败，未找到 dist\%EXE_NAME%.exe
 ) 
 
 pause

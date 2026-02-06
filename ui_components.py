@@ -608,6 +608,20 @@ class UIComponents:
         self._elevoc_src_dir = src_dir
         return dst_dir
 
+    def _check_elevockey_support(self, serial: str, timeout_s: int = 10):
+        """检查设备 unifykeys 是否支持 elevockey：执行 cat /sys/class/unifykeys/list，看是否包含 elevockey 节点。
+        返回 (supported: bool, stdout: str)。调用前请先 adb root（本方法内部会执行）。"""
+        if not (serial or "").strip():
+            return False, ""
+        subprocess.run(["adb", "-s", serial, "root"], capture_output=True, text=True, timeout=15)
+        r = subprocess.run(
+            ["adb", "-s", serial, "shell", "cat /sys/class/unifykeys/list"],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        supported = "elevockey" in out
+        return supported, out
+
     def _sync_elevoc_log_to_src(self):
         """把 TEMP 运行目录里的 elevoc_log.txt 同步回 elevoc_ukey 源目录（方便用户在 dist 里查看）。"""
         try:
@@ -849,22 +863,52 @@ class UIComponents:
             if not serial:
                 messagebox.showerror("错误", "请先选择设备")
                 return
-            st = self._elevoc_init()
-            dll = st["dll"]
+            # 读SN 只依赖 unifykeys 的 usid，不依赖 elevockey，也不应先依赖 DLL
+            _append("\n=== 获取SN ===\n")
             try:
-                count = dll.elevoc_get_license_number()
-            except Exception:
-                count = -1
-            _append(f"\n=== 获取SN ===\nLicense count: {count}\n")
-            uuid = _read_unify_usid(serial)
-            st["last_uuid"] = uuid.encode("utf-8", errors="ignore")
-            _append(f"SN: {uuid} | length: {len(uuid)}\n")
-            self._sync_elevoc_log_to_src()
+                uuid = _read_unify_usid(serial)
+            except Exception as e:
+                _append(f"unifykeys usid 读取失败: {e}\n")
+                # 尝试显示设备序列号，便于排查
+                try:
+                    r = subprocess.run(["adb", "-s", serial, "get-serialno"], capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0 and (r.stdout or "").strip():
+                        _append(f"设备序列号(adb): {(r.stdout or '').strip()}（仅作参考，烧key 需 unifykeys 的 usid）\n")
+                except Exception:
+                    pass
+                # 尝试列出 unifykeys，便于确认设备是否有该节点
+                try:
+                    r2 = _adb(serial, "cat /sys/class/unifykeys/list 2>&1", timeout_s=5)
+                    out = (r2.stdout or "") + (r2.stderr or "")
+                    if out.strip():
+                        _append("当前设备 unifykeys/list 输出（前 500 字符）:\n")
+                        _append(out.strip()[:500] + ("\n..." if len(out.strip()) > 500 else "") + "\n")
+                except Exception:
+                    pass
+                _append("建议：请确认设备已 adb root、/sys/class/unifykeys 存在且含 usid 节点；部分机型需 su 权限。\n")
+                raise
+            _append(f"SN(usid): {uuid} | length: {len(uuid)}\n")
+            try:
+                st = self._elevoc_init()
+                st["last_uuid"] = uuid.encode("utf-8", errors="ignore")
+                try:
+                    count = st["dll"].elevoc_get_license_number()
+                except Exception:
+                    count = -1
+                _append(f"License count: {count}\n")
+                self._sync_elevoc_log_to_src()
+            except Exception as e:
+                _append(f"（保存到本地状态失败: {e}，烧key前需再次读SN）\n")
 
         def do_burn():
             serial = _get_serial()
             if not serial:
                 messagebox.showerror("错误", "请先选择设备")
+                return
+            supported, _ = self._check_elevockey_support(serial)
+            if not supported:
+                _append("\n不支持：设备 unifykeys 列表中无 elevockey 节点，无法烧key。\n")
+                messagebox.showerror("不支持烧key", "设备不支持 elevockey。请先确认设备上 cat /sys/class/unifykeys/list 中含有 elevockey 节点后再操作。")
                 return
             st = self._elevoc_init()
             dll = st["dll"]
@@ -898,6 +942,11 @@ class UIComponents:
             serial = _get_serial()
             if not serial:
                 messagebox.showerror("错误", "请先选择设备")
+                return
+            supported, _ = self._check_elevockey_support(serial)
+            if not supported:
+                _append("\n不支持：设备 unifykeys 列表中无 elevockey 节点。\n")
+                messagebox.showerror("不支持", "设备不支持 elevockey。请先确认 cat /sys/class/unifykeys/list 中含有 elevockey 节点。")
                 return
             st = self._elevoc_init()
             expected = (st.get("last_key") or "").strip()
@@ -1078,6 +1127,11 @@ class UIComponents:
             serial = _ensure_device()
             if not serial:
                 return
+            supported, _ = self._check_elevockey_support(serial)
+            if not supported:
+                _append("\n不支持：设备 unifykeys 列表中无 elevockey 节点，无法读取。\n")
+                messagebox.showerror("不支持", "设备不支持 elevockey。请先点击「检查支持」确认 cat /sys/class/unifykeys/list 中含有 elevockey 节点。")
+                return
             _append("\n=== 读取当前 elevockey ===\n")
             _append("$ adb root\n")
             _adb_root(serial)
@@ -1104,22 +1158,19 @@ class UIComponents:
                 return
 
             _append("\n=== 写入 elevockey ===\n")
-            _append("$ adb root\n")
-            _adb_root(serial)
-
-            # 先检查支持
-            r = _adb_shell(serial, f"cat {UNIFY_KEY_LIST_PATH}", timeout_s=10)
-            if r.returncode != 0:
-                raise RuntimeError(r.stderr or "读取 unifykeys list 失败")
-            if ELEVOC_KEY_NAME not in (r.stdout or ""):
-                raise RuntimeError("驱动DTS不支持 elevockey")
+            supported, _ = self._check_elevockey_support(serial)
+            if not supported:
+                _append("不支持：设备 unifykeys 列表中无 elevockey 节点，无法烧录。\n")
+                raise RuntimeError("设备不支持 elevockey，请先确认 cat /sys/class/unifykeys/list 中含有 elevockey 节点。")
 
             if not messagebox.askyesno("再次确认", "请确认 elevockey 内容正确，确定开始烧录？"):
                 _append("\n用户取消操作。\n")
                 return
 
+            _append("$ adb root\n")
+            _adb_root(serial)
             _append("正在烧录...\n")
-            r = _adb_shell(serial, f"echo {key} > {UNIFY_KEY_WRITE_PATH}", timeout_s=10)
+            r = _adb_shell(serial, f"echo {ELEVOC_KEY_NAME} > {UNIFY_KEY_NAME_PATH} && echo {key} > {UNIFY_KEY_WRITE_PATH}", timeout_s=10)
             if r.returncode != 0:
                 raise RuntimeError(r.stderr or "写入失败")
             _append("烧录完成，开始校验...\n")
