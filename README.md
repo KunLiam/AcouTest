@@ -92,14 +92,18 @@
 - 可检查设备是否存在 TTY 设备（如 ttyACM），用于判断雷达节点是否就绪。
 
 ### 14. 烧大象key
-- **u盘烧key**：读取设备 UUID → 调用 soft_encryption.dll 生成 license → 写回 unifykeys(elevockey)。页面按钮顺序：就绪 → UUID → 烧Key → 检查 → 打开日志 → 打开目录。
-- **sn烧key**：按 sn烧key 流程检查/写入 unifykeys elevockey，支持获取SN、检查支持、读取当前 key、写入/替换 elevockey。
+- **u盘烧key**：读取设备 UUID → 调用 soft_encryption.dll 生成 license → 写回 unifykeys(elevockey)。页面按钮顺序：就绪 → 读SN → 烧大象Key → 剩余数量 → 检查key → 打开日志 → 打开目录。
+  - **剩余数量**：点击可查看当前 U 盘中的 key 剩余数量（需已插入授权 U 盘，会调用 DLL 的 `elevoc_get_license_number()`）。
+  - **烧录前确认**：若检测到设备上已有 key，点击「烧大象Key」或（sn烧key 的）「写入/替换(烧key)」时会先弹窗「当前设备已有 key，是否确认覆盖烧录？」，选择「否」则取消本次烧录，避免误覆盖。
+- **sn烧key**：按 sn烧key 流程检查/写入 unifykeys elevockey，支持获取SN、检查支持、读取当前 key、写入/替换 elevockey。写入/替换时同样在检测到设备已有 key 时弹窗确认。
 - 说明：DLL 可能不支持中文路径，本工具会在临时英文目录运行所需文件。
 
 ## 最近更新（V1.6）
 
 - **烧大象key**
-  - u盘烧key 页面按钮顺序调整为：就绪 → UUID → 烧Key → 检查 → 打开日志 → 打开目录（“打开日志”“打开目录”置于“检查”之后）。
+  - u盘烧key 页面按钮顺序调整为：就绪 → 读SN → 烧大象Key → 剩余数量 → 检查key → 打开日志 → 打开目录。
+  - 新增「剩余数量」按钮：可查看 U 盘中 key 剩余数量（需插 U 盘，调用 `elevoc_get_license_number()`）。
+  - 烧录前二次确认：在 u盘烧key（烧大象Key）与 sn烧key（写入/替换 烧key）时，若检测到设备已有 key，会先弹窗「当前设备已有 key，是否确认覆盖烧录？」，避免误烧录。
 - **Logcat 日志**
   - 抓取逻辑与 V1.5 一致：仅 `logcat -v threadtime` + 过滤，不指定 `-b`，直接写入文件，参数列表调用 adb 避免 `*` 被 shell 展开；开始抓取前使用 `check_device_selected()` 检查设备。
   - 音频调试 → Logcat 日志页面：两行操作按钮（放开打印/停止打印、开始抓取/停止抓取/打开文件夹）使用 grid 布局上下对齐。

@@ -34,7 +34,7 @@ if %errorlevel% neq 0 (
     python -m pip install pillow
 )
 
-:: 从 feature_config 读取版本号，打包为 声测大师(AcouTest) v1.7.1.exe
+:: 从 feature_config 读取版本号，打包为 声测大师(AcouTest) v<APP_VERSION>.exe
 set "VER="
 for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
 if "%VER%"=="" set "VER=1.0"
@@ -46,13 +46,15 @@ echo 正在确保没有应用程序在运行...
 taskkill /F /IM "声测大师(AcouTest).exe" > nul 2>&1
 taskkill /F /IM "%EXE_NAME%.exe" > nul 2>&1
 
-:: 删除旧的输出文件和目录
+:: 删除旧的输出文件和目录（含 Python 字节码缓存，确保打包用到的版本号等来自当前源码）
 echo 正在清理旧文件...
 if exist "dist\声测大师(AcouTest).exe" del /F /Q "dist\声测大师(AcouTest).exe" > nul 2>&1
 if exist "dist\%EXE_NAME%.exe" del /F /Q "dist\%EXE_NAME%.exe" > nul 2>&1
 if exist "build" rmdir /S /Q "build" > nul 2>&1
 if exist "声测大师(AcouTest).spec" del /F /Q "声测大师(AcouTest).spec" > nul 2>&1
 if exist "%EXE_NAME%.spec" del /F /Q "%EXE_NAME%.spec" > nul 2>&1
+for /d /r . %%d in (__pycache__) do @if exist "%%d" rmdir /S /Q "%%d" 2>nul
+del /S /Q *.pyc 2>nul
 
 :: 生成高清logo
 echo 正在生成高清logo...
@@ -72,8 +74,8 @@ echo 正在打包应用程序...
 :: 创建dist目录（如果不存在）
 if not exist "dist" mkdir "dist"
 
-:: 确保所有Python模块文件添加到打包中（--name 带版本号，输出 声测大师(AcouTest) v1.7.1.exe）
-python -m PyInstaller --noconsole --onefile --icon="logo\AcouTest.ico" ^
+:: 确保所有Python模块文件添加到打包中（--name 带版本号，输出 声测大师(AcouTest) v<APP_VERSION>.exe）
+python -m PyInstaller --clean --noconsole --onefile --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^

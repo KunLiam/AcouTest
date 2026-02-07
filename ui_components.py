@@ -622,6 +622,26 @@ class UIComponents:
         supported = "elevockey" in out
         return supported, out
 
+    def _read_device_elevockey(self, serial: str, timeout_s: int = 15) -> tuple:
+        """读取设备当前已烧录的 elevockey 值。
+        返回 (current_key: str, error: str)。若未烧录或读为空则 current_key 为空；若执行失败则 error 非空。"""
+        if not (serial or "").strip():
+            return "", "请先选择设备"
+        subprocess.run(["adb", "-s", serial, "root"], capture_output=True, text=True, timeout=15)
+        r = subprocess.run(
+            ["adb", "-s", serial, "shell", "echo elevockey > /sys/class/unifykeys/name && cat /sys/class/unifykeys/read"],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if r.returncode == 0:
+            return (r.stdout or "").strip(), ""
+        r2 = subprocess.run(
+            ["adb", "-s", serial, "shell", "su", "-c", "echo elevockey > /sys/class/unifykeys/name; cat /sys/class/unifykeys/read"],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if r2.returncode == 0:
+            return (r2.stdout or "").strip(), ""
+        return "", (r2.stderr or r.stderr or "读取 elevockey 失败").strip()
+
     def _sync_elevoc_log_to_src(self):
         """把 TEMP 运行目录里的 elevoc_log.txt 同步回 elevoc_ukey 源目录（方便用户在 dist 里查看）。"""
         try:
@@ -670,22 +690,13 @@ class UIComponents:
         log_dir_bytes = workdir.encode("mbcs", errors="ignore")
         ret = elevoc_dll.elevoc_soft_encryption_init(log_dir_bytes, None)
         if ret != 0:
-            # 把 elevoc_log.txt 的末尾显示出来帮助定位
-            log_path = os.path.join(workdir, "elevoc_log.txt")
-            tail = ""
-            try:
-                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-                tail = "".join(lines[-30:]).strip()
-            except Exception:
-                pass
-            extra = f"\n\n--- elevoc_log.txt (最后 30 行) ---\n{tail}" if tail else ""
+            # 仅保留简短错误信息；详细日志请通过「打开日志」查看 elevoc_log.txt，避免界面刷屏
             raise RuntimeError(
                 "License init fail!\n"
                 f"返回码: {ret}\n"
                 f"dll_path: {dll_path}\n"
                 f"workdir: {workdir}\n"
-                + extra
+                "（可点击「打开日志」查看 elevoc_log.txt 排查）"
             )
 
         self._elevoc_state = {
@@ -726,16 +737,18 @@ class UIComponents:
         status_var = tk.StringVar(value="就绪")
         ttk.Label(row1, textvariable=status_var).pack(side="left")
 
-        # 单行按钮：从右往左依次排（保持最右侧对齐），顺序：UUID | 烧Key | 检查 | 打开日志 | 打开目录
+        # 单行按钮：从右往左依次排（保持最右侧对齐），顺序：UUID | 烧Key | 检查key | key剩余 | 打开日志 | 打开目录
         btn_check = ttk.Button(row1, text="检查key", style="Small.TButton", width=8)
+        btn_remain = ttk.Button(row1, text="key剩余", style="Small.TButton", width=8)
         btn_burn = ttk.Button(row1, text="烧大象Key", style="Small.TButton", width=8)
         btn_uuid = ttk.Button(row1, text="读SN", style="Small.TButton", width=8)
         btn_open = ttk.Button(row1, text="打开目录", style="Small.TButton", width=10)
         btn_open_log = ttk.Button(row1, text="打开日志", style="Small.TButton", width=10)
 
-        # pack(side="right") 时先 pack 的在最右侧，故先 pack 打开目录/打开日志，再 检查/烧Key/UUID
+        # pack(side="right") 时先 pack 的在最右侧，故先 pack 打开目录/打开日志，再 key剩余/检查key/烧Key/UUID（key剩余在检查key右边）
         btn_open.pack(side="right")
         btn_open_log.pack(side="right", padx=(6, 0))
+        btn_remain.pack(side="right", padx=(6, 0))
         btn_check.pack(side="right", padx=(6, 0))
         btn_burn.pack(side="right", padx=(6, 0))
         btn_uuid.pack(side="right", padx=(6, 0))
@@ -828,15 +841,24 @@ class UIComponents:
                 messagebox.showerror("错误", f"打开目录失败：{type(e).__name__}: {e}")
 
         def _open_log():
-            # 优先打开真正写入位置（TEMP workdir）；同时会尝试同步回 dist 目录
+            # 不依赖 DLL 初始化：直接找 elevoc_log.txt（先运行时目录，再 elevoc_ukey 源目录）
+            cand = []
+            workdir = os.path.join(tempfile.gettempdir(), "elevoc_ukey_runtime")
+            cand.append(os.path.join(workdir, "elevoc_log.txt"))
             try:
-                st = self._elevoc_init()
-                self._sync_elevoc_log_to_src()
-                p = os.path.join(st["workdir"], "elevoc_log.txt")
-                if not os.path.exists(p):
-                    # 兜底：打开源目录里的
-                    src_dir = st.get("src_dir") or self._find_elevoc_src_dir()
-                    p = os.path.join(src_dir, "elevoc_log.txt")
+                src_dir = self._find_elevoc_src_dir()
+                cand.append(os.path.join(src_dir, "elevoc_log.txt"))
+            except Exception:
+                pass
+            p = None
+            for path in cand:
+                if os.path.isfile(path):
+                    p = path
+                    break
+            if not p:
+                messagebox.showinfo("打开日志", "未找到 elevoc_log.txt。\n可检查：\n1) " + workdir + "\n2) elevoc_ukey 目录下是否有该文件。")
+                return
+            try:
                 os.startfile(p)  # type: ignore[attr-defined]
             except Exception as e:
                 messagebox.showerror("错误", f"打开日志失败：{type(e).__name__}: {e}")
@@ -898,7 +920,22 @@ class UIComponents:
                 _append(f"License count: {count}\n")
                 self._sync_elevoc_log_to_src()
             except Exception as e:
-                _append(f"（保存到本地状态失败: {e}，烧key前需再次读SN）\n")
+                err_msg = str(e).strip().split("\n")[0][:80]
+                _append(f"（未保存到本地状态: {err_msg}…；烧key 前需再次读SN，详情可点击「打开日志」）\n")
+
+        def do_show_license_count():
+            """查看 U 盘中的 key 剩余数量（需已插 U 盘并授权）。"""
+            _append("\n=== 查看 U 盘 Key 剩余数量 ===\n")
+            try:
+                st = self._elevoc_init()
+                count = st["dll"].elevoc_get_license_number()
+                _append(f"U 盘剩余 key 数量: {count}\n")
+                self._sync_elevoc_log_to_src()
+                msg = f"当前 U 盘剩余 key 数量：{count}" if count >= 0 else "无法获取（请确认 U 盘已插入且已授权）"
+                self.root.after(0, lambda: messagebox.showinfo("U盘Key剩余数量", msg))
+            except Exception as e:
+                _append(f"获取失败: {e}\n")
+                self.root.after(0, lambda: messagebox.showerror("U盘Key剩余数量", f"获取失败：{e}\n请确认 U 盘已插入且 elevoc_ukey 目录与 DLL 可用。"))
 
         def do_burn():
             serial = _get_serial()
@@ -910,6 +947,12 @@ class UIComponents:
                 _append("\n不支持：设备 unifykeys 列表中无 elevockey 节点，无法烧key。\n")
                 messagebox.showerror("不支持烧key", "设备不支持 elevockey。请先确认设备上 cat /sys/class/unifykeys/list 中含有 elevockey 节点后再操作。")
                 return
+            # 设备已有 key 时弹窗确认，避免误覆盖
+            current_key, _ = self._read_device_elevockey(serial)
+            if (current_key or "").strip():
+                if not messagebox.askyesno("确认烧录", "当前设备已有 key，是否确认覆盖烧录？\n（选择「否」将取消本次烧录）"):
+                    _append("\n用户取消烧录（设备已有 key）。\n")
+                    return
             st = self._elevoc_init()
             dll = st["dll"]
             uuid_bytes: bytes = st.get("last_uuid") or b""
@@ -980,6 +1023,7 @@ class UIComponents:
         btn_uuid.config(command=lambda: _run_in_thread(do_get_uuid))
         btn_burn.config(command=lambda: _run_in_thread(do_burn))
         btn_check.config(command=lambda: _run_in_thread(do_check))
+        btn_remain.config(command=lambda: _run_in_thread(do_show_license_count))
 
     def setup_sn_key_burn_tab(self, parent):
         """sn烧key：按 sn烧key.bat 的逻辑集成（写入 unifykeys:elevockey）"""
@@ -1152,6 +1196,12 @@ class UIComponents:
             if not key:
                 messagebox.showerror("错误", "请输入 elevockey")
                 return
+            # 设备已有 key 时弹窗确认，避免误覆盖
+            current_key, _ = self._read_device_elevockey(serial)
+            if (current_key or "").strip():
+                if not messagebox.askyesno("确认烧录", "当前设备已有 key，是否确认覆盖烧录？\n（选择「否」将取消本次烧录）"):
+                    _append("\n用户取消烧录（设备已有 key）。\n")
+                    return
 
             if not messagebox.askyesno("确认", "确认新增或替换 elevockey？"):
                 _append("\n用户取消操作。\n")
