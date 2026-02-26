@@ -3323,114 +3323,171 @@ class TestOperations:
             messagebox.showerror("错误", f"关闭日志打印时出错:\n{str(e)}")
 
     def start_logcat_capture(self):
-        """开始抓取logcat日志"""
-        if not self.check_device_selected():
-            return
-        
+        """开始抓取 logcat 日志。不要求先选设备：可直接点「开始抓取」，后台会先等任意设备上线再开始抓取（适合 reboot 后抓开机日志）。"""
+        device_id = (self.device_var.get() or "").strip() if hasattr(self, "device_var") else ""
         try:
-            self.update_logcat_status("正在开始抓取日志...")
-            
-            # 获取保存路径（默认 logcat 目录）
             save_dir = self.logcat_save_path_var.get().strip()
             if not save_dir:
                 save_dir = ensure_output_dir(DIR_LOGCAT)
             else:
                 os.makedirs(save_dir, exist_ok=True)
-            
-            # 生成文件名（audio_logcat_时间戳.txt）
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             filename = f"audio_logcat_{timestamp}.txt"
-            self.logcat_file_path = os.path.join(save_dir, filename)
-
-            device_id = (self.device_var.get() or "").strip()
+            logcat_file_path = os.path.join(save_dir, filename)
             filter_spec = (self.logcat_filter_var.get() or "").strip() if hasattr(self, "logcat_filter_var") else ""
             if not filter_spec:
                 filter_spec = "*:V"
-            argv = ["adb"]
-            if device_id:
-                argv.extend(["-s", device_id])
-            argv.extend(["logcat", "-v", "threadtime", filter_spec])
-            
-            # 直接写入文件，stdout=logcat_file，无 PIPE 无线程，避免停止时丢数据
-            self.logcat_file = open(self.logcat_file_path, "w", encoding="utf-8", errors="replace", buffering=1)
-            self.logcat_process = subprocess.Popen(
-                argv,
-                shell=False,
-                stdout=self.logcat_file,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            
+
             if hasattr(self, "start_capture_button"):
                 self.start_capture_button.config(state="disabled")
             if hasattr(self, "stop_capture_button"):
                 self.stop_capture_button.config(state="normal")
-            self.update_logcat_status(f"正在抓取日志到: {filename}")
+            self.logcat_process = None
+            self.logcat_file = None
+            self.logcat_wait_process = None
+            self._logcat_wait_cancelled = False
+            self.logcat_file_path = logcat_file_path
 
-            # 自动停止（秒），0 表示不自动停止
-            try:
-                auto_stop_s = int((self.logcat_auto_stop_var.get() if hasattr(self, "logcat_auto_stop_var") else "0") or "0")
-            except Exception:
-                auto_stop_s = 0
-            if auto_stop_s > 0:
-                self.root.after(auto_stop_s * 1000, self.stop_logcat_capture)
-            
+            def _run_wait_then_capture():
+                try:
+                    self.root.after(0, lambda: self.update_logcat_status("等待设备连接...（检测到设备后自动开始抓取，可抓开机日志）"))
+                    # 未选设备时等任意设备；已选时等指定设备
+                    if device_id:
+                        wait_argv = ["adb", "-s", device_id, "wait-for-device"]
+                    else:
+                        wait_argv = ["adb", "wait-for-device"]
+                    wait_proc = subprocess.Popen(wait_argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    self.logcat_wait_process = wait_proc
+                    wait_proc.wait()
+                    self.logcat_wait_process = None
+                    if getattr(self, "_logcat_wait_cancelled", True):
+                        self.root.after(0, self._logcat_capture_aborted)
+                        return
+                    # 设备已上线：若之前未指定设备，取当前第一个在线设备
+                    use_serial = device_id
+                    if not use_serial:
+                        r = subprocess.run(
+                            ["adb", "devices"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if r.returncode == 0 and r.stdout:
+                            for line in r.stdout.strip().splitlines()[1:]:
+                                parts = line.strip().split()
+                                if len(parts) >= 2 and parts[1] == "device":
+                                    use_serial = parts[0]
+                                    break
+                        if not use_serial:
+                            self.root.after(0, lambda: self.update_logcat_status("未检测到在线设备，无法开始抓取"))
+                            self.root.after(0, self._logcat_capture_aborted)
+                            return
+                    argv = ["adb", "-s", use_serial, "logcat", "-v", "threadtime", filter_spec]
+
+                    def _start_logcat():
+                        try:
+                            self.logcat_file = open(
+                                logcat_file_path, "w", encoding="utf-8", errors="replace", buffering=1
+                            )
+                            self.logcat_process = subprocess.Popen(
+                                argv,
+                                shell=False,
+                                stdout=self.logcat_file,
+                                stderr=subprocess.PIPE,
+                                text=True,
+                            )
+                            self.update_logcat_status(f"正在抓取日志到: {filename}")
+                            try:
+                                auto_stop_s = int(
+                                    (self.logcat_auto_stop_var.get() if hasattr(self, "logcat_auto_stop_var") else "0") or "0"
+                                )
+                            except Exception:
+                                auto_stop_s = 0
+                            if auto_stop_s > 0:
+                                self.root.after(auto_stop_s * 1000, self.stop_logcat_capture)
+                        except Exception as e:
+                            self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
+                            messagebox.showerror("错误", f"设备已连接，但启动 logcat 时出错:\n{str(e)}")
+                            self._logcat_capture_aborted()
+                    self.root.after(0, _start_logcat)
+                except Exception as e:
+                    if not getattr(self, "_logcat_wait_cancelled", True):
+                        self.root.after(0, lambda: self.update_logcat_status(f"等待设备时出错: {str(e)}"))
+                        self.root.after(0, self._logcat_capture_aborted)
+            threading.Thread(target=_run_wait_then_capture, daemon=True).start()
         except Exception as e:
+            self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
+            messagebox.showerror("错误", f"开始抓取日志时出错:\n{str(e)}")
+            if hasattr(self, "start_capture_button"):
+                self.start_capture_button.config(state="normal")
+            if hasattr(self, "stop_capture_button"):
+                self.stop_capture_button.config(state="disabled")
+
+    def _logcat_capture_aborted(self):
+        """等待设备被取消或失败时恢复按钮状态"""
+        self.logcat_wait_process = None
+        self._logcat_wait_cancelled = True
+        if hasattr(self, "start_capture_button"):
+            self.start_capture_button.config(state="normal")
+        if hasattr(self, "stop_capture_button"):
+            self.stop_capture_button.config(state="disabled")
+        self.update_logcat_status("就绪")
+
+    def stop_logcat_capture(self):
+        """停止抓取日志（若正在等待设备则取消等待；若已在抓取则停止 logcat 进程）"""
+        try:
+            # 若正在“等待设备连接”，取消等待
+            wait_proc = getattr(self, "logcat_wait_process", None)
+            if wait_proc is not None and wait_proc.poll() is None:
+                self._logcat_wait_cancelled = True
+                if platform.system() == "Windows":
+                    subprocess.run(f"taskkill /F /T /PID {wait_proc.pid}", shell=True)
+                else:
+                    import signal
+                    try:
+                        os.kill(wait_proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                self.logcat_wait_process = None
+                self.update_logcat_status("已取消等待设备")
+                if hasattr(self, "start_capture_button"):
+                    self.start_capture_button.config(state="normal")
+                if hasattr(self, "stop_capture_button"):
+                    self.stop_capture_button.config(state="disabled")
+                return
+
+            if not hasattr(self, "logcat_process") or self.logcat_process is None:
+                return
+
+            self.update_logcat_status("正在停止抓取日志...")
+
+            if platform.system() == "Windows":
+                subprocess.run(f"taskkill /F /T /PID {self.logcat_process.pid}", shell=True)
+            else:
+                import signal
+                os.kill(self.logcat_process.pid, signal.SIGTERM)
+                try:
+                    self.logcat_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.kill(self.logcat_process.pid, signal.SIGKILL)
+
             if hasattr(self, "logcat_file") and self.logcat_file:
                 try:
                     self.logcat_file.close()
                 except Exception:
                     pass
                 self.logcat_file = None
-            self.update_logcat_status(f"开始抓取日志出错: {str(e)}")
-            messagebox.showerror("错误", f"开始抓取日志时出错:\n{str(e)}")
-
-    def stop_logcat_capture(self):
-        """停止抓取日志"""
-        if not hasattr(self, 'logcat_process') or self.logcat_process is None:
-            return
-    
-        try:
-            self.update_logcat_status("正在停止抓取日志...")
-            
-            # 停止日志进程
-            if platform.system() == "Windows":
-                # 使用taskkill强制终止进程树
-                subprocess.run(f"taskkill /F /T /PID {self.logcat_process.pid}", shell=True)
-            else:
-                import signal
-                # 发送SIGTERM信号
-                os.kill(self.logcat_process.pid, signal.SIGTERM)
-                # 等待进程结束
-                try:
-                    self.logcat_process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    # 如果超时，发送SIGKILL信号强制终止
-                    os.kill(self.logcat_process.pid, signal.SIGKILL)
-            
-            # 关闭日志文件
-            if hasattr(self, 'logcat_file') and self.logcat_file:
-                self.logcat_file.close()
-                self.logcat_file = None
-            
-            # 清理进程引用
             self.logcat_process = None
-            
-            # 停止写入线程标志
             self.logcat_running = False
 
-            # 更新按钮状态
             if hasattr(self, "start_capture_button"):
                 self.start_capture_button.config(state="normal")
             if hasattr(self, "stop_capture_button"):
                 self.stop_capture_button.config(state="disabled")
-            
             self.update_logcat_status("日志抓取已停止")
-            
-            # 询问是否打开日志文件
+
             if messagebox.askyesno("完成", "日志抓取已完成，是否打开日志文件夹？"):
                 self.open_logcat_folder()
-            
         except Exception as e:
             self.update_logcat_status(f"停止抓取日志出错: {str(e)}")
             messagebox.showerror("错误", f"停止抓取日志时出错:\n{str(e)}")
@@ -3686,28 +3743,32 @@ class TestOperations:
         
         rate = self.multi_rate_var.get()
         bit = self.multi_bit_var.get()
+        preset = (getattr(self, "multichannel_preset_var", None) and self.multichannel_preset_var.get() or "").strip() or "7.1"
         
         self.status_var.set("正在执行多声道测试...")
         
         # 在新线程中运行测试，避免GUI冻结
         threading.Thread(target=self._multichannel_test_thread, 
-                        args=(rate, bit), 
+                        args=(rate, bit, preset), 
                         daemon=True).start()
 
-    def _multichannel_test_thread(self, rate, bit):
+    def _multichannel_test_thread(self, rate, bit, preset):
         try:
             # 准备工作
             subprocess.run(self.get_adb_command("root"), shell=True)
-            # 多声道测试音频：用户自备（不再自动生成/不再内置）
-            audio_file = os.path.join("audio", "Nums_7dot1_16_48000.wav")
+            # 多声道测试音频：7.1/2.1/2.0 使用 audio/channel/ 下对应文件
+            name_map = {"7.1": "Nums_7dot1_16_48000.wav", "2.1": "Nums_2dot1_16_48000.wav", "2.0": "Nums_2dot0_16_48000.wav"}
+            audio_name = name_map.get(preset, "Nums_7dot1_16_48000.wav")
+            base_dir = getattr(self, "_get_runtime_base_dir", lambda: os.getcwd())()
+            audio_file = os.path.join(base_dir, "audio", "channel", audio_name)
             if not os.path.exists(audio_file):
                 msg = (
-                    "多声道测试音频不存在：audio/Nums_7dot1_16_48000.wav\n\n"
-                    "请把对应的测试音频放到 audio 目录后再开始测试。"
+                    f"多声道测试音频不存在：audio/channel/{audio_name}\n\n"
+                    "请将对应音频放到 audio/channel 目录后再开始测试。"
                 )
                 self.root.after(0, lambda: messagebox.showerror("缺少音频文件", msg))
                 return
-            subprocess.run(self.get_adb_command(f"push \"{audio_file}\" /sdcard/Nums_7dot1_16_48000.wav"), shell=True)
+            subprocess.run(self.get_adb_command(f"push \"{audio_file}\" /sdcard/{audio_name}"), shell=True)
             
             # 重启audioserver
             for _ in range(3):
@@ -3715,7 +3776,7 @@ class TestOperations:
             
             # 播放音频
             self.root.after(0, lambda: self.status_var.set("正在播放多声道音频..."))
-            play_cmd = self.get_adb_command(f"shell tinyplay /sdcard/Nums_7dot1_16_48000.wav -r {rate} -b {bit}")
+            play_cmd = self.get_adb_command(f"shell tinyplay /sdcard/{audio_name} -r {rate} -b {bit}")
             
             # 显示命令以便调试
             print(f"执行命令: {play_cmd}")

@@ -557,6 +557,31 @@ class UIComponents:
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(__file__))
 
+    @staticmethod
+    def _bind_mousewheel_to_canvas(widget, canvas):
+        """为 widget 及其子控件绑定鼠标滚轮，使 canvas 可滚轮滚动（Windows: MouseWheel, Linux: Button-4/5）"""
+        def _on_mousewheel(event):
+            try:
+                if hasattr(event, "delta"):
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                elif event.num == 4:
+                    canvas.yview_scroll(-3, "units")
+                elif event.num == 5:
+                    canvas.yview_scroll(3, "units")
+            except Exception:
+                pass
+        try:
+            widget.bind("<MouseWheel>", _on_mousewheel)
+        except Exception:
+            pass
+        try:
+            widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+            widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            UIComponents._bind_mousewheel_to_canvas(child, canvas)
+
     def _find_elevoc_src_dir(self) -> str:
         """
         在多个可能位置查找 elevoc_ukey 目录（避免 dist 运行时找不到资源）。
@@ -690,13 +715,12 @@ class UIComponents:
         log_dir_bytes = workdir.encode("mbcs", errors="ignore")
         ret = elevoc_dll.elevoc_soft_encryption_init(log_dir_bytes, None)
         if ret != 0:
-            # 仅保留简短错误信息；详细日志请通过「打开日志」查看 elevoc_log.txt，避免界面刷屏
+            # 未插 U 盘或鉴权失败时常见 ret=-1；提示用户插 U 盘并参考文档
+            _doc_url = "https://seirobotics.feishu.cn/wiki/Ih2ww3snDilkDykX5tgcehJDnnf?from=from_copylink"
             raise RuntimeError(
-                "License init fail!\n"
-                f"返回码: {ret}\n"
-                f"dll_path: {dll_path}\n"
-                f"workdir: {workdir}\n"
-                "（可点击「打开日志」查看 elevoc_log.txt 排查）"
+                "请先插入 U 盘 Key 后重试。\n\n"
+                f"烧key方法详细步骤见文档：{_doc_url}\n\n"
+                f"返回码: {ret}"
             )
 
         self._elevoc_state = {
@@ -921,7 +945,7 @@ class UIComponents:
                 self._sync_elevoc_log_to_src()
             except Exception as e:
                 err_msg = str(e).strip().split("\n")[0][:80]
-                _append(f"（未保存到本地状态: {err_msg}…；烧key 前需再次读SN，详情可点击「打开日志」）\n")
+                _append(f"（{err_msg}烧key 前需再次读SN）\n")
 
         def do_show_license_count():
             """查看 U 盘中的 key 剩余数量（需已插 U 盘并授权）。"""
@@ -1701,8 +1725,8 @@ class UIComponents:
         # subtitle_label = ttk.Label(frame, text="用于验证音频回路和参考信号", font=("Arial", 9))
         # subtitle_label.pack(pady=(0, 10))
         
-        # 缺少初始化的变量
-        self.audio_source_var = tk.StringVar(value="default")
+        # 默认音频按声道选择：7.1 / 2.1 / 2.0 使用 audio/channel/ 下对应文件；自定义不变
+        self.audio_source_var = tk.StringVar(value="7.1")
         
         # 创建设置区域 - 减少上边距
         settings_frame = ttk.LabelFrame(frame, text="参数设置")
@@ -1750,36 +1774,42 @@ class UIComponents:
         audio_frame = ttk.LabelFrame(frame, text="音频文件")
         audio_frame.pack(fill="x", padx=20, pady=10)
         
-        # 音频源选择
+        # 默认音频按声道选择：7.1 / 2.1 / 2.0（使用 audio/channel/ 下对应文件）
         source_frame = ttk.Frame(audio_frame)
         source_frame.pack(fill="x", padx=10, pady=5)
-        
-        # 默认音频选项
-        default_radio = ttk.Radiobutton(
-            source_frame, 
-            text="使用默认音频 (7.1声道)",
-            variable=self.audio_source_var,
-            value="default"
-        )
-        default_radio.pack(anchor="w", padx=10, pady=2)
+        ttk.Radiobutton(source_frame, text="7.1", variable=self.audio_source_var, value="7.1").pack(side="left", padx=(10, 16), pady=2)
+        ttk.Radiobutton(source_frame, text="2.1", variable=self.audio_source_var, value="2.1").pack(side="left", padx=(0, 16), pady=2)
+        ttk.Radiobutton(source_frame, text="2.0", variable=self.audio_source_var, value="2.0").pack(side="left", padx=(0, 16), pady=2)
 
-        # 默认音频路径显示 + 打开位置（和喇叭测试一致）
-        default_loopback_audio_path = os.path.join(os.getcwd(), "audio", "Nums_7dot1_16_48000.wav")
-        self.default_loopback_audio_path_var = tk.StringVar(value=default_loopback_audio_path)
+        # 当前选中的默认音频路径显示 + 打开位置（随 7.1/2.1/2.0 切换更新）
+        def _loopback_default_audio_path(preset):
+            name = {"7.1": "Nums_7dot1_16_48000.wav", "2.1": "Nums_2dot1_16_48000.wav", "2.0": "Nums_2dot0_16_48000.wav"}.get(preset, "Nums_7dot1_16_48000.wav")
+            return os.path.join(self._get_runtime_base_dir(), "audio", "channel", name)
+        self._loopback_default_audio_path_fn = _loopback_default_audio_path
+        self.default_loopback_audio_path_var = tk.StringVar(value=_loopback_default_audio_path("7.1"))
+
+        def _on_loopback_source_change(*args):
+            v = (self.audio_source_var.get() or "").strip()
+            if v in ("7.1", "2.1", "2.0"):
+                self.default_loopback_audio_path_var.set(_loopback_default_audio_path(v))
+        self.audio_source_var.trace_add("write", _on_loopback_source_change)
 
         default_path_frame = ttk.Frame(audio_frame)
         default_path_frame.pack(fill="x", padx=10, pady=(0, 6))
-
         ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).pack(side="left", padx=(10, 6))
         default_path_entry = ttk.Entry(default_path_frame, textvariable=self.default_loopback_audio_path_var)
         default_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         default_path_entry.config(state="readonly")
 
+        def _open_loopback_default_folder():
+            p = self.default_loopback_audio_path_var.get()
+            if p:
+                self.open_containing_folder(p)
         open_default_folder_btn = ttk.Button(
             default_path_frame,
             text="打开位置",
             style="Small.TButton",
-            command=lambda p=default_loopback_audio_path: self.open_containing_folder(p),
+            command=_open_loopback_default_folder,
             width=8,
         )
         open_default_folder_btn.pack(side="left", padx=(0, 10))
@@ -1992,14 +2022,23 @@ class UIComponents:
         print("麦克风测试UI创建完成")
     
     def setup_multichannel_tab(self, parent):
-        """设置多声道测试选项卡"""
+        """设置多声道测试选项卡（7.1/2.1/2.0 使用 audio/channel/ 下对应默认音频）"""
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
         
         # 说明
         desc = ttk.Label(frame, 
-                        text="播放7.1声道测试音频\n用于验证多声道音频输出")
+                        text="播放多声道测试音频\n用于验证多声道音频输出")
         desc.pack(pady=10)
+        
+        # 声道选择：7.1 / 2.1 / 2.0（与 Loopback 一致，使用 audio/channel/ 下对应文件）
+        source_frame = ttk.Frame(frame)
+        source_frame.pack(fill="x", pady=(0, 8))
+        ttk.Label(source_frame, text="声道:", font=("Arial", 9)).pack(side="left", padx=(0, 8))
+        self.multichannel_preset_var = tk.StringVar(value="7.1")
+        ttk.Radiobutton(source_frame, text="7.1", variable=self.multichannel_preset_var, value="7.1").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(source_frame, text="2.1", variable=self.multichannel_preset_var, value="2.1").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(source_frame, text="2.0", variable=self.multichannel_preset_var, value="2.0").pack(side="left", padx=(0, 12))
         
         # 参数设置
         params_frame = ttk.LabelFrame(frame, text="参数设置")
@@ -2311,7 +2350,10 @@ class UIComponents:
         
         # 配置Canvas滚动区域
         self.props_container.bind("<Configure>", lambda e: props_canvas.configure(scrollregion=props_canvas.bbox("all")))
-        
+        # 录音属性列表支持鼠标滚轮滚动
+        self._bind_mousewheel_to_canvas(props_canvas, props_canvas)
+        self._bind_mousewheel_to_canvas(self.props_container, props_canvas)
+
         # 添加默认属性
         self.hal_props = {}  # 存储属性和对应的变量
         default_props = [
@@ -3372,7 +3414,12 @@ class UIComponents:
         frame.pack(fill="both", expand=True)
         
         # 说明
-        desc = ttk.Label(frame, text="监测设备 logcat 中「Detected hotword」的日志行，每次唤醒计 1 次；开始监测前会清空设备 log 缓冲，只统计本次唤醒。", style="Muted.TLabel")
+        desc = ttk.Label(
+            frame,
+            text="监测设备 logcat：\nB款仅监测「Detected hotword」每条约 1 次；\nA款仅监测「LIBAS_HOTWORD_DETECTION_RECEIVED」；\n开始监测前会清空设备 log 缓冲，只统计本次唤醒。",
+            style="Muted.TLabel",
+            justify=tk.LEFT,
+        )
         desc.pack(anchor="w", pady=(0, 10))
         
         # 唤醒次数显示
@@ -3396,7 +3443,7 @@ class UIComponents:
         ttk.Checkbutton(frame, text="唤醒后发送返回键（勾选后，每次检测到唤醒会向设备发送 KEYCODE_BACK）", variable=self.hotword_send_back_var).pack(anchor="w", pady=(5, 0))
         
         # 最近唤醒日志（只读）
-        log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（Detected hotword）")
+        log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（B款 Detected hotword / A款 LIBAS_HOTWORD_DETECTION_RECEIVED）")
         log_frame.pack(fill="both", expand=True, pady=5)
         self.hotword_log_text = tk.Text(log_frame, height=12, font=("Consolas", 9), state="disabled")
         vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.hotword_log_text.yview)
@@ -3416,6 +3463,17 @@ class UIComponents:
     def start_hotword_monitor(self):
         """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，只统计「Detected hotword」一次/唤醒"""
         if not self.check_device_selected():
+            # 明确提示用户，避免“点了没反应”的困惑
+            root = getattr(self, "root", None)
+            if root and root.winfo_exists():
+                root.after(0, lambda: messagebox.showwarning(
+                    "无法开始监测",
+                    "请先在顶部选择设备并确保设备已通过 USB 连接且状态为「设备 xxx 在线」。"
+                ))
+            return
+        device_id = (getattr(self, "selected_device", None) or "").strip() or (self.device_var.get() or "").strip()
+        if not device_id:
+            messagebox.showwarning("无法开始监测", "未获取到设备号，请重新选择设备后重试。")
             return
         self.hotword_monitor_stop = False
         self._hotword_ui_buffer = []
@@ -3430,25 +3488,26 @@ class UIComponents:
             self.hotword_log_text.delete("1.0", "end")
             self.hotword_log_text.config(state="disabled")
         try:
-            device_id = (self.device_var.get() or "").strip()
-            clear_argv = ["adb"]
-            if device_id:
-                clear_argv.extend(["-s", device_id])
-            clear_argv.append("logcat")
-            clear_argv.append("-c")
+            clear_argv = ["adb", "-s", device_id, "logcat", "-c"]
             subprocess.run(clear_argv, shell=False, capture_output=True, timeout=5)
-            argv = ["adb"]
-            if device_id:
-                argv.extend(["-s", device_id])
-            argv.extend(["logcat", "-v", "threadtime", "native:I", "*:S"])
-            self.hotword_monitor_process = subprocess.Popen(
-                argv,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
+            argv = ["adb", "-s", device_id, "logcat", "-v", "threadtime", "*:I"]
+            # 与日志查看器一致：Windows 下用 shell + CREATE_NO_WINDOW 启动，避免 adb 子进程被立即关闭（当时 patch 里只有 LogcatViewer 做了该处理，唤醒监测未做，会导致“没有任何反应”）
+            kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "bufsize": 1,
+                "encoding": "utf-8",
+                "errors": "replace",
+            }
+            if platform.system() == "Windows":
+                cmd_str = subprocess.list2cmdline(argv)
+                kwargs["shell"] = True
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                self.hotword_monitor_process = subprocess.Popen(cmd_str, **kwargs)
+            else:
+                kwargs["shell"] = False
+                self.hotword_monitor_process = subprocess.Popen(argv, **kwargs)
             time.sleep(0.3)
             if self.hotword_monitor_process.poll() is not None:
                 out = ""
@@ -3462,6 +3521,8 @@ class UIComponents:
                 return
             self.hotword_start_btn.config(state="disabled")
             self.hotword_stop_btn.config(state="normal")
+            if hasattr(self, "status_var"):
+                self.status_var.set("唤醒监测已启动，请对着设备说唤醒词")
             self.hotword_monitor_thread = threading.Thread(target=self._read_hotword_logcat, daemon=True)
             self.hotword_monitor_thread.start()
         except Exception as e:
@@ -3479,6 +3540,8 @@ class UIComponents:
             except Exception:
                 pass
             self.hotword_monitor_process = None
+        if hasattr(self, "status_var"):
+            self.status_var.set("就绪")
         if hasattr(self, "hotword_start_btn") and self.hotword_start_btn.winfo_exists():
             self.hotword_start_btn.config(state="normal")
         if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
@@ -3495,18 +3558,19 @@ class UIComponents:
             self.hotword_log_text.config(state="disabled")
 
     def _read_hotword_logcat(self):
-        """实时迭代 process.stdout 行，仅含「Detected hotword」计 1 次（同一唤醒的 Fired hotword 不重复计）"""
-        keyword = "Detected hotword"
+        """B款: 仅监测 Detected hotword，每条计 1 次（时间窗去重）；A款: 仅监测 LIBAS_HOTWORD_DETECTION_RECEIVED，每条计 0.5（每唤醒 2 条，显示数量除以 2）"""
+        keyword_b = "Detected hotword"
+        keyword_a = "LIBAS_HOTWORD_DETECTION_RECEIVED"
         root = getattr(self, "root", None) or getattr(self, "parent", None)
 
-        def _ui_append(count_val, line_text):
+        def _ui_append(display_count, line_text):
             """线程安全：缓冲计数与日志，批量刷新（约 100ms），避免卡顿"""
             try:
                 buf = getattr(self, "_hotword_ui_buffer", None)
                 if buf is None:
                     self._hotword_ui_buffer = []
                     buf = self._hotword_ui_buffer
-                buf.append((count_val, line_text))
+                buf.append((display_count, line_text))
             except Exception:
                 return
             if getattr(self, "_hotword_ui_flush_scheduled", False):
@@ -3522,7 +3586,7 @@ class UIComponents:
                         return
                     last_count = buf[-1][0] if buf else 0
                     if hasattr(self, "hotword_count_var"):
-                        self.hotword_count_var.set(str(last_count))
+                        self.hotword_count_var.set(str(int(round(last_count))))
                     if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
                         self.hotword_log_text.config(state="normal")
                         for _, s in buf:
@@ -3551,18 +3615,25 @@ class UIComponents:
                     break
                 if not self.hotword_monitor_process or self.hotword_monitor_process.poll() is not None:
                     break
-                if not line or keyword not in line:
+                if not line:
+                    continue
+                is_b = keyword_b in line
+                is_a = keyword_a in line
+                if not is_b and not is_a:
                     continue
                 now = time.time()
-                # 启动后 1 秒内不计数，避免 logcat -c 后设备仍输出的旧缓冲被计入
                 if now - getattr(self, "_hotword_monitor_start_time", 0) < 1.0:
                     continue
-                # 同一唤醒可能有多条 Detected hotword，时间窗内只计 1 次
-                debounce = getattr(self, "_hotword_debounce_seconds", 1.5)
-                if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
-                    continue
-                self._hotword_last_detected_time = now
-                self.hotword_count += 1
+                if is_b:
+                    # B款: 每条计 1，时间窗去重
+                    debounce = getattr(self, "_hotword_debounce_seconds", 1.5)
+                    if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
+                        continue
+                    self._hotword_last_detected_time = now
+                    self.hotword_count += 1.0
+                else:
+                    # A款: 每条计 0.5（每次唤醒 2 条，显示数量除以 2）
+                    self.hotword_count += 0.5
                 _ui_append(self.hotword_count, line.strip())
                 # 可选：唤醒后发送系统返回键
                 if getattr(self, "hotword_send_back_var", None) and self.hotword_send_back_var.get():
@@ -3580,6 +3651,8 @@ class UIComponents:
 
     def _hotword_monitor_ended(self):
         """监测进程已结束：仅恢复 UI"""
+        if hasattr(self, "status_var"):
+            self.status_var.set("就绪")
         if hasattr(self, "hotword_start_btn") and self.hotword_start_btn.winfo_exists():
             self.hotword_start_btn.config(state="normal")
         if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
@@ -3587,17 +3660,38 @@ class UIComponents:
         self.hotword_monitor_process = None
 
     def setup_system_cmd_tab(self, parent):
-        """系统指令（独立子标签页）"""
-        frame = ttk.Frame(parent, padding=10)
-        frame.pack(fill="both", expand=True)
+        """系统指令（独立子标签页）：整体可滚动，避免被固定界面遮住"""
+        # 外层：Canvas + 垂直滚动条，使整个系统指令界面可滚动
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
+        self._syscmd_main_canvas = tk.Canvas(container, highlightthickness=0)
+        syscmd_main_vsb = ttk.Scrollbar(container, orient="vertical", command=self._syscmd_main_canvas.yview)
+        inner = ttk.Frame(self._syscmd_main_canvas, padding=10)
+        inner.bind("<Configure>", lambda e: self._syscmd_main_canvas.configure(scrollregion=self._syscmd_main_canvas.bbox("all")))
+        self._syscmd_main_canvas_window = self._syscmd_main_canvas.create_window((0, 0), window=inner, anchor="nw")
+        self._syscmd_main_canvas.configure(yscrollcommand=syscmd_main_vsb.set)
 
-        # 直接复用面板组件：按钮 -> 弹窗（Ctrl+F/刷新/保存）
-        self._setup_system_cmd_panel(frame)
+        def _on_syscmd_canvas_configure(event):
+            self._syscmd_main_canvas.itemconfig(self._syscmd_main_canvas_window, width=event.width)
+
+        self._syscmd_main_canvas.bind("<Configure>", _on_syscmd_canvas_configure)
+        syscmd_main_vsb.pack(side="right", fill="y")
+        self._syscmd_main_canvas.pack(side="left", fill="both", expand=True)
+        # 鼠标在系统指令面板上时滚轮可滚动
+        def _on_mousewheel(event):
+            self._syscmd_main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._syscmd_main_canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Linux 使用 Button-4/5
+        self._syscmd_main_canvas.bind("<Button-4>", lambda e: self._syscmd_main_canvas.yview_scroll(-3, "units"))
+        self._syscmd_main_canvas.bind("<Button-5>", lambda e: self._syscmd_main_canvas.yview_scroll(3, "units"))
+        self._setup_system_cmd_panel(inner)
+        # 内层及所有子控件也绑定滚轮，鼠标在面板任意位置滚轮即可滚动
+        self._bind_mousewheel_to_canvas(inner, self._syscmd_main_canvas)
 
     def _setup_system_cmd_panel(self, parent):
-        """Logcat日志右侧：系统指令面板（点击后弹窗显示结果，支持 Ctrl+F 搜索/刷新/保存）"""
+        """系统指令面板内容（预设指令 + 自定义指令），置于可滚动容器内"""
         lf = ttk.LabelFrame(parent, text="系统指令")
-        lf.pack(fill="both", expand=True, padx=5, pady=5)
+        lf.pack(fill="x", padx=5, pady=5)
 
         tip = ttk.Label(lf, text="点击按钮获取设备信息（弹窗支持 Ctrl+F 搜索/刷新/保存）", style="Muted.TLabel")
         tip.pack(anchor="w", padx=8, pady=(6, 6))
@@ -3605,6 +3699,7 @@ class UIComponents:
         btns = ttk.Frame(lf)
         btns.pack(fill="x", padx=8, pady=(0, 8))
 
+        # 预设指令；cmd 为 None 表示打开设备解锁弹窗，否则为 adb/shell 指令
         commands = [
             ("dumpsys media.audio_policy", "dumpsys media.audio_policy"),
             ("dumpsys media.audio_flinger", "dumpsys media.audio_flinger"),
@@ -3613,32 +3708,26 @@ class UIComponents:
             ("getprop", "getprop"),
             ("getprop ro.build.fingerprint", "getprop ro.build.fingerprint"),
             ("dumpsys input", "dumpsys input"),
+            ("Bootloader 解锁 + root/remount", None),
         ]
 
         for i, (label, cmd) in enumerate(commands):
             r, c = divmod(i, 1)
-            b = ttk.Button(
-                btns,
-                text=label,
-                style="Small.TButton",
-                command=lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd),
-            )
+            if cmd is None:
+                b = ttk.Button(btns, text=label, style="Small.TButton", command=self.open_device_unlock_window)
+            else:
+                b = ttk.Button(
+                    btns,
+                    text=label,
+                    style="Small.TButton",
+                    command=lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd),
+                )
             b.grid(row=r, column=c, sticky="ew", pady=4)
             btns.grid_columnconfigure(c, weight=1)
 
-        # 设备维护：解锁/重启等（注意：可能触发清数据，需要强提示）
-        maint = ttk.LabelFrame(lf, text="设备解锁")
-        maint.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(
-            maint,
-            text="Bootloader 解锁 + root/remount",
-            style="Small.TButton",
-            command=self.open_device_unlock_window,
-        ).pack(fill="x", padx=8, pady=8)
-
-        # 自定义指令：输入 + 添加/运行；下方固定高度的 Listbox 显示已添加项，选中后可运行/删除
+        # 自定义指令：放在预设指令与设备解锁之间，添加后立即可见
         custom_lf = ttk.LabelFrame(lf, text="自定义指令（可新增/删除）")
-        custom_lf.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        custom_lf.pack(fill="x", padx=8, pady=(0, 8))
 
         if not hasattr(self, "_syscmd_custom_list") or self._syscmd_custom_list is None:
             self._syscmd_custom_list = []
@@ -3652,12 +3741,42 @@ class UIComponents:
         ttk.Button(row1, text="添加", style="Small.TButton", width=6, command=self._syscmd_add_custom).pack(side="left", padx=(0, 4))
         ttk.Button(row1, text="运行", style="Small.TButton", width=6, command=lambda: self._syscmd_run_custom((self._syscmd_custom_var.get() or "").strip())).pack(side="left", padx=(0, 4))
 
-        # 已添加的指令：用固定高度的 Listbox，保证始终可见；添加时直接 insert，不依赖动态重绘
-        list_lf = ttk.LabelFrame(custom_lf, text="已添加的指令（选中后点「运行选中」或「删除选中」）")
-        list_lf.pack(fill="x", padx=8, pady=(6, 4))
+        # 已添加的指令：可滚动区域，按钮竖向排列，添加后立即可见
+        if not hasattr(self, "_syscmd_custom_buttons"):
+            self._syscmd_custom_buttons = []
+        btns_lf = ttk.LabelFrame(custom_lf, text="已添加的指令（点击按钮直接运行）")
+        btns_lf.pack(fill="x", padx=8, pady=(4, 4))
+        # 固定高度 + 垂直滚动条，内层 Frame 放按钮
+        self._syscmd_canvas = tk.Canvas(btns_lf, highlightthickness=0)
+        syscmd_btn_scroll = ttk.Scrollbar(btns_lf, orient="vertical", command=self._syscmd_canvas.yview)
+        self._syscmd_custom_btns_frame = ttk.Frame(self._syscmd_canvas)
+        self._syscmd_custom_btns_frame.bind(
+            "<Configure>",
+            lambda e: self._syscmd_canvas.configure(scrollregion=self._syscmd_canvas.bbox("all")),
+        )
+        self._syscmd_canvas_window = self._syscmd_canvas.create_window((0, 0), window=self._syscmd_custom_btns_frame, anchor="nw")
+        self._syscmd_canvas.configure(yscrollcommand=syscmd_btn_scroll.set)
+
+        def _on_canvas_configure(event):
+            self._syscmd_canvas.itemconfig(self._syscmd_canvas_window, width=event.width)
+
+        self._syscmd_canvas.bind("<Configure>", _on_canvas_configure)
+        syscmd_btn_scroll.pack(side="right", fill="y")
+        self._syscmd_canvas.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self._syscmd_canvas.configure(height=88)
+        self._syscmd_empty_lbl = ttk.Label(self._syscmd_custom_btns_frame, text="（添加后此处会显示指令按钮）", style="Muted.TLabel")
+        self._syscmd_empty_lbl.pack(anchor="w")
+        for cmd in self._syscmd_custom_list:
+            self._syscmd_empty_lbl.pack_forget()
+            self._syscmd_add_custom_button(cmd)
+        if self._syscmd_custom_list:
+            self._syscmd_empty_lbl.pack_forget()
+
+        list_lf = ttk.LabelFrame(custom_lf, text="已添加的指令列表（选中后点「运行选中」或「删除选中」）")
+        list_lf.pack(fill="x", padx=8, pady=(4, 4))
         list_inner = ttk.Frame(list_lf)
         list_inner.pack(fill="x", padx=4, pady=4)
-        self._syscmd_listbox = tk.Listbox(list_inner, height=6, font=("Consolas", 9), selectmode="single")
+        self._syscmd_listbox = tk.Listbox(list_inner, height=4, font=("Consolas", 9), selectmode="single")
         syscmd_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self._syscmd_listbox.yview)
         self._syscmd_listbox.configure(yscrollcommand=syscmd_scroll.set)
         syscmd_scroll.pack(side="right", fill="y")
@@ -3670,8 +3789,31 @@ class UIComponents:
         ttk.Button(btn_row, text="运行选中", style="Small.TButton", width=8, command=self._syscmd_run_selected).pack(side="left", padx=(0, 6))
         ttk.Button(btn_row, text="删除选中", style="Small.TButton", width=8, command=self._syscmd_delete_selected).pack(side="left", padx=(0, 6))
 
+    def _syscmd_add_custom_button(self, cmd: str):
+        """为一条自定义指令在可滚动区内创建一个可点击按钮"""
+        frame = getattr(self, "_syscmd_custom_btns_frame", None)
+        if frame is None or not frame.winfo_exists():
+            return
+        btn = ttk.Button(
+            frame,
+            text=(cmd[:48] + "…") if len(cmd) > 48 else cmd,
+            style="Small.TButton",
+            command=lambda _c=cmd: self._syscmd_run_one(_c),
+        )
+        btn.pack(side="top", fill="x", padx=2, pady=2)
+        if not hasattr(self, "_syscmd_custom_buttons"):
+            self._syscmd_custom_buttons = []
+        self._syscmd_custom_buttons.append(btn)
+        canvas = getattr(self, "_syscmd_canvas", None)
+        if canvas and canvas.winfo_exists():
+            try:
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+
     def _syscmd_add_custom(self):
-        """将当前输入框内容添加到自定义指令列表，并同步到 Listbox"""
+        """将当前输入框内容添加到自定义指令列表，并同步到 Listbox 与按钮区"""
         try:
             cmd = (self._syscmd_custom_var.get() or "").strip()
         except Exception:
@@ -3687,6 +3829,19 @@ class UIComponents:
         if lb is not None and lb.winfo_exists():
             lb.insert(tk.END, cmd)
             lb.see(tk.END)
+        empty_lbl = getattr(self, "_syscmd_empty_lbl", None)
+        if empty_lbl and empty_lbl.winfo_exists():
+            empty_lbl.pack_forget()
+        self._syscmd_add_custom_button(cmd)
+        try:
+            c = getattr(self, "_syscmd_canvas", None)
+            if c and c.winfo_exists():
+                c.yview_moveto(1.0)
+            root = getattr(self, "root", None)
+            if root and root.winfo_exists():
+                root.update_idletasks()
+        except Exception:
+            pass
 
     def _syscmd_run_selected(self):
         """运行列表中选中的一条指令（直接执行不弹窗）"""
@@ -3704,7 +3859,7 @@ class UIComponents:
             self._syscmd_run_one(lst[idx])
 
     def _syscmd_delete_selected(self):
-        """删除列表中选中的一条指令"""
+        """删除列表中选中的一条指令（同时移除对应按钮）"""
         lb = getattr(self, "_syscmd_listbox", None)
         if lb is None or not lb.winfo_exists():
             messagebox.showinfo("提示", "请先在列表中选中要删除的指令")
@@ -3718,6 +3873,15 @@ class UIComponents:
             return
         self._syscmd_custom_list.pop(idx)
         lb.delete(idx)
+        btns = getattr(self, "_syscmd_custom_buttons", None)
+        if btns and idx < len(btns):
+            w = btns.pop(idx)
+            if w.winfo_exists():
+                w.destroy()
+        if not (getattr(self, "_syscmd_custom_list", None) or []):
+            empty_lbl = getattr(self, "_syscmd_empty_lbl", None)
+            if empty_lbl and empty_lbl.winfo_exists():
+                empty_lbl.pack(anchor="w")
 
     def _syscmd_run_custom(self, cmd: str):
         """运行输入框中的指令，直接执行不弹窗"""
@@ -3776,6 +3940,32 @@ class UIComponents:
         win = tk.Toplevel(self.root)
         win.title(f"{title} 结果")
         win.geometry("980x720")
+        # 与主窗口一致的图标（声测大师 logo）
+        try:
+            base_dir = self._get_runtime_base_dir()
+            for path in [
+                os.path.join(base_dir, "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
+            ]:
+                if path and os.path.exists(path):
+                    try:
+                        icon_img = tk.PhotoImage(file=path)
+                        win.iconphoto(True, icon_img)
+                        win._icon_image = icon_img
+                        break
+                    except Exception:
+                        pass
+            if platform.system() == "Windows":
+                for ico_path in [os.path.join(base_dir, "logo", "AcouTest.ico"), os.path.join("logo", "AcouTest.ico")]:
+                    if ico_path and os.path.exists(ico_path):
+                        try:
+                            win.iconbitmap(ico_path)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         try:
             win.bind("<Enter>", lambda e: win.focus_set(), add=True)
         except Exception:
@@ -3950,6 +4140,31 @@ class UIComponents:
         win = tk.Toplevel(self.root)
         win.title("设备解锁（Bootloader）/root&remount")
         win.geometry("980x720")
+        try:
+            base_dir = self._get_runtime_base_dir()
+            for path in [
+                os.path.join(base_dir, "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
+            ]:
+                if path and os.path.exists(path):
+                    try:
+                        icon_img = tk.PhotoImage(file=path)
+                        win.iconphoto(True, icon_img)
+                        win._icon_image = icon_img
+                        break
+                    except Exception:
+                        pass
+            if platform.system() == "Windows":
+                for ico_path in [os.path.join(base_dir, "logo", "AcouTest.ico"), os.path.join("logo", "AcouTest.ico")]:
+                    if ico_path and os.path.exists(ico_path):
+                        try:
+                            win.iconbitmap(ico_path)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         try:
             win.bind("<Enter>", lambda e: win.focus_set(), add=True)
         except Exception:
@@ -4351,8 +4566,9 @@ class UIComponents:
         ttk.Label(select_frame, text="设备:").pack(side="left", padx=5)
         
         self.device_var = tk.StringVar()
-        self.device_combobox = ttk.Combobox(select_frame, textvariable=self.device_var, width=30)
-        self.device_combobox.pack(side="left", padx=5)
+        # width 为最小显示字符数；fill+expand 让框占满「设备:」与「刷新」之间的空间，长序列号可完整显示
+        self.device_combobox = ttk.Combobox(select_frame, textvariable=self.device_var, width=28)
+        self.device_combobox.pack(side="left", fill="x", expand=True, padx=5)
         self.device_combobox.bind("<<ComboboxSelected>>", self.on_device_selected)
         
         refresh_button = ttk.Button(select_frame, text="刷新", command=self.refresh_devices, width=8)
@@ -5898,20 +6114,21 @@ class UIComponents:
             else:
                 subprocess.run("adb root", shell=True)
             
-            # 根据选择的音频源处理
-            if audio_source == "default":
-                # 使用默认7.1声道测试音频
-                audio_file = "audio/Nums_7dot1_16_48000.wav"
+            # 根据选择的音频源处理：7.1/2.1/2.0 使用 audio/channel/ 下对应文件，custom 使用用户选择文件
+            if audio_source in ("7.1", "2.1", "2.0"):
+                name_map = {"7.1": "Nums_7dot1_16_48000.wav", "2.1": "Nums_2dot1_16_48000.wav", "2.0": "Nums_2dot0_16_48000.wav"}
+                audio_name = name_map[audio_source]
+                base_dir = getattr(self, "_get_runtime_base_dir", lambda: os.getcwd())()
+                audio_file = os.path.join(base_dir, "audio", "channel", audio_name)
                 if not os.path.exists(audio_file):
                     msg = (
-                        "默认测试音频不存在：audio/Nums_7dot1_16_48000.wav\n\n"
-                        "请把对应的测试音频放到 audio 目录，或切换为“自定义音频”。"
+                        f"默认测试音频不存在：audio/channel/{audio_name}\n\n"
+                        "请将对应音频放到 audio/channel 目录，或使用「自定义音频」。"
                     )
                     getattr(self, "root", self.parent).after(0, lambda: messagebox.showerror("缺少音频文件", msg))
                     getattr(self, "root", self.parent).after(0, lambda: self.start_loopback_button.config(state="normal"))
                     getattr(self, "root", self.parent).after(0, lambda: self.stop_loopback_button.config(state="disabled"))
                     return
-                
                 if device_id:
                     subprocess.run(f"adb -s {device_id} push \"{audio_file}\" /sdcard/test_audio.wav", shell=True)
                 else:

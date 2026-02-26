@@ -284,9 +284,14 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         
         self.device_var = tk.StringVar()
         self.device_combobox = ttk.Combobox(device_frame, textvariable=self.device_var, 
-                                           width=20, state="readonly", font=("Arial", 9))
+                                           width=26, state="readonly", font=("Arial", 9))
         self.device_combobox.pack(side="left", padx=(0, 5))
         self.device_combobox.bind("<<ComboboxSelected>>", self.on_device_selected)
+        # 打开下拉前先刷新设备列表，换设备后点一下设备框即可看到新设备，无需再点「刷新」
+        def _refresh_before_dropdown(event=None):
+            self.refresh_devices()
+        self.device_combobox.bind("<Button-1>", _refresh_before_dropdown)
+        self.device_combobox.bind("<Down>", _refresh_before_dropdown)
         
         # 刷新按钮 - 调小字体
         refresh_btn = ttk.Button(device_frame, text="刷新", command=self.refresh_devices, width=6)

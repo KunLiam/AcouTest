@@ -62,6 +62,7 @@
 - **入口**：主界面 → 音频调试 → Logcat日志 子标签。
 - **logcat 属性管理**：可勾选/添加系统属性（如 `vendor.avdebug.debug`、`log.tag.APM_AudioPolicyManager` 等），通过“放开打印”/“停止打印”在设备上开启或关闭对应日志输出。
 - **日志抓取**：设置保存路径、自动停止时间（秒）、日志过滤（默认 `*:V`）后，点击“开始抓取”将设备 logcat 实时写入本地文件，点击“停止抓取”结束；支持“打开文件夹”打开日志目录。
+- **抓开机日志**：不要求先选设备。可直接点“开始抓取”（设备可为空或已断开）→ 后台先执行 `adb wait-for-device` 等待任意设备上线，检测到设备后自动开始抓取（可包含开机阶段日志）。若已选设备则等待该设备上线。等待中可点“停止抓取”取消。
 - **日志过滤器语法**（`TAG:PRIORITY`）：
   - TAG：日志标签，如 AudioFlinger、AudioPolicyManager 等。
   - PRIORITY：V(详细)、D(调试)、I(信息)、W(警告)、E(错误)、F(严重)、S(静默)。
@@ -105,8 +106,10 @@
   - 新增「剩余数量」按钮：可查看 U 盘中 key 剩余数量（需插 U 盘，调用 `elevoc_get_license_number()`）。
   - 烧录前二次确认：在 u盘烧key（烧大象Key）与 sn烧key（写入/替换 烧key）时，若检测到设备已有 key，会先弹窗「当前设备已有 key，是否确认覆盖烧录？」，避免误烧录。
 - **Logcat 日志**
-  - 抓取逻辑与 V1.5 一致：仅 `logcat -v threadtime` + 过滤，不指定 `-b`，直接写入文件，参数列表调用 adb 避免 `*` 被 shell 展开；开始抓取前使用 `check_device_selected()` 检查设备。
+  - 抓取逻辑：先后台执行 `adb -s <设备> wait-for-device` 等待设备上线，再启动 `adb logcat -v threadtime` 写入文件；支持设备已断开时点“开始抓取”，自动等设备上线后抓取（可抓开机日志）。仅需已选/输入设备序列号，不要求设备当前在线。
   - 音频调试 → Logcat 日志页面：两行操作按钮（放开打印/停止打印、开始抓取/停止抓取/打开文件夹）使用 grid 布局上下对齐。
+- **唤醒监测**
+  - 与「开始抓取」为两套独立逻辑：唤醒监测单独起 `adb -s <设备> logcat` 进程，实时过滤含「Detected hotword」行并计数。此前过滤为 `native:I` `*:S`，若设备从 Java 层或其他 tag 输出该日志会收不到；已改为 `*:I`，在代码中仍只统计含「Detected hotword」的行，避免漏检。
 - **音频调试 → 系统指令**
   - 新增“系统指令”子标签：预设 dumpsys media、tinymix、getprop 等按钮，支持自定义指令输入与运行；结果弹窗支持 Ctrl+F 搜索、刷新、保存；提供设备解锁（Bootloader 解锁 + root/remount）入口。
 - **遥控器**
