@@ -1458,6 +1458,11 @@ class UIComponents:
             acoustic_notebook.add(sweep_frame, text="扫频测试")
             self.setup_sweep_tab(sweep_frame)
 
+        if is_sub_tab_enabled("声学测试", "震音测试"):
+            jitter_frame = ttk.Frame(acoustic_notebook)
+            acoustic_notebook.add(jitter_frame, text="震音测试")
+            self.setup_jitter_tab(jitter_frame)
+
     def setup_hardware_tab(self, parent):
         """设置硬件测试标签页"""
         # 创建子标签页
@@ -2063,6 +2068,335 @@ class UIComponents:
                                 command=self.run_multichannel_test)
         start_button.pack(pady=20)
     
+    def setup_jitter_tab(self, parent):
+        """震音测试：播放指定音频，系统音量设为 20，测试完成后恢复原音量，人工判断通过/不通过"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+        
+        # 说明
+        desc = ttk.Label(
+            frame,
+            text="播放指定音频进行震音测试。\n播放前将设备系统音量设为 20，测试完成后自动恢复原音量。\n请根据听感人工判断测试是否通过。",
+            justify=tk.LEFT,
+        )
+        desc.pack(anchor="w", pady=(0, 10))
+        
+        # 测试音频路径（默认 audio/sound/80-1KHz-20S(-3dB).wav）
+        default_jitter_audio = os.path.join(
+            self._get_runtime_base_dir(),
+            "audio", "sound", "80-1KHz-20S(-3dB).wav"
+        )
+        path_frame = ttk.LabelFrame(frame, text="测试音频")
+        path_frame.pack(fill="x", pady=8)
+        self.jitter_audio_path_var = tk.StringVar(value=default_jitter_audio)
+        path_entry = ttk.Entry(path_frame, textvariable=self.jitter_audio_path_var, width=60)
+        path_entry.pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        ttk.Button(path_frame, text="浏览", command=self._browse_jitter_audio, width=6, style="Small.TButton").pack(side="left", padx=(0, 4), pady=6)
+        ttk.Button(
+            path_frame, text="打开位置",
+            command=lambda: self.open_containing_folder(self.jitter_audio_path_var.get()),
+            width=8, style="Small.TButton"
+        ).pack(side="left", padx=(0, 8), pady=6)
+        
+        # 操作按钮
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", pady=10)
+        self.jitter_start_btn = ttk.Button(btn_frame, text="开始震音测试", command=self.run_jitter_test, width=14)
+        self.jitter_start_btn.pack(side="left", padx=(0, 8))
+        self.jitter_stop_btn = ttk.Button(btn_frame, text="停止播放", command=self.stop_jitter_test, width=10, state="disabled")
+        self.jitter_stop_btn.pack(side="left", padx=(0, 8))
+        
+        # 人工判断（播放结束后显示）
+        result_frame = ttk.LabelFrame(frame, text="人工判断测试结果")
+        result_frame.pack(fill="x", pady=10)
+        self.jitter_result_var = tk.StringVar(value="请先完成震音测试播放后，根据听感点击下方按钮。")
+        ttk.Label(result_frame, textvariable=self.jitter_result_var, wraplength=500, justify=tk.LEFT).pack(anchor="w", padx=8, pady=(6, 4))
+        judge_frame = ttk.Frame(result_frame)
+        judge_frame.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(judge_frame, text="通过", command=self._jitter_judge_pass, width=8).pack(side="left", padx=(0, 8))
+        ttk.Button(judge_frame, text="不通过", command=self._jitter_judge_fail, width=8).pack(side="left", padx=(0, 8))
+        
+        # 状态
+        self.jitter_status_var = tk.StringVar(value="就绪")
+        ttk.Label(frame, textvariable=self.jitter_status_var, font=("Arial", 9)).pack(anchor="w", pady=6)
+        
+        # 过程日志（显示音量读取/设置结果与播放过程）
+        log_frame = ttk.LabelFrame(frame, text="震音测试日志")
+        log_frame.pack(fill="both", expand=True, pady=(2, 0))
+        self.jitter_log_text = tk.Text(log_frame, height=8, wrap="word", font=("Consolas", 9), state="disabled")
+        jitter_log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.jitter_log_text.yview)
+        self.jitter_log_text.configure(yscrollcommand=jitter_log_scroll.set)
+        self.jitter_log_text.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        jitter_log_scroll.pack(side="right", fill="y", padx=(0, 6), pady=6)
+        self._append_jitter_log("就绪，点击“开始震音测试”后将显示音量与播放日志。")
+    
+    def _browse_jitter_audio(self):
+        """浏览并选择震音测试音频文件（不依赖默认文件名或打包是否复制）"""
+        initial_dir = self.jitter_audio_path_var.get()
+        if initial_dir and os.path.isdir(os.path.dirname(initial_dir)):
+            initial_dir = os.path.dirname(initial_dir)
+        else:
+            initial_dir = os.path.join(self._get_runtime_base_dir(), "audio", "sound")
+        if not os.path.isdir(initial_dir):
+            initial_dir = self._get_runtime_base_dir()
+        path = filedialog.askopenfilename(
+            title="选择震音测试音频",
+            initialdir=initial_dir,
+            filetypes=[("WAV 文件", "*.wav"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.jitter_audio_path_var.set(path)
+            self.jitter_status_var.set("已选择: " + os.path.basename(path))
+            self._append_jitter_log(f"已选择测试音频: {path}")
+    
+    def _append_jitter_log(self, message):
+        """线程安全：在震音测试日志区域追加一行日志"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if root is None:
+            return
+        def _do():
+            txt = getattr(self, "jitter_log_text", None)
+            if not txt or not txt.winfo_exists():
+                return
+            txt.config(state="normal")
+            txt.insert("end", f"{message}\n")
+            try:
+                total_lines = int(txt.index("end-1c").split(".")[0])
+                if total_lines > 500:
+                    txt.delete("1.0", "2.0")
+            except Exception:
+                pass
+            txt.see("end")
+            txt.config(state="disabled")
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            root.after(0, _do)
+    
+    def _jitter_judge_pass(self):
+        """震音测试人工判定：通过"""
+        self.jitter_result_var.set("测试结果：通过")
+        self.jitter_status_var.set("震音测试已判定为通过")
+        self._append_jitter_log("人工判定结果: 通过")
+        messagebox.showinfo("震音测试", "已记录：通过")
+    
+    def _jitter_judge_fail(self):
+        """震音测试人工判定：不通过"""
+        self.jitter_result_var.set("测试结果：不通过")
+        self.jitter_status_var.set("震音测试已判定为不通过")
+        self._append_jitter_log("人工判定结果: 不通过")
+        messagebox.showinfo("震音测试", "已记录：不通过")
+    
+    def run_jitter_test(self):
+        """开始震音测试：保存当前音量 -> 设为 20 -> 推送并播放音频"""
+        if not self.check_device_selected():
+            return
+        path = (self.jitter_audio_path_var.get() or "").strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showerror(
+                "错误",
+                f"测试音频文件不存在：\n{path}\n\n请点击「浏览」选择本机上的震音测试音频文件（如 80-1KHz-20S(-3dB).wav），或将该文件放到 audio/sound 目录后重试。"
+            )
+            return
+        device_id = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        self.jitter_start_btn.config(state="disabled")
+        self.jitter_stop_btn.config(state="normal")
+        self.jitter_status_var.set("正在准备震音测试...")
+        self.jitter_result_var.set("请先完成震音测试播放后，根据听感点击下方按钮。")
+        if hasattr(self, "jitter_log_text") and self.jitter_log_text.winfo_exists():
+            self.jitter_log_text.config(state="normal")
+            self.jitter_log_text.delete("1.0", "end")
+            self.jitter_log_text.config(state="disabled")
+        self._append_jitter_log(f"开始测试，设备: {device_id or '默认设备'}")
+        self._append_jitter_log(f"测试音频: {path}")
+        threading.Thread(target=self._jitter_test_thread, args=(path, device_id), daemon=True).start()
+    
+    def _jitter_test_thread(self, path, device_id):
+        """震音测试后台：获取音量 -> 设为 20 -> 推送播放 -> 结束后恢复音量"""
+        try:
+            def adb_cmd(cmd):
+                if device_id:
+                    return subprocess.run(f"adb -s {device_id} {cmd}", shell=True, capture_output=True, text=True, timeout=15)
+                return subprocess.run(f"adb {cmd}", shell=True, capture_output=True, text=True, timeout=15)
+            
+            def get_system_volume():
+                """读取系统媒体音量，返回 (volume, raw_output)。volume 读取不到时为 None。"""
+                raw_outputs = []
+                for get_cmd in ["shell cmd media_session volume --get", "shell media volume --stream 3 --get"]:
+                    r = adb_cmd(get_cmd)
+                    out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+                    if out:
+                        raw_outputs.append(f"[{get_cmd}] {out}")
+                    simple = (r.stdout or "").strip()
+                    if simple.isdigit():
+                        return int(simple), " | ".join(raw_outputs)
+                    for part in simple.replace(":", " ").split():
+                        if part.isdigit():
+                            return int(part), " | ".join(raw_outputs)
+                return None, " | ".join(raw_outputs)
+            
+            # 1. 获取当前音量并保存（尝试 media_session 或 media volume）
+            saved_volume, raw_before = get_system_volume()
+            if saved_volume is None:
+                saved_volume = 0
+                self._append_jitter_log(f"读取当前音量失败，按 0 兜底。原始输出: {raw_before or '无'}")
+            else:
+                self._append_jitter_log(f"当前系统音量: {saved_volume}")
+            
+            # 2. 设置音量为 20
+            set_ok = False
+            for set_cmd in ["shell cmd media_session volume --set 20", "shell media volume --stream 3 --set 20"]:
+                if adb_cmd(set_cmd).returncode == 0:
+                    set_ok = True
+                    break
+            current_after_set, raw_after_set = get_system_volume()
+            self._append_jitter_log(f"设置系统音量到 20: {'成功' if set_ok else '可能失败'}")
+            if current_after_set is None:
+                self._append_jitter_log(f"设置后音量读取失败。原始输出: {raw_after_set or '无'}")
+            else:
+                self._append_jitter_log(f"设置后系统音量: {current_after_set}")
+            
+            root = getattr(self, "root", None) or getattr(self, "parent", None)
+            root.after(0, lambda: self.jitter_status_var.set("已设置音量为 20，正在推送并播放音频..."))
+            
+            # 3. 推送到设备并播放
+            remote_name = "jitter_test_audio.wav"
+            if device_id:
+                push_result = subprocess.run(
+                    f"adb -s {device_id} push \"{path}\" /sdcard/{remote_name}",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            else:
+                push_result = subprocess.run(
+                    f"adb push \"{path}\" /sdcard/{remote_name}",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            if push_result.returncode != 0:
+                raise RuntimeError(f"推送音频失败: {(push_result.stderr or push_result.stdout or '').strip()}")
+            self._append_jitter_log("音频推送成功，准备播放...")
+            
+            # 与扫频测试保持一致：播放前清理占用并重启 audioserver
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True, capture_output=True)
+                for _ in range(2):
+                    subprocess.run(f"adb -s {device_id} shell killall audioserver", shell=True, capture_output=True)
+                    time.sleep(0.5)
+                play_cmds = [
+                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name} -d 0",
+                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name} -D 0 -d 0",
+                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name}",
+                ]
+            else:
+                subprocess.run("adb shell killall tinyplay", shell=True, capture_output=True)
+                for _ in range(2):
+                    subprocess.run("adb shell killall audioserver", shell=True, capture_output=True)
+                    time.sleep(0.5)
+                play_cmds = [
+                    f"adb shell tinyplay /sdcard/{remote_name} -d 0",
+                    f"adb shell tinyplay /sdcard/{remote_name} -D 0 -d 0",
+                    f"adb shell tinyplay /sdcard/{remote_name}",
+                ]
+            
+            self._jitter_saved_volume = saved_volume
+            self._jitter_device_id = device_id
+            self.jitter_play_process = None
+            last_err = ""
+            for cmd in play_cmds:
+                self._append_jitter_log(f"尝试播放命令: {cmd}")
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                time.sleep(0.8)
+                if proc.poll() is None:
+                    self.jitter_play_process = proc
+                    self._append_jitter_log("tinyplay 已启动。")
+                    break
+                try:
+                    out, err = proc.communicate(timeout=1)
+                except Exception:
+                    out, err = ("", "")
+                last_err = (err or out or "").strip()
+                if last_err:
+                    self._append_jitter_log(f"该命令启动失败: {last_err[:200]}")
+            if self.jitter_play_process is None:
+                raise RuntimeError(f"播放失败（tinyplay）: {last_err[:200]}")
+            root.after(0, lambda: self.jitter_status_var.set("正在播放震音测试音频，请根据听感判断。播放结束后将自动恢复音量。"))
+            
+            # 4. 等待播放结束
+            self.jitter_play_process.wait()
+            self.jitter_play_process = None
+            
+            # 5. 恢复音量
+            for set_cmd in ["shell cmd media_session volume --set " + str(saved_volume), "shell media volume --stream 3 --set " + str(saved_volume)]:
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} {set_cmd}", shell=True, capture_output=True, timeout=5)
+                else:
+                    subprocess.run(f"adb {set_cmd}", shell=True, capture_output=True, timeout=5)
+            current_after_restore, raw_after_restore = get_system_volume()
+            if current_after_restore is None:
+                self._append_jitter_log(f"恢复后音量读取失败。原始输出: {raw_after_restore or '无'}")
+            else:
+                self._append_jitter_log(f"恢复后系统音量: {current_after_restore}")
+            
+            if root and root.winfo_exists():
+                root.after(0, self._jitter_test_finished)
+        except Exception as e:
+            root = getattr(self, "root", None) or getattr(self, "parent", None)
+            if root and root.winfo_exists():
+                root.after(0, lambda: self._jitter_test_error(str(e)))
+    
+    def _jitter_test_finished(self):
+        """震音测试播放结束：恢复 UI，提示人工判断"""
+        self.jitter_play_process = None
+        self.jitter_start_btn.config(state="normal")
+        self.jitter_stop_btn.config(state="disabled")
+        self.jitter_status_var.set("播放已结束，已恢复原音量。请根据听感点击「通过」或「不通过」。")
+        self.jitter_result_var.set("播放已结束，请根据听感点击「通过」或「不通过」。")
+        self._append_jitter_log("播放结束，已执行恢复音量。")
+    
+    def _jitter_test_error(self, err_msg):
+        """震音测试出错"""
+        self.jitter_play_process = None
+        self.jitter_start_btn.config(state="normal")
+        self.jitter_stop_btn.config(state="disabled")
+        self.jitter_status_var.set(f"震音测试出错: {err_msg}")
+        self._append_jitter_log(f"测试出错: {err_msg}")
+        messagebox.showerror("错误", f"震音测试出错:\n{err_msg}")
+    
+    def stop_jitter_test(self):
+        """停止震音测试播放并恢复音量"""
+        device_id = getattr(self, "_jitter_device_id", "")
+        try:
+            if device_id:
+                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True, capture_output=True, timeout=5)
+            else:
+                subprocess.run("adb shell killall tinyplay", shell=True, capture_output=True, timeout=5)
+        except Exception:
+            pass
+        if getattr(self, "jitter_play_process", None):
+            self.jitter_play_process = None
+        # 恢复音量
+        saved = getattr(self, "_jitter_saved_volume", None)
+        if saved is not None:
+            for set_cmd in ["shell cmd media_session volume --set " + str(saved), "shell media volume --stream 3 --set " + str(saved)]:
+                if device_id:
+                    subprocess.run(f"adb -s {device_id} {set_cmd}", shell=True, capture_output=True, timeout=5)
+                else:
+                    subprocess.run(f"adb {set_cmd}", shell=True, capture_output=True, timeout=5)
+        if hasattr(self, "jitter_start_btn") and self.jitter_start_btn.winfo_exists():
+            self.jitter_start_btn.config(state="normal")
+        if hasattr(self, "jitter_stop_btn") and self.jitter_stop_btn.winfo_exists():
+            self.jitter_stop_btn.config(state="disabled")
+        if hasattr(self, "jitter_status_var"):
+            self.jitter_status_var.set("已停止播放，已恢复原音量。")
+        if hasattr(self, "jitter_result_var"):
+            self.jitter_result_var.set("请先完成震音测试播放后，根据听感点击下方按钮。")
+        self._append_jitter_log("已手动停止播放，并执行恢复音量。")
+    
     def setup_local_playback_tab(self, parent):
         """设置本地播放选项卡"""
         frame = ttk.Frame(parent, padding=10)
@@ -2226,7 +2560,7 @@ class UIComponents:
         test_line1.pack(fill="x", padx=10, pady=2)
         
         ttk.Label(test_line1, text="录制时长(秒):").pack(side="left")
-        self.sweep_duration_var = tk.StringVar(value="5")
+        self.sweep_duration_var = tk.StringVar(value="15")
         ttk.Entry(test_line1, textvariable=self.sweep_duration_var, width=5).pack(side="left", padx=(5, 15))
         
         # 批量测试选项
@@ -5438,7 +5772,11 @@ class UIComponents:
             
             if sorted_files:
                 self.sweep_file_combobox['values'] = sorted_files
-                self.sweep_file_var.set(sorted_files[0])
+                preferred_file = "sweep_speech_48k.wav"
+                if preferred_file in sorted_files:
+                    self.sweep_file_var.set(preferred_file)
+                else:
+                    self.sweep_file_var.set(sorted_files[0])
                 if hasattr(self, 'update_sweep_info'):
                     self.update_sweep_info(f"已加载 {len(sorted_files)} 个大象扫频文件")
             else:
@@ -6088,9 +6426,20 @@ class UIComponents:
             self.stop_loopback_button.config(state="disabled")
 
     def open_containing_folder(self, file_path):
-        """打开包含指定文件的文件夹"""
+        """打开包含指定文件的文件夹；若目录不存在则先创建再打开，便于用户放入缺失的音频等"""
+        if not (file_path and isinstance(file_path, str)):
+            file_path = ""
         folder_path = os.path.dirname(file_path)
         try:
+            if not folder_path:
+                messagebox.showinfo("打开位置", "路径为空，无法打开。")
+                return
+            if not os.path.isdir(folder_path):
+                try:
+                    os.makedirs(folder_path, exist_ok=True)
+                except Exception as mkdir_e:
+                    messagebox.showerror("错误", f"目录不存在且无法创建：\n{folder_path}\n\n{mkdir_e}")
+                    return
             if platform.system() == "Windows":
                 os.startfile(folder_path)
             elif platform.system() == "Darwin":  # macOS

@@ -3,6 +3,9 @@ setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 chcp 65001 > nul
 
+:: 始终切换到 bat 所在目录（项目根），保证 audio\sound、dist、logo 等相对路径正确
+cd /d "%~dp0"
+
 echo 正在创建独立可执行文件...
 
 :: 检查Python是否已安装
@@ -92,6 +95,29 @@ if exist "dist\%EXE_NAME%.exe" (
     :: 复制logo目录
     if not exist "dist\logo" mkdir "dist\logo"
     xcopy /E /Y "logo" "dist\logo\" >nul 2>nul
+    
+    :: 复制震音测试等音频资源（打包后 exe 在 dist 下运行，需在 dist\audio\sound 下能找到 80-1KHz-20S(-3dB).wav）
+    if not exist "dist\audio" mkdir "dist\audio"
+    if not exist "dist\audio\sound" mkdir "dist\audio\sound"
+    if exist "audio\sound" (
+        echo 正在复制 audio\sound...
+        xcopy /E /Y "audio\sound\*.*" "dist\audio\sound\" >nul 2>nul
+    )
+    :: 显式复制震音测试音频（文件名含括号，用变量避免 batch 解析错误）
+    set "JITTER_WAV=80-1KHz-20S(-3dB).wav"
+    set "JITTER_SRC=audio\sound\!JITTER_WAV!"
+    set "JITTER_DST=dist\audio\sound\!JITTER_WAV!"
+    if exist "!JITTER_SRC!" (
+        copy /Y "!JITTER_SRC!" "dist\audio\sound\" >nul 2>nul
+        if !errorlevel! equ 0 (
+            echo 已复制震音测试音频: !JITTER_WAV!
+        ) else (
+            echo [警告] copy 失败，尝试 xcopy...
+            xcopy /Y "!JITTER_SRC!" "dist\audio\sound\" >nul 2>nul
+        )
+    ) else (
+        echo [提示] 未找到 audio\sound\!JITTER_WAV!，请将该文件放入 audio\sound 后重新运行打包。
+    )
     
     :: Loopback/Ref 录音已保存到 dist\output\loopback\，不再创建 dist\test
 
