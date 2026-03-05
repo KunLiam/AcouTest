@@ -123,9 +123,16 @@ class DeviceOperations:
     def get_adb_command(self, cmd):
         """获取完整的ADB命令"""
         if self.selected_device:
-            return f"adb -s {self.selected_device} {cmd}"
+            full_cmd = f"adb -s {self.selected_device} {cmd}"
         else:
-            return f"adb {cmd}"
+            full_cmd = f"adb {cmd}"
+        # 仅在 OpenClaw 触发上下文中记录 ADB 命令，避免污染普通手工操作日志
+        try:
+            if getattr(self, "_openclaw_action_context", "") and hasattr(self, "log_openclaw_adb"):
+                self.log_openclaw_adb(full_cmd)
+        except Exception:
+            pass
+        return full_cmd
 
     def execute_adb_command(self, cmd, capture_output=True):
         """执行ADB命令并返回结果"""

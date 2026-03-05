@@ -1544,10 +1544,75 @@ class UIComponents:
             common_notebook.add(screenshot_frame, text="截图功能")
             self.setup_screenshot_tab(screenshot_frame)
 
+        if is_sub_tab_enabled("常用功能", "OpenClaw"):
+            openclaw_frame = ttk.Frame(common_notebook)
+            common_notebook.add(openclaw_frame, text="OpenClaw")
+            self.setup_openclaw_tab(openclaw_frame)
+
         if is_sub_tab_enabled("常用功能", "账号登录"):
             account_login_frame = ttk.Frame(common_notebook)
             common_notebook.add(account_login_frame, text="账号登录")
             self.setup_account_login_tab(account_login_frame)
+
+    def setup_openclaw_tab(self, parent):
+        """OpenClaw 对接状态与日志面板。"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        top = ttk.LabelFrame(frame, text="连接状态")
+        top.pack(fill="x", pady=(0, 8))
+        ttk.Label(top, textvariable=getattr(self, "control_api_conn_var", tk.StringVar(value="OpenClaw: 未连接")),
+                  font=("Arial", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
+
+        api_host = "127.0.0.1"
+        api_port = "8765"
+        try:
+            if getattr(self, "control_api", None) and getattr(self.control_api, "actual_port", None):
+                api_host = str(getattr(self.control_api, "host", api_host))
+                api_port = str(getattr(self.control_api, "actual_port", api_port))
+        except Exception:
+            pass
+        info_txt = (
+            f"接口地址: http://{api_host}:{api_port}\n"
+            "请求头: X-Api-Token: acoutest-local-token"
+        )
+        ttk.Label(top, text=info_txt, justify="left", foreground="#666").pack(anchor="w", padx=8, pady=(0, 8))
+
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(0, 4))
+        ttk.Button(bar, text="清空日志", style="Small.TButton", command=lambda: self._clear_openclaw_log_text()).pack(side="left")
+
+        log_frame = ttk.LabelFrame(frame, text="OpenClaw 操作日志（含相关 ADB 命令）")
+        log_frame.pack(fill="both", expand=True)
+        self.openclaw_log_text = tk.Text(log_frame, height=14, font=("Consolas", 9), wrap="word", state="disabled")
+        y = ttk.Scrollbar(log_frame, orient="vertical", command=self.openclaw_log_text.yview)
+        self.openclaw_log_text.configure(yscrollcommand=y.set)
+        self.openclaw_log_text.pack(side="left", fill="both", expand=True)
+        y.pack(side="right", fill="y")
+        self._append_openclaw_log_text("OpenClaw 面板已就绪，等待连接。")
+
+    def _append_openclaw_log_text(self, line):
+        txt = getattr(self, "openclaw_log_text", None)
+        if not txt or not txt.winfo_exists():
+            return
+        try:
+            txt.config(state="normal")
+            txt.insert("end", f"{line}\n")
+            txt.see("end")
+            txt.config(state="disabled")
+        except Exception:
+            pass
+
+    def _clear_openclaw_log_text(self):
+        txt = getattr(self, "openclaw_log_text", None)
+        if not txt or not txt.winfo_exists():
+            return
+        try:
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.config(state="disabled")
+        except Exception:
+            pass
 
     def setup_acoustic_category(self, parent):
         """设置声学测试分类"""

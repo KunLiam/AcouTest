@@ -101,6 +101,11 @@
 
 ## 最近更新（V1.6）
 
+- **OpenClaw HTTP 控制接口**
+  - 新增本地 HTTP 接口服务，默认监听 `127.0.0.1:8765`，可供 OpenClaw 直接调用控制声测大师执行动作。
+  - 默认鉴权 token：`acoutest-local-token`（可通过环境变量 `ACOUTEST_API_TOKEN` 覆盖）。
+  - 支持动作：刷新设备、选择设备、开始/停止麦克风测试、开始/停止 logcat 抓取、开始/停止多声道测试、无弹窗截图。
+
 - **波形查看器（播放进度与时间轴对齐）**
   - 修复“红色播放进度线与真实音频时间不一致/看起来延迟”的问题：播放进度改为“高精度系统时钟实时驱动 + 播放器时间校准”，不再只依赖 `pygame.mixer.music.get_pos()`。
   - 进度刷新频率提升到约 30ms 一次，波形上的播放位置、点击光标位置与横轴秒数更稳定对应实际播放时间。
@@ -131,6 +136,41 @@
 2. 点击"刷新设备列表"按钮
 3. 从下拉列表选择要测试的设备
 4. 设备连接状态会在界面上显示
+
+### OpenClaw 控制（HTTP API）
+1. 启动 `声测大师` 后，程序会自动启动本地接口：`http://127.0.0.1:8765`（若端口占用会顺延到后续端口）。
+2. 主界面 `常用功能` 下新增 `OpenClaw` 子页：可看到连接状态、接口地址、实时请求日志。
+3. 主窗口底部状态栏会显示 `OpenClaw: 未连接 / 已连接`，并包含最近请求来源IP、时间和累计请求次数，便于确认是否已连通。
+4. `OpenClaw` 子页日志会打印 OpenClaw 请求与其触发的相关 ADB 命令，便于排查自动化动作是否正确执行。
+5. OpenClaw 调用时在请求头带上：`X-Api-Token: acoutest-local-token`（或你自定义的 token）。
+6. 常用接口：
+   - `GET /api/health`：健康检查（无需 token）
+   - `GET /api/actions`：查看支持动作
+   - `GET /api/devices`：获取设备列表和当前选择
+   - `GET /api/status`：获取当前运行状态
+   - `POST /api/action`：执行动作
+7. `POST /api/action` 请求体示例：
+   ```json
+   {
+     "action": "select_device",
+     "params": { "device_id": "192.168.1.10:5555" }
+   }
+   ```
+8. 可用动作（`action`）：
+   - `refresh_devices`
+   - `select_device`
+   - `start_mic_test`
+   - `stop_mic_test`
+   - `start_logcat_capture`
+   - `stop_logcat_capture`
+   - `run_multichannel_test`
+   - `stop_multichannel_test`
+   - `take_screenshot`
+9. 参数示例：
+   - `start_mic_test`：`{"mic_count":4,"pcm_device":0,"device_id":3,"rate":16000,"save_path":"D:/output/mic_test"}`
+   - `start_logcat_capture`：`{"save_path":"D:/output/logcat","filter":"*:V","auto_stop_seconds":60}`
+   - `run_multichannel_test`：`{"rate":48000,"bit":16,"preset":"7.1","play_device":0}`
+   - `take_screenshot`：`{"save_path":"D:/output/screenshots"}`
 
 ### 麦克风测试
 1. 选择"麦克风测试"选项卡

@@ -16,6 +16,7 @@ from test_operations import TestOperations
 from optional_deps import try_import_pygame
 from output_paths import get_output_dir, DIR_MIC_TEST
 from feature_config import APP_VERSION
+from control_api import AcouTestControlApi
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
@@ -100,6 +101,11 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         self.selected_device = None  # 当前选择的设备
         self.status_var = tk.StringVar(value="就绪")  # 初始化状态变量
         self.device_status_var = tk.StringVar(value="未检测到设备")  # 初始化设备状态变量
+        self.control_api_conn_var = tk.StringVar(value="OpenClaw: 未连接")
+        self._control_last_activity_ts = 0.0
+        self._control_last_client_ip = ""
+        self._control_request_count = 0
+        self._openclaw_action_context = ""
         
         # 尝试初始化 pygame 混音器（失败不影响其它功能）
         self._init_pygame_mixer()
@@ -112,6 +118,14 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
         # 键盘挂载：当应用获得焦点时，用电脑键盘通过 ADB 给设备输入
         self._setup_keyboard_adb_input()
+
+        # 启动本地 HTTP 控制接口（供 OpenClaw 调用）
+        self.control_api = None
+        self._start_control_api()
+        self._schedule_control_api_indicator_refresh()
+
+        # 关闭窗口时，先停接口服务再退出
+        self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         
         # 在__init__方法的最后
         try:
@@ -123,6 +137,99 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 print("Logo目录内容:", os.listdir(os.path.join(base_dir, "logo")))
         except Exception as e:
             print(f"检查目录结构时出错: {str(e)}")
+
+    def _start_control_api(self):
+        """启动本地控制接口服务。"""
+        host = os.environ.get("ACOUTEST_API_HOST", "127.0.0.1")
+        port_raw = os.environ.get("ACOUTEST_API_PORT", "8765")
+        token = os.environ.get("ACOUTEST_API_TOKEN", "acoutest-local-token")
+        try:
+            port = int(port_raw)
+        except Exception:
+            port = 8765
+        try:
+            self.control_api = AcouTestControlApi(self, host=host, port=port, token=token)
+            info = self.control_api.start()
+            print(f"控制接口已启动: http://{info['host']}:{info['port']}  token={info['token_hint']}")
+            try:
+                self.status_var.set(f"控制接口已启动 {info['host']}:{info['port']}")
+                self.control_api_conn_var.set(f"OpenClaw: 等待连接 ({info['host']}:{info['port']})")
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"控制接口启动失败: {e}")
+            try:
+                self.control_api_conn_var.set("OpenClaw: 接口启动失败")
+            except Exception:
+                pass
+
+    def on_control_api_activity(self, info):
+        """由控制接口线程回调，记录 OpenClaw 请求活动。"""
+        try:
+            self._control_last_activity_ts = float((info or {}).get("ts") or time.time())
+        except Exception:
+            self._control_last_activity_ts = time.time()
+        self._control_last_client_ip = str((info or {}).get("client_ip") or "")
+        try:
+            self._control_request_count = int((info or {}).get("request_count") or 0)
+        except Exception:
+            pass
+        try:
+            self.root.after(0, self._refresh_control_api_indicator)
+        except Exception:
+            pass
+
+    def append_openclaw_log(self, message):
+        """线程安全：追加一条 OpenClaw 日志到界面。"""
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {message}"
+        try:
+            if getattr(self, "root", None) and self.root.winfo_exists():
+                self.root.after(0, lambda: self._append_openclaw_log_text(line))
+        except Exception:
+            pass
+
+    def log_openclaw_adb(self, command):
+        """记录由 OpenClaw 触发的 ADB 命令。"""
+        action = (getattr(self, "_openclaw_action_context", "") or "").strip()
+        prefix = f"[{action}] " if action else ""
+        self.append_openclaw_log(f"{prefix}ADB: {command}")
+
+    def _schedule_control_api_indicator_refresh(self):
+        """每秒刷新 OpenClaw 连接状态文本。"""
+        try:
+            self._refresh_control_api_indicator()
+        finally:
+            if getattr(self, "root", None) and self.root.winfo_exists():
+                self.root.after(1000, self._schedule_control_api_indicator_refresh)
+
+    def _refresh_control_api_indicator(self):
+        now = time.time()
+        last_ts = float(getattr(self, "_control_last_activity_ts", 0.0) or 0.0)
+        ip = (getattr(self, "_control_last_client_ip", "") or "").strip()
+        cnt = int(getattr(self, "_control_request_count", 0) or 0)
+        if last_ts <= 0:
+            self.control_api_conn_var.set("OpenClaw: 未连接")
+            return
+        delta = max(0.0, now - last_ts)
+        if delta <= 15.0:
+            who = ip or "unknown"
+            self.control_api_conn_var.set(f"OpenClaw: 已连接 ({who}, {delta:.1f}s前, #{cnt})")
+        else:
+            who = ip or "unknown"
+            self.control_api_conn_var.set(f"OpenClaw: 未连接 (最近 {who}, {int(delta)}s前, #{cnt})")
+
+    def _on_app_close(self):
+        """应用关闭清理。"""
+        try:
+            if getattr(self, "control_api", None):
+                self.control_api.stop()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
         
     def ensure_directories(self):
         """确保必要的目录结构存在"""
@@ -359,6 +466,9 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         
         status_label = ttk.Label(status_bar, textvariable=self.status_var, font=("Arial", 9))
         status_label.pack(side="left")
+
+        claw_label = ttk.Label(status_bar, textvariable=self.control_api_conn_var, font=("Arial", 9), foreground="#666")
+        claw_label.pack(side="right", padx=(0, 12))
         
         version_label = ttk.Label(status_bar, text=f"V{APP_VERSION} | 软件信息", font=("Arial", 9), cursor="hand2")
         version_label.pack(side="right")
