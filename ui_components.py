@@ -3,6 +3,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import struct
+import math
+import wave
+from array import array
 import threading
 import time
 import subprocess
@@ -1756,11 +1759,30 @@ class UIComponents:
         self.loopback_rate_var = tk.StringVar(value="16000")
         ttk.Entry(grid_frame, textvariable=self.loopback_rate_var, width=10).grid(row=2, column=1, sticky="w", padx=5, pady=5)
         
+        # 播放设备ID（tinyplay -d）
+        ttk.Label(grid_frame, text="播放设备ID(-d):").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        self.loopback_play_device_var = tk.StringVar(value="0")
+        self.loopback_play_device_combo = ttk.Combobox(
+            grid_frame,
+            textvariable=self.loopback_play_device_var,
+            values=["0", "1"],
+            width=8,
+            state="normal",
+        )
+        self.loopback_play_device_combo.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        ttk.Button(
+            grid_frame,
+            text="读取alsaPORT播放设备",
+            width=18,
+            style="Small.TButton",
+            command=self._refresh_loopback_playback_devices,
+        ).grid(row=3, column=2, sticky="w", padx=5, pady=5)
+        
         # 添加保存路径设置
-        ttk.Label(grid_frame, text="保存路径:").grid(row=3, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(grid_frame, text="保存路径:").grid(row=4, column=0, sticky="e", padx=5, pady=5)
         self.loopback_save_path_var = tk.StringVar(value=get_output_dir(DIR_LOOPBACK))
         path_frame = ttk.Frame(grid_frame)
-        path_frame.grid(row=3, column=1, columnspan=3, sticky="w", padx=5, pady=5)
+        path_frame.grid(row=4, column=1, columnspan=3, sticky="w", padx=5, pady=5)
         
         path_entry = ttk.Entry(path_frame, textvariable=self.loopback_save_path_var, width=25)
         path_entry.pack(side="left", padx=2)
@@ -1864,6 +1886,68 @@ class UIComponents:
         
         self.loopback_status_var = tk.StringVar(value="就绪")
         ttk.Label(frame, textvariable=self.loopback_status_var, font=("Arial", 10)).pack(anchor="center", pady=10)
+    
+    def _query_alsaport_playback_indexes(self, device_id=""):
+        """读取 /proc/asound/pcm，返回可用于 tinyplay -d 的设备索引列表。"""
+        # 先尝试提权，避免读取 /proc/asound/pcm 时出现 Permission denied
+        try:
+            if device_id:
+                subprocess.run(f"adb -s {device_id} root", shell=True, capture_output=True, text=True, timeout=10)
+            else:
+                subprocess.run("adb root", shell=True, capture_output=True, text=True, timeout=10)
+            time.sleep(0.6)
+        except Exception:
+            pass
+        if device_id:
+            cmd = f"adb -s {device_id} shell cat /proc/asound/pcm"
+        else:
+            cmd = "adb shell cat /proc/asound/pcm"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return [], (result.stderr or result.stdout or "读取失败").strip()
+        lines = [ln.strip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+        preferred = []
+        fallback = []
+        for ln in lines:
+            m = re.match(r"^(\d+)-(\d+):\s*(.*)$", ln)
+            if not m:
+                continue
+            card, pcm, desc = m.group(1), m.group(2), m.group(3)
+            if "playback" not in desc.lower():
+                continue
+            item = (pcm, f"{pcm} (card{card}) {desc}")
+            if "alsaport-pcm" in desc.lower():
+                preferred.append(item)
+            else:
+                fallback.append(item)
+        chosen = preferred or fallback
+        values = []
+        detail = []
+        seen = set()
+        for pcm, txt in chosen:
+            if pcm in seen:
+                continue
+            seen.add(pcm)
+            values.append(pcm)
+            detail.append(txt)
+        return values, ("\n".join(detail) if detail else "未找到可用 playback 设备")
+    
+    def _refresh_loopback_playback_devices(self):
+        """读取当前设备的 alsaPORT 播放设备索引并更新 Loopback 播放设备下拉。"""
+        if not self.check_device_selected():
+            return
+        device_id = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        values, detail = self._query_alsaport_playback_indexes(device_id)
+        if values:
+            if hasattr(self, "loopback_play_device_combo") and self.loopback_play_device_combo.winfo_exists():
+                self.loopback_play_device_combo["values"] = values
+            cur = (getattr(self, "loopback_play_device_var", None) and self.loopback_play_device_var.get() or "").strip()
+            if cur not in values:
+                self.loopback_play_device_var.set(values[0])
+            self.loopback_status_var.set(f"已读取播放设备: {', '.join(values)}")
+        else:
+            self.loopback_status_var.set("未读取到播放设备，保留当前手动输入")
+        messagebox.showinfo("Loopback播放设备", detail)
     
     def setup_mic_tab(self, parent):
         """设置麦克风测试标签页"""
@@ -2014,6 +2098,15 @@ class UIComponents:
         )
         self.stop_mic_button.pack(side="left", padx=10)
         
+        self.view_mic_waveform_button = ttk.Button(
+            control_frame,
+            text="查看录音波形",
+            command=self.show_latest_mic_waveform,
+            width=16,
+            state="disabled",
+        )
+        self.view_mic_waveform_button.pack(side="left", padx=10)
+        
         # 状态显示框架
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill="x", pady=(10, 0))
@@ -2025,6 +2118,932 @@ class UIComponents:
         info_label.pack(pady=(6, 0))
         
         print("麦克风测试UI创建完成")
+    
+    def show_latest_mic_waveform(self):
+        """查看最近一次麦克风录音的波形（若无缓存路径则从保存目录找最新 wav）。"""
+        latest = getattr(self, "latest_mic_recording_path", "")
+        if latest and os.path.isfile(latest):
+            self.open_audio_waveform_viewer(latest, title="麦克风录音波形")
+            return
+        save_dir = (getattr(self, "mic_save_path_var", None) and self.mic_save_path_var.get() or "").strip()
+        if not save_dir or not os.path.isdir(save_dir):
+            messagebox.showwarning("提示", "暂无可查看的录音文件，请先完成一次麦克风录制。")
+            return
+        wav_files = []
+        for name in os.listdir(save_dir):
+            if name.lower().endswith(".wav"):
+                path = os.path.join(save_dir, name)
+                try:
+                    wav_files.append((os.path.getmtime(path), path))
+                except Exception:
+                    pass
+        if not wav_files:
+            messagebox.showwarning("提示", "保存目录中未找到 WAV 文件，请先录制。")
+            return
+        wav_files.sort(key=lambda x: x[0], reverse=True)
+        latest_path = wav_files[0][1]
+        self.latest_mic_recording_path = latest_path
+        self.open_audio_waveform_viewer(latest_path, title="麦克风录音波形")
+    
+    def _extract_wav_samples(self, raw_bytes, sample_width):
+        """将 WAV 原始字节转为 int 样本数组（支持 8/16/24/32bit PCM）。"""
+        if sample_width == 1:
+            vals = array("B")
+            vals.frombytes(raw_bytes)
+            return [v - 128 for v in vals]
+        if sample_width == 2:
+            vals = array("h")
+            vals.frombytes(raw_bytes)
+            if sys.byteorder != "little":
+                vals.byteswap()
+            return list(vals)
+        if sample_width == 4:
+            vals = array("i")
+            vals.frombytes(raw_bytes)
+            if sys.byteorder != "little":
+                vals.byteswap()
+            return list(vals)
+        if sample_width == 3:
+            out = []
+            mv = memoryview(raw_bytes)
+            for i in range(0, len(raw_bytes), 3):
+                b0 = mv[i]
+                b1 = mv[i + 1]
+                b2 = mv[i + 2]
+                v = b0 | (b1 << 8) | (b2 << 16)
+                if v & 0x800000:
+                    v -= 0x1000000
+                out.append(v)
+            return out
+        raise ValueError(f"暂不支持的采样位宽: {sample_width * 8}bit")
+    
+    def _build_wave_envelope(self, samples, channels, total_frames, points, full_scale):
+        """把交错多通道样本压缩为按像素显示的 min/max 包络。"""
+        points = max(200, min(points, total_frames))
+        per_channel = [[(0.0, 0.0)] * points for _ in range(channels)]
+        # 使用真实 full-scale 归一化（dBFS）：确保与 Adobe 的幅度标尺一致。
+        # 例如 16bit -> 32767, 24bit -> 8388607。
+        scale = float(max(1, int(full_scale)))
+        for x in range(points):
+            # 按总帧比例映射每个像素桶，避免整除分块导致尾段帧遗漏。
+            # 这能保证 [0, total_frames) 全区间都被覆盖，时间轴与波形长度严格对应。
+            start = int((x * total_frames) / float(points))
+            end = int(((x + 1) * total_frames) / float(points))
+            if end <= start:
+                end = start + 1
+            end = min(total_frames, end)
+            if start >= end:
+                continue
+            for ch in range(channels):
+                local_min = 1.0
+                local_max = -1.0
+                idx = start * channels + ch
+                for _ in range(start, end):
+                    v = samples[idx] / scale
+                    if v < local_min:
+                        local_min = v
+                    if v > local_max:
+                        local_max = v
+                    idx += channels
+                per_channel[ch][x] = (local_min, local_max)
+        return per_channel, points
+    
+    def _guess_wave_params(self, file_path):
+        """从文件名/界面参数推断通道数、采样率、位宽（用于损坏头修复）。"""
+        channels = 4
+        rate = 16000
+        bits = 16
+        try:
+            m = re.search(r"_(\d+)ch_", os.path.basename(file_path))
+            if m:
+                channels = max(1, int(m.group(1)))
+            elif hasattr(self, "mic_count_var") and self.mic_count_var.get():
+                channels = max(1, int(self.mic_count_var.get()))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "rate_var") and self.rate_var.get():
+                rate = max(1, int(self.rate_var.get()))
+        except Exception:
+            pass
+        return channels, rate, bits
+    
+    def _repair_wave_for_view(self, file_path):
+        """
+        修复无法直接解析的录音文件用于波形查看：
+        - 若非 RIFF，按“原始 PCM”补 WAV 头；
+        - 若 RIFF 头损坏，丢弃前 44 字节后按 PCM 重打包。
+        返回修复后的临时 wav 路径。
+        """
+        channels, rate, bits = self._guess_wave_params(file_path)
+        sample_width = max(1, bits // 8)
+        with open(file_path, "rb") as f:
+            raw = f.read()
+        if not raw:
+            raise ValueError("文件为空，无法解析")
+        if len(raw) >= 4 and raw[:4] == b"RIFF":
+            payload = raw[44:] if len(raw) > 44 else b""
+        else:
+            payload = raw
+        frame_bytes = channels * sample_width
+        usable = (len(payload) // frame_bytes) * frame_bytes
+        if usable <= 0:
+            raise ValueError("音频数据长度不足，无法按当前通道/位宽修复")
+        payload = payload[:usable]
+        fixed_name = f"acoutest_wavefix_{int(time.time()*1000)}_{os.path.basename(file_path)}"
+        fixed_path = os.path.join(tempfile.gettempdir(), fixed_name)
+        with wave.open(fixed_path, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(rate)
+            wf.writeframes(payload)
+        return fixed_path
+    
+    def open_audio_waveform_viewer(self, file_path, title="音频波形"):
+        """弹出窗口显示 WAV 波形（多通道分轨显示）。"""
+        if not os.path.isfile(file_path):
+            messagebox.showerror("错误", f"文件不存在：\n{file_path}")
+            return
+        display_path = file_path
+        repaired_note = ""
+        try:
+            with wave.open(display_path, "rb") as wf:
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                sample_rate = wf.getframerate()
+                total_frames = wf.getnframes()
+                raw = wf.readframes(total_frames)
+        except Exception:
+            try:
+                display_path = self._repair_wave_for_view(file_path)
+                repaired_note = "（原文件头异常，已自动修复后显示）"
+                with wave.open(display_path, "rb") as wf:
+                    channels = wf.getnchannels()
+                    sample_width = wf.getsampwidth()
+                    sample_rate = wf.getframerate()
+                    total_frames = wf.getnframes()
+                    raw = wf.readframes(total_frames)
+            except Exception as e:
+                messagebox.showerror("错误", f"解析音频波形失败：\n{e}")
+                return
+        try:
+            if total_frames <= 0:
+                raise ValueError("音频帧数为 0")
+            samples = self._extract_wav_samples(raw, sample_width)
+            bits = sample_width * 8
+            full_scale_map = {8: 127, 16: 32767, 24: 8388607, 32: 2147483647}
+            full_scale = full_scale_map.get(bits, (2 ** (bits - 1)) - 1)
+            peak_abs = max((abs(v) for v in samples), default=0)
+            if peak_abs <= 0:
+                peak_dbfs_text = "-inf"
+            else:
+                peak_dbfs_text = f"{20.0 * math.log10(peak_abs / float(max(1, full_scale))):.1f} dBFS"
+            # 提高基础包络分辨率，支持更细粒度缩放观察
+            target_points = min(50000, max(4000, total_frames // 2))
+            env, points = self._build_wave_envelope(samples, channels, total_frames, points=target_points, full_scale=full_scale)
+        except Exception as e:
+            messagebox.showerror("错误", f"解析音频波形失败：\n{e}")
+            return
+        win = tk.Toplevel(getattr(self, "root", None) or getattr(self, "parent", None) or self)
+        win.title(f"{title} - {os.path.basename(file_path)}")
+        win.geometry("1040x620")
+        # 与主窗口一致的图标（AcouTest logo）
+        try:
+            base_dir = self._get_runtime_base_dir()
+            png_paths = [
+                os.path.join(base_dir, "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
+            ]
+            for path in png_paths:
+                if path and os.path.exists(path):
+                    try:
+                        icon_img = tk.PhotoImage(file=path)
+                        win.iconphoto(True, icon_img)
+                        win._icon_image = icon_img
+                        break
+                    except Exception:
+                        pass
+            if platform.system() == "Windows":
+                ico_paths = [
+                    os.path.join(base_dir, "logo", "AcouTest.ico"),
+                    os.path.join("logo", "AcouTest.ico"),
+                ]
+                for ico_path in ico_paths:
+                    if os.path.exists(ico_path):
+                        try:
+                            win.iconbitmap(ico_path)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        info = (
+            f"文件: {file_path}\n"
+            f"采样率: {sample_rate} Hz    通道数: {channels}    位宽: {sample_width * 8} bit    "
+            f"时长: {total_frames / float(sample_rate):.2f} s    峰值: {peak_dbfs_text}"
+        )
+        if repaired_note:
+            info += f"\n{repaired_note}"
+        ttk.Label(win, text=info, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(8, 4))
+        
+        hint_var = tk.StringVar(value="操作：鼠标左键拖动选择区间；单击设光标；右键清除选区；Ctrl + 滚轮缩放时间轴")
+        ttk.Label(win, textvariable=hint_var, foreground="#666").pack(anchor="w", padx=10, pady=(0, 4))
+        
+        # 操作条：缩放 / dB增益 / 播放控制（类似 Adobe 的常用操作）
+        toolbar = ttk.Frame(win)
+        toolbar.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Label(toolbar, text="振幅缩放:", font=("Arial", 9)).pack(side="left")
+        btn_zoom_out = ttk.Button(toolbar, text="-", width=3)
+        btn_zoom_out.pack(side="left", padx=(4, 2))
+        btn_zoom_in = ttk.Button(toolbar, text="+", width=3)
+        btn_zoom_in.pack(side="left", padx=2)
+        btn_zoom_reset = ttk.Button(toolbar, text="1x", width=6)
+        btn_zoom_reset.pack(side="left", padx=(2, 10))
+        ttk.Label(toolbar, text="增益(dB):", font=("Arial", 9)).pack(side="left")
+        btn_gain_down = ttk.Button(toolbar, text="-", width=3)
+        btn_gain_down.pack(side="left", padx=(4, 2))
+        btn_gain_up = ttk.Button(toolbar, text="+", width=3)
+        btn_gain_up.pack(side="left", padx=2)
+        btn_gain_reset = ttk.Button(toolbar, text="0dB", width=6)
+        btn_gain_reset.pack(side="left", padx=(2, 10))
+        self._wave_play_btn = ttk.Button(toolbar, text="播放", width=6)
+        self._wave_play_btn.pack(side="left", padx=(8, 2))
+        self._wave_pause_btn = ttk.Button(toolbar, text="暂停", width=6)
+        self._wave_pause_btn.pack(side="left", padx=2)
+        self._wave_stop_btn = ttk.Button(toolbar, text="停止", width=6)
+        self._wave_stop_btn.pack(side="left", padx=2)
+        
+        canvas_wrap = ttk.Frame(win)
+        canvas_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        wave_row = ttk.Frame(canvas_wrap)
+        wave_row.pack(side="top", fill="both", expand=True)
+        hscroll = ttk.Scrollbar(canvas_wrap, orient="horizontal")
+        hscroll.pack(side="bottom", fill="x")
+        canvas = tk.Canvas(wave_row, bg="#101010", height=520, highlightthickness=0, xscrollcommand=hscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        db_canvas = tk.Canvas(wave_row, bg="#0f1510", width=74, height=520, highlightthickness=1, highlightbackground="#2a2a2a")
+        db_canvas.pack(side="right", fill="y")
+        
+        state = {
+            "zoom": None,
+            "total_width": 0,
+            "render_job": None,
+            "wave_tag": None,
+            "db_tag": None,
+            "gain_db": 0.0,
+            # 振幅按钮的离散档位（Adobe 风格）：每点一次按固定 dB 步进
+            "amp_db": 0.0,
+            "amp_scale": 1.0,
+            "is_playing": False,
+            "is_paused": False,
+            "cursor_time": 0.0,
+            "playback_time": 0.0,
+            "play_start_offset": 0.0,
+            "play_end_time": 0.0,
+            "progress_job": None,
+            "clock_anchor_time": 0.0,
+            "clock_anchor_perf": 0.0,
+            "first_valid_pos_seen": False,
+            "start_grace_until_perf": 0.0,
+            "click_dragged": False,
+            "click_start_x": 0,
+            "select_anchor_t": 0.0,
+            "sel_start_t": None,
+            "sel_end_t": None,
+            "selection_active": False,
+            "resume_from_cursor": False,
+            "left_px": 10,
+            "draw_points": 1,
+            "tracks_top": 34,
+            "tracks_bottom": 540,
+            "gain_play_path": "",
+            "gain_play_db": None,
+        }
+        total_duration = total_frames / float(sample_rate)
+
+        def _set_play_clock(anchor_time):
+            """用高精度时钟建立播放时间锚点（秒）。"""
+            state["clock_anchor_time"] = max(0.0, float(anchor_time))
+            state["clock_anchor_perf"] = time.perf_counter()
+
+        def _get_clock_time():
+            anchor = float(state.get("clock_anchor_time", 0.0))
+            anchor_perf = float(state.get("clock_anchor_perf", 0.0))
+            if anchor_perf <= 0.0:
+                return anchor
+            return anchor + max(0.0, time.perf_counter() - anchor_perf)
+        
+        def format_hms(seconds):
+            """格式化时间显示：h:mm:ss.mmm / mm:ss.mmm / s.mmm。"""
+            seconds = max(0.0, float(seconds))
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = seconds % 60.0
+            if h > 0:
+                return f"{h}:{m:02d}:{s:06.3f}"
+            if m > 0:
+                return f"{m:02d}:{s:06.3f}"
+            return f"{s:.3f}s"
+        
+        def choose_time_step(visible_sec):
+            """根据可见时长选取合适的时间网格步长。"""
+            candidates = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60]
+            target_lines = 10.0
+            target = max(visible_sec / target_lines, 0.001)
+            for step in candidates:
+                if step >= target:
+                    return step
+            return 120.0
+
+        def _x_to_time(x_canvas):
+            left_px = state.get("left_px", 10)
+            draw_pts = max(1, int(state.get("draw_points", 1)))
+            if x_canvas <= left_px:
+                return 0.0
+            t = ((x_canvas - left_px) / float(draw_pts)) * total_duration
+            return max(0.0, min(total_duration, t))
+
+        def _time_to_x(t):
+            left_px = state.get("left_px", 10)
+            draw_pts = max(1, int(state.get("draw_points", 1)))
+            tt = max(0.0, min(total_duration, float(t)))
+            return left_px + int((tt / max(1e-9, total_duration)) * draw_pts)
+        
+        def render():
+            state["render_job"] = None
+            win.update_idletasks()
+            view_w = max(600, canvas.winfo_width() - 20)
+            height = max(300, canvas.winfo_height() - 20)
+            left = 10
+            top = 10
+            ruler_h = 24
+            tracks_top = top + ruler_h
+            track_h = max(60, (height - ruler_h) // channels)
+            if state["zoom"] is None:
+                fit_zoom = view_w / float(max(1, points))
+                state["zoom"] = max(0.01, min(64.0, fit_zoom))
+            draw_points = max(view_w, int(points * state["zoom"]))
+            state["total_width"] = draw_points
+            state["left_px"] = left
+            state["draw_points"] = draw_points
+            state["tracks_top"] = tracks_top
+            state["tracks_bottom"] = tracks_top + track_h * channels
+            xview = canvas.xview()
+            if not xview:
+                xview = (0.0, min(1.0, view_w / float(max(1, draw_points))))
+            vis_l = int(max(0.0, min(1.0, xview[0])) * draw_points)
+            vis_r = int(max(0.0, min(1.0, xview[1])) * draw_points)
+            if vis_r <= vis_l:
+                vis_l, vis_r = 0, min(draw_points, view_w)
+            margin = 160
+            draw_l = max(0, vis_l - margin)
+            draw_r = min(draw_points, vis_r + margin)
+            
+            # 双图层重绘：先画新层，再删旧层，避免 Ctrl+滚轮时闪黑
+            new_wave_tag = f"wave_{time.time_ns()}"
+            new_db_tag = f"db_{time.time_ns()}"
+            wc = {
+                "rect": lambda *a, **k: canvas.create_rectangle(*a, tags=(new_wave_tag,), **k),
+                "line": lambda *a, **k: canvas.create_line(*a, tags=(new_wave_tag,), **k),
+                "text": lambda *a, **k: canvas.create_text(*a, tags=(new_wave_tag,), **k),
+            }
+            dc = {
+                "rect": lambda *a, **k: db_canvas.create_rectangle(*a, tags=(new_db_tag,), **k),
+                "line": lambda *a, **k: db_canvas.create_line(*a, tags=(new_db_tag,), **k),
+                "text": lambda *a, **k: db_canvas.create_text(*a, tags=(new_db_tag,), **k),
+            }
+            
+            wc["rect"](0, 0, left + draw_points + 20, tracks_top + track_h * channels + 10, outline="", fill="#101010")
+            wc["rect"](left, top, left + draw_points, top + ruler_h, outline="#303030", fill="#171717")
+
+            # 选区高亮（类似 Adobe 的时间段选择）
+            sel_s = state.get("sel_start_t", None)
+            sel_e = state.get("sel_end_t", None)
+            if sel_s is not None and sel_e is not None and abs(sel_e - sel_s) > 1e-6:
+                sx = _time_to_x(min(sel_s, sel_e))
+                ex = _time_to_x(max(sel_s, sel_e))
+                if ex > sx:
+                    wc["rect"](sx, top, ex, tracks_top + track_h * channels, outline="", fill="#d8d8d8", stipple="gray25")
+                    wc["line"](sx, top, sx, tracks_top + track_h * channels, fill="#b04040")
+                    wc["line"](ex, top, ex, tracks_top + track_h * channels, fill="#b04040")
+            
+            # 时间轴网格（HMS）
+            vis_start_t = (vis_l / float(max(1, draw_points))) * total_duration
+            vis_end_t = (vis_r / float(max(1, draw_points))) * total_duration
+            vis_sec = max(0.001, vis_end_t - vis_start_t)
+            time_step = choose_time_step(vis_sec)
+            first_tick = (int(vis_start_t / time_step) * time_step)
+            if first_tick < vis_start_t:
+                first_tick += time_step
+            t = first_tick
+            while t <= vis_end_t + 1e-9:
+                x = left + int((t / max(1e-9, total_duration)) * draw_points)
+                wc["line"](x, top + ruler_h, x, tracks_top + track_h * channels, fill="#1f2f1f")
+                wc["line"](x, top + ruler_h - 7, x, top + ruler_h, fill="#8a8a8a")
+                wc["text"](x + 2, top + 2, anchor="nw", fill="#bfbfbf", text=format_hms(t), font=("Consolas", 8))
+                t += time_step
+            wc["text"](left + 4, top + ruler_h - 2, anchor="sw", fill="#8a8a8a", text="HMS", font=("Consolas", 8))
+            
+            # dBFS 背景刻度固定：无论振幅缩放/增益如何，背景网格和右侧标尺都保持不变
+            db_levels = [-3, -6, -9, -12, -15]
+            min_label_gap = 10
+            for ch in range(channels):
+                y0 = tracks_top + ch * track_h
+                y1 = y0 + track_h - 8
+                center = (y0 + y1) / 2.0
+                base_amp = max(8.0, (y1 - y0) * 0.45)
+                gain_scale = 10 ** (state["gain_db"] / 20.0)
+                wave_amp = base_amp * gain_scale * state["amp_scale"]
+                wc["rect"](left + draw_l, y0, left + draw_r, y1, outline="#303030")
+                wc["line"](left + draw_l, center, left + draw_r, center, fill="#2a2a2a")
+                wc["text"](left + 4, y0 + 10, anchor="w", fill="#A0A0A0", text=f"CH{ch + 1}", font=("Consolas", 9))
+                
+                # dB 网格线（固定背景）
+                for db in db_levels:
+                    ratio = 10 ** (db / 20.0)
+                    y_up = center - base_amp * ratio
+                    y_dn = center + base_amp * ratio
+                    wc["line"](left + draw_l, y_up, left + draw_r, y_up, fill="#244224")
+                    wc["line"](left + draw_l, y_dn, left + draw_r, y_dn, fill="#244224")
+                wc["line"](left + draw_l, center, left + draw_r, center, fill="#2f6f2f")
+                
+                color = "#3ECF8E" if ch % 2 == 0 else "#56B6F7"
+                for i in range(draw_l, draw_r):
+                    # 关键修复：缩小时按区间取包络，避免“只取单点”导致波形发黑/看不见
+                    src_start = int(i / state["zoom"])
+                    src_end = int((i + 1) / state["zoom"])
+                    if src_end <= src_start:
+                        src_end = src_start + 1
+                    src_start = max(0, min(points - 1, src_start))
+                    src_end = max(src_start + 1, min(points, src_end))
+                    if src_end - src_start == 1:
+                        vmin, vmax = env[ch][src_start]
+                    else:
+                        vmin = 1.0
+                        vmax = -1.0
+                        seg = env[ch]
+                        for k in range(src_start, src_end):
+                            a, b = seg[k]
+                            if a < vmin:
+                                vmin = a
+                            if b > vmax:
+                                vmax = b
+                    x = left + i
+                    y_min = center - vmax * wave_amp
+                    y_max = center - vmin * wave_amp
+                    # 每个通道独立裁剪：振幅再大也不允许越过本通道边界
+                    y_min = max(y0 + 1, min(y1 - 1, y_min))
+                    y_max = max(y0 + 1, min(y1 - 1, y_max))
+                    wc["line"](x, y_min, x, y_max, fill=color)
+            
+            # 点击定位线（黄色）+ 播放进度线（红色）
+            if total_duration > 0:
+                cx = left + int((max(0.0, min(total_duration, state.get("cursor_time", 0.0))) / total_duration) * draw_points)
+                px = left + int((max(0.0, min(total_duration, state.get("playback_time", 0.0))) / total_duration) * draw_points)
+                wc["line"](cx, top, cx, tracks_top + track_h * channels, fill="#f0c040")
+                wc["line"](px, top, px, tracks_top + track_h * channels, fill="#ff4444")
+            canvas.config(scrollregion=(0, 0, left + draw_points + 20, tracks_top + track_h * channels + 10))
+            
+            # 固定右侧 dB 面板（不随横向滚动变化）
+            db_w = max(60, db_canvas.winfo_width())
+            dc["rect"](0, 0, db_w, tracks_top + track_h * channels + 10, outline="", fill="#0f1510")
+            dc["rect"](0, top, db_w, top + ruler_h, outline="#303030", fill="#171717")
+            dc["text"](db_w // 2, top + ruler_h - 2, anchor="s", fill="#6ea56e", text="dBFS", font=("Consolas", 8))
+            for ch in range(channels):
+                y0 = tracks_top + ch * track_h
+                y1 = y0 + track_h - 8
+                center = (y0 + y1) / 2.0
+                base_amp = max(8.0, (y1 - y0) * 0.45)
+                dc["rect"](0, y0, db_w, y1, outline="#2a2a2a")
+                last_label_y = None
+                # 右侧 dB 文本随振幅缩放/增益联动：
+                # 与 Adobe 观感一致：
+                # - 振幅放大(amp_scale 增大) -> 标签应变得更“负”
+                # - 振幅缩小(amp_scale 减小) -> 标签应变得更“正”
+                # 因此使用负号偏移；增益正值也按同方向处理（更“负”）
+                db_offset = -(float(state.get("amp_db", 0.0)) + float(state.get("gain_db", 0.0)))
+                for db in db_levels:
+                    ratio = 10 ** (db / 20.0)
+                    y_up = center - base_amp * ratio
+                    y_dn = center + base_amp * ratio
+                    dc["line"](0, y_up, db_w, y_up, fill="#244224")
+                    dc["line"](0, y_dn, db_w, y_dn, fill="#244224")
+                    if last_label_y is None or abs(y_up - last_label_y) >= min_label_gap:
+                        # 不再强行截断到 0 dB，避免大振幅时右侧刻度全部显示为 0
+                        shown_db = db + db_offset
+                        db_text = f"{shown_db:+.0f}"
+                        dc["text"](db_w - 4, y_up, anchor="e", fill="#8fcf8f", text=db_text, font=("Consolas", 8))
+                        dc["text"](db_w - 4, y_dn, anchor="e", fill="#8fcf8f", text=db_text, font=("Consolas", 8))
+                        last_label_y = y_up
+                dc["text"](db_w - 4, center, anchor="e", fill="#8fcf8f", text="-inf", font=("Consolas", 8))
+                dc["text"](4, y0 + 2, anchor="w", fill="#6ea56e", text=f"CH{ch+1}", font=("Consolas", 8))
+            
+            # 新层画完再替换旧层，避免闪烁
+            old_wave = state.get("wave_tag")
+            old_db = state.get("db_tag")
+            if old_wave:
+                canvas.delete(old_wave)
+            if old_db:
+                db_canvas.delete(old_db)
+            state["wave_tag"] = new_wave_tag
+            state["db_tag"] = new_db_tag
+            hint_var.set(
+                f"操作：左键拖动选区/单击设光标/右键清选区；Ctrl+滚轮缩放（当前 {state['zoom']:.2f}x）"
+                f"；振幅 {state['amp_scale']:.2f}x({state['amp_db']:+.1f}dB)；增益 {state['gain_db']:+.1f} dB"
+            )
+        
+        def request_render(delay=1):
+            if state["render_job"] is not None:
+                try:
+                    win.after_cancel(state["render_job"])
+                except Exception:
+                    pass
+            state["render_job"] = win.after(delay, render)
+        
+        def on_drag_start(event):
+            state["click_dragged"] = False
+            state["click_start_x"] = event.x
+            anchor_t = _x_to_time(canvas.canvasx(event.x))
+            state["select_anchor_t"] = anchor_t
+            state["sel_start_t"] = anchor_t
+            state["sel_end_t"] = anchor_t
+            state["selection_active"] = True
+            request_render(1)
+        
+        def on_drag_move(event):
+            if abs(event.x - state.get("click_start_x", event.x)) > 4:
+                state["click_dragged"] = True
+            cur_t = _x_to_time(canvas.canvasx(event.x))
+            state["sel_start_t"] = min(state.get("select_anchor_t", cur_t), cur_t)
+            state["sel_end_t"] = max(state.get("select_anchor_t", cur_t), cur_t)
+            request_render(1)
+        
+        def on_click_release(event):
+            # 点击（非拖动）时设置播放起点
+            if state.get("click_dragged", False):
+                sel_s = state.get("sel_start_t", None)
+                sel_e = state.get("sel_end_t", None)
+                if sel_s is not None and sel_e is not None and (sel_e - sel_s) >= 0.01:
+                    state["selection_active"] = True
+                    state["cursor_time"] = sel_s
+                    if not state.get("is_playing", False):
+                        state["playback_time"] = sel_s
+                else:
+                    state["sel_start_t"] = None
+                    state["sel_end_t"] = None
+                    state["selection_active"] = False
+                request_render(1)
+                return
+            t = _x_to_time(canvas.canvasx(event.x))
+            # 单击：清除选区，只保留光标
+            state["sel_start_t"] = None
+            state["sel_end_t"] = None
+            state["selection_active"] = False
+            state["cursor_time"] = t
+            if not state.get("is_playing", False):
+                state["playback_time"] = t
+            request_render(1)
+
+        def clear_selection(_event=None):
+            state["sel_start_t"] = None
+            state["sel_end_t"] = None
+            state["selection_active"] = False
+            request_render(1)
+        
+        def on_ctrl_wheel(event=None, direction=None):
+            if direction is None:
+                if event is None:
+                    return
+                direction = 1 if getattr(event, "delta", 0) > 0 else -1
+            old_zoom = state["zoom"]
+            new_zoom = old_zoom * (1.2 if direction > 0 else (1 / 1.2))
+            new_zoom = max(0.01, min(64.0, new_zoom))
+            if abs(new_zoom - old_zoom) < 1e-6:
+                return
+            xview = canvas.xview()
+            center = (xview[0] + xview[1]) / 2.0 if xview else 0.0
+            state["zoom"] = new_zoom
+            span = max(1e-6, (xview[1] - xview[0]) if xview else 1.0)
+            span = min(1.0, max(1e-6, span * (old_zoom / new_zoom)))
+            new_left = max(0.0, min(1.0 - span, center - span / 2.0))
+            canvas.xview_moveto(new_left)
+            request_render(8)
+        
+        def zoom_step(direction):
+            # 工具条“缩放”按用户期望改为振幅缩放；时间缩放保留 Ctrl+滚轮
+            # 每次固定 6 dB 步进：右侧 dB 全体平移更符合你给出的实际规律
+            step_db = 6.0
+            state["amp_db"] = max(-36.0, min(72.0, state.get("amp_db", 0.0) + (step_db if direction > 0 else -step_db)))
+            state["amp_scale"] = 10 ** (state["amp_db"] / 20.0)
+            request_render(1)
+        
+        def zoom_reset():
+            state["amp_db"] = 0.0
+            state["amp_scale"] = 1.0
+            request_render(1)
+        
+        def gain_step(direction):
+            state["gain_db"] = max(-24.0, min(24.0, state["gain_db"] + (1.5 * direction)))
+            request_render(1)
+            _restart_playback_with_current_gain()
+        
+        def gain_reset():
+            state["gain_db"] = 0.0
+            request_render(1)
+            _restart_playback_with_current_gain()
+        
+        def _get_pg():
+            getter = getattr(self, "_get_pygame", None)
+            if callable(getter):
+                try:
+                    return getter()
+                except Exception:
+                    return None
+            return None
+        
+        def _samples_to_bytes(vals, sw):
+            """将整数样本写回 PCM 字节流（支持 8/16/24/32bit）。"""
+            bits_local = sw * 8
+            max_v = (1 << (bits_local - 1)) - 1
+            min_v = -(1 << (bits_local - 1))
+            if sw == 1:
+                out = bytearray()
+                for v in vals:
+                    vv = max(min_v, min(max_v, int(v)))
+                    out.append(max(0, min(255, vv + 128)))
+                return bytes(out)
+            if sw == 2:
+                arr = array("h", (max(min_v, min(max_v, int(v))) for v in vals))
+                if sys.byteorder != "little":
+                    arr.byteswap()
+                return arr.tobytes()
+            if sw == 4:
+                arr = array("i", (max(min_v, min(max_v, int(v))) for v in vals))
+                if sys.byteorder != "little":
+                    arr.byteswap()
+                return arr.tobytes()
+            if sw == 3:
+                out = bytearray()
+                for v in vals:
+                    vv = max(min_v, min(max_v, int(v)))
+                    if vv < 0:
+                        vv += 1 << 24
+                    out.extend((vv & 0xFF, (vv >> 8) & 0xFF, (vv >> 16) & 0xFF))
+                return bytes(out)
+            raise ValueError(f"不支持的样本位宽: {sw}")
+        
+        def _build_gain_playback_file(gdb):
+            """按当前增益生成临时播放文件；0dB 时直接用原文件。"""
+            if abs(gdb) < 0.05:
+                return display_path
+            rounded = round(gdb, 2)
+            if state.get("gain_play_path") and state.get("gain_play_db") == rounded and os.path.exists(state["gain_play_path"]):
+                return state["gain_play_path"]
+            gain_factor = 10 ** (gdb / 20.0)
+            bits_local = sample_width * 8
+            max_v = (1 << (bits_local - 1)) - 1
+            min_v = -(1 << (bits_local - 1))
+            boosted = []
+            for v in samples:
+                vv = int(round(v * gain_factor))
+                if vv > max_v:
+                    vv = max_v
+                elif vv < min_v:
+                    vv = min_v
+                boosted.append(vv)
+            pcm_bytes = _samples_to_bytes(boosted, sample_width)
+            if state.get("gain_play_path"):
+                try:
+                    os.remove(state["gain_play_path"])
+                except Exception:
+                    pass
+            temp_name = f"acoutest_gainplay_{int(time.time()*1000)}.wav"
+            temp_path = os.path.join(tempfile.gettempdir(), temp_name)
+            with wave.open(temp_path, "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(sample_width)
+                wf.setframerate(sample_rate)
+                wf.writeframes(pcm_bytes)
+            state["gain_play_path"] = temp_path
+            state["gain_play_db"] = rounded
+            return temp_path
+        
+        def play_audio():
+            pg = _get_pg()
+            if not pg:
+                messagebox.showwarning("播放不可用", "当前环境未启用音频播放依赖（pygame）。")
+                return
+            try:
+                if state["is_paused"]:
+                    pg.mixer.music.unpause()
+                    state["is_paused"] = False
+                    state["is_playing"] = True
+                    _set_play_clock(state.get("playback_time", 0.0))
+                    _schedule_progress()
+                    return
+                sel_s = state.get("sel_start_t", None)
+                sel_e = state.get("sel_end_t", None)
+                use_selection = (
+                    (not state.get("resume_from_cursor", False))
+                    and sel_s is not None and sel_e is not None and (sel_e - sel_s) >= 0.01
+                )
+                if use_selection:
+                    start_at = max(0.0, min(total_duration, min(sel_s, sel_e)))
+                    play_end = max(0.0, min(total_duration, max(sel_s, sel_e)))
+                else:
+                    start_at = max(0.0, min(total_duration, state.get("cursor_time", 0.0)))
+                    if (
+                        sel_s is not None and sel_e is not None and
+                        min(sel_s, sel_e) <= start_at <= max(sel_s, sel_e)
+                    ):
+                        play_end = max(sel_s, sel_e)
+                    else:
+                        play_end = total_duration
+                state["resume_from_cursor"] = False
+                play_source = _build_gain_playback_file(state.get("gain_db", 0.0))
+                pg.mixer.music.load(play_source)
+                started = False
+                try:
+                    pg.mixer.music.play(start=start_at)
+                    started = True
+                except Exception:
+                    pg.mixer.music.play()
+                    if start_at > 0:
+                        try:
+                            pg.mixer.music.set_pos(start_at)
+                            started = True
+                        except Exception:
+                            started = False
+                if not started and start_at > 0:
+                    messagebox.showwarning("提示", "当前音频格式不支持精确跳转播放，已从开头播放。")
+                    start_at = 0.0
+                state["play_start_offset"] = start_at
+                state["play_end_time"] = max(start_at, play_end)
+                state["playback_time"] = start_at
+                state["is_playing"] = True
+                state["is_paused"] = False
+                state["first_valid_pos_seen"] = False
+                state["start_grace_until_perf"] = time.perf_counter() + 1.0
+                _set_play_clock(start_at)
+                self._wave_pause_btn.config(text="暂停")
+                _schedule_progress()
+            except Exception as e:
+                messagebox.showerror("播放失败", f"播放音频失败：\n{e}")
+        
+        def _restart_playback_with_current_gain():
+            """播放中调整增益时，从当前进度无缝重启播放到新增益版本。"""
+            if not state.get("is_playing", False):
+                return
+            pg = _get_pg()
+            if not pg:
+                return
+            cur_t = state.get("playback_time", 0.0)
+            try:
+                pg.mixer.music.stop()
+            except Exception:
+                pass
+            state["is_playing"] = False
+            state["is_paused"] = False
+            state["cursor_time"] = cur_t
+            state["resume_from_cursor"] = True
+            self._wave_pause_btn.config(text="暂停")
+            play_audio()
+        
+        def pause_resume_audio():
+            pg = _get_pg()
+            if not pg:
+                return
+            try:
+                if state["is_playing"] and not state["is_paused"]:
+                    state["playback_time"] = max(0.0, min(total_duration, _get_clock_time()))
+                    pg.mixer.music.pause()
+                    state["is_paused"] = True
+                    self._wave_pause_btn.config(text="继续")
+                elif state["is_paused"]:
+                    pg.mixer.music.unpause()
+                    state["is_paused"] = False
+                    _set_play_clock(state.get("playback_time", 0.0))
+                    self._wave_pause_btn.config(text="暂停")
+                    _schedule_progress()
+            except Exception:
+                pass
+        
+        def stop_audio():
+            pg = _get_pg()
+            if not pg:
+                return
+            try:
+                pg.mixer.music.stop()
+            except Exception:
+                pass
+            state["is_playing"] = False
+            state["is_paused"] = False
+            state["playback_time"] = state.get("cursor_time", 0.0)
+            state["play_end_time"] = state.get("playback_time", 0.0)
+            self._wave_pause_btn.config(text="暂停")
+            if state.get("progress_job") is not None:
+                try:
+                    win.after_cancel(state["progress_job"])
+                except Exception:
+                    pass
+                state["progress_job"] = None
+            request_render(1)
+        
+        def _schedule_progress():
+            if state.get("progress_job") is not None:
+                try:
+                    win.after_cancel(state["progress_job"])
+                except Exception:
+                    pass
+            state["progress_job"] = win.after(30, _update_progress)
+        
+        def _update_progress():
+            state["progress_job"] = None
+            if not state.get("is_playing", False) or state.get("is_paused", False):
+                return
+            pg = _get_pg()
+            if not pg:
+                return
+            now_perf = time.perf_counter()
+            clock_t = max(0.0, min(total_duration, _get_clock_time()))
+            try:
+                pos_ms = pg.mixer.music.get_pos()
+            except Exception:
+                pos_ms = -1
+            try:
+                is_busy = bool(pg.mixer.music.get_busy())
+            except Exception:
+                is_busy = False
+            if pos_ms >= 0:
+                pos_t = state.get("play_start_offset", 0.0) + (pos_ms / 1000.0)
+                if not state.get("first_valid_pos_seen", False):
+                    # 首次拿到有效播放器时间，校准时钟原点，减少启动抖动/偏移。
+                    state["first_valid_pos_seen"] = True
+                    _set_play_clock(pos_t)
+                    clock_t = pos_t
+                else:
+                    drift = pos_t - clock_t
+                    if abs(drift) > 0.12:
+                        _set_play_clock(pos_t)
+                        clock_t = pos_t
+                    else:
+                        clock_t = max(clock_t, pos_t)
+            elif (not is_busy) and now_perf >= float(state.get("start_grace_until_perf", 0.0)):
+                state["is_playing"] = False
+                state["is_paused"] = False
+                self._wave_pause_btn.config(text="暂停")
+                request_render(1)
+                return
+            state["playback_time"] = max(0.0, min(total_duration, clock_t))
+            if state["playback_time"] >= max(state.get("play_start_offset", 0.0), state.get("play_end_time", total_duration)) - 0.02:
+                state["cursor_time"] = max(state.get("play_start_offset", 0.0), state.get("play_end_time", total_duration))
+                state["playback_time"] = state["cursor_time"]
+                stop_audio()
+                return
+            request_render(1)
+            _schedule_progress()
+        
+        def on_scroll(*args):
+            canvas.xview(*args)
+            request_render(1)
+        
+        hscroll.config(command=on_scroll)
+        
+        canvas.bind("<ButtonPress-1>", on_drag_start)
+        canvas.bind("<B1-Motion>", on_drag_move)
+        canvas.bind("<Control-MouseWheel>", on_ctrl_wheel)
+        canvas.bind("<Control-Button-4>", lambda e: on_ctrl_wheel(direction=1))
+        canvas.bind("<Control-Button-5>", lambda e: on_ctrl_wheel(direction=-1))
+        canvas.bind("<ButtonRelease-1>", on_click_release)
+        canvas.bind("<Button-3>", clear_selection)
+        canvas.bind("<Configure>", lambda _e: request_render(1))
+        db_canvas.bind("<Configure>", lambda _e: request_render(1))
+        
+        btn_zoom_in.config(command=lambda: zoom_step(+1))
+        btn_zoom_out.config(command=lambda: zoom_step(-1))
+        btn_zoom_reset.config(command=zoom_reset)
+        btn_gain_up.config(command=lambda: gain_step(+1))
+        btn_gain_down.config(command=lambda: gain_step(-1))
+        btn_gain_reset.config(command=gain_reset)
+        self._wave_play_btn.config(command=play_audio)
+        self._wave_pause_btn.config(command=pause_resume_audio)
+        self._wave_stop_btn.config(command=stop_audio)
+        
+        def _on_wave_win_close():
+            stop_audio()
+            if state.get("gain_play_path"):
+                try:
+                    os.remove(state["gain_play_path"])
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        win.protocol("WM_DELETE_WINDOW", _on_wave_win_close)
+        
+        render()
     
     def setup_multichannel_tab(self, parent):
         """设置多声道测试选项卡（7.1/2.1/2.0 使用 audio/channel/ 下对应默认音频）"""
@@ -2063,10 +3082,48 @@ class UIComponents:
         self.multi_bit_var = tk.StringVar(value="16")
         ttk.Entry(bit_frame, textvariable=self.multi_bit_var, width=5).pack(side="left", padx=5)
         
+        # 播放设备ID（tinyplay -d）
+        play_dev_frame = ttk.Frame(params_frame)
+        play_dev_frame.pack(fill="x", pady=5)
+        ttk.Label(play_dev_frame, text="播放设备ID(-d):").pack(side="left", padx=5)
+        self.multichannel_play_device_var = tk.StringVar(value="0")
+        self.multichannel_play_device_combo = ttk.Combobox(
+            play_dev_frame,
+            textvariable=self.multichannel_play_device_var,
+            values=["0", "1"],
+            width=8,
+            state="normal",
+        )
+        self.multichannel_play_device_combo.pack(side="left", padx=5)
+        ttk.Button(
+            play_dev_frame,
+            text="读取alsaPORT播放设备",
+            style="Small.TButton",
+            command=self._refresh_multichannel_playback_devices,
+            width=18,
+        ).pack(side="left", padx=(8, 0))
+        
         # 开始按钮
         start_button = ttk.Button(frame, text="开始多声道测试", 
                                 command=self.run_multichannel_test)
         start_button.pack(pady=20)
+    
+    def _refresh_multichannel_playback_devices(self):
+        """读取当前设备的 alsaPORT 播放设备索引并更新多声道播放设备下拉。"""
+        if not self.check_device_selected():
+            return
+        device_id = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        values, detail = self._query_alsaport_playback_indexes(device_id)
+        if values:
+            if hasattr(self, "multichannel_play_device_combo") and self.multichannel_play_device_combo.winfo_exists():
+                self.multichannel_play_device_combo["values"] = values
+            cur = (getattr(self, "multichannel_play_device_var", None) and self.multichannel_play_device_var.get() or "").strip()
+            if cur not in values:
+                self.multichannel_play_device_var.set(values[0])
+            self.status_var.set(f"多声道播放设备: {', '.join(values)}")
+        else:
+            self.status_var.set("未读取到多声道播放设备，保留当前手动输入")
+        messagebox.showinfo("多声道播放设备", detail)
     
     def setup_jitter_tab(self, parent):
         """震音测试：播放指定音频，系统音量设为 20，测试完成后恢复原音量，人工判断通过/不通过"""
@@ -6450,10 +7507,11 @@ class UIComponents:
             self.status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
     
-    def _loopback_test_thread(self, device, channels, rate, audio_source, device_id):
+    def _loopback_test_thread(self, device, play_device, channels, rate, audio_source, device_id):
         try:
             # 规范化参数（避免空字符串导致命令异常）
             device = (str(device).strip() or "0")
+            play_device = (str(play_device).strip() or "0")
             channels = (str(channels).strip() or "2")
             rate = (str(rate).strip() or "48000")
 
@@ -6543,15 +7601,17 @@ class UIComponents:
                 # 失败再回退到显式指定（有些设备需要）
                 if device_id:
                     candidates = [
+                        f"adb -s {device_id} shell tinyplay {remote_audio_file} -d {play_device}",
+                        f"adb -s {device_id} shell tinyplay {remote_audio_file} -D 0 -d {play_device}",
                         f"adb -s {device_id} shell tinyplay {remote_audio_file}",
                         f"adb -s {device_id} shell tinyplay {remote_audio_file} -D 0 -d 0",
-                        f"adb -s {device_id} shell tinyplay {remote_audio_file} -D 0 -d {device}",
                     ]
                 else:
                     candidates = [
+                        f"adb shell tinyplay {remote_audio_file} -d {play_device}",
+                        f"adb shell tinyplay {remote_audio_file} -D 0 -d {play_device}",
                         f"adb shell tinyplay {remote_audio_file}",
                         f"adb shell tinyplay {remote_audio_file} -D 0 -d 0",
-                        f"adb shell tinyplay {remote_audio_file} -D 0 -d {device}",
                     ]
 
                 last_err = ""
@@ -6597,6 +7657,7 @@ class UIComponents:
             return
             
         device = self.loopback_device_var.get()
+        play_device = (getattr(self, "loopback_play_device_var", None) and self.loopback_play_device_var.get() or "0").strip() or "0"
         channels = self.loopback_channel_var.get()
         rate = self.loopback_rate_var.get()
         audio_source = self.audio_source_var.get()
@@ -6617,7 +7678,7 @@ class UIComponents:
         
         # 在新线程中运行测试，避免GUI冻结
         self.loopback_thread = threading.Thread(target=self._loopback_test_thread, 
-                                          args=(device, channels, rate, audio_source, device_id), 
+                                          args=(device, play_device, channels, rate, audio_source, device_id), 
                                           daemon=True)
         self.loopback_thread.start()
     

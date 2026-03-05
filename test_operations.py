@@ -9,6 +9,7 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import re
+import struct
 
 from optional_deps import try_import_pygame
 from output_paths import (
@@ -53,6 +54,77 @@ class TestOperations:
             return None
 
         return self._pygame
+    
+    def _parse_mic_channels_from_filename(self, filename):
+        """从 mic_test_xch_*.wav 文件名解析通道数。"""
+        try:
+            m = re.search(r"_(\d+)ch_", filename or "")
+            if m:
+                ch = int(m.group(1))
+                if ch > 0:
+                    return ch
+        except Exception:
+            pass
+        return None
+    
+    def _repair_mic_wav_header_inplace(self, file_path):
+        """
+        录制完成后修复 tinycap 可能损坏/未回写的 WAV 头，确保 Adobe 等工具可打开。
+        返回 (ok, reason)。
+        """
+        try:
+            if not os.path.exists(file_path):
+                return False, "文件不存在"
+            size = os.path.getsize(file_path)
+            if size <= 44:
+                return False, "文件太小"
+            filename = os.path.basename(file_path)
+            channels = self._parse_mic_channels_from_filename(filename)
+            if channels is None:
+                try:
+                    channels = int((self.mic_count_var.get() or "1").strip())
+                except Exception:
+                    channels = 1
+            if channels <= 0:
+                channels = 1
+            try:
+                sample_rate = int((self.rate_var.get() or "16000").strip())
+            except Exception:
+                sample_rate = 16000
+            if sample_rate <= 0:
+                sample_rate = 16000
+            bits = 16
+            bytes_per_sample = bits // 8
+            block_align = channels * bytes_per_sample
+            # tinycap 常见情况：前44字节可能已是损坏头，数据从44字节后开始
+            data_size = max(0, size - 44)
+            # 对齐到完整帧，避免第三方解析器报错
+            data_size = (data_size // block_align) * block_align
+            riff_size = 36 + data_size
+            byte_rate = sample_rate * block_align
+            header = (
+                b"RIFF"
+                + struct.pack("<I", riff_size)
+                + b"WAVE"
+                + b"fmt "
+                + struct.pack("<I", 16)
+                + struct.pack("<H", 1)
+                + struct.pack("<H", channels)
+                + struct.pack("<I", sample_rate)
+                + struct.pack("<I", byte_rate)
+                + struct.pack("<H", block_align)
+                + struct.pack("<H", bits)
+                + b"data"
+                + struct.pack("<I", data_size)
+            )
+            with open(file_path, "r+b") as f:
+                f.seek(0)
+                f.write(header)
+                # 若文件尾部有不完整帧，截断以确保结构严格合法
+                f.truncate(44 + data_size)
+            return True, f"{channels}ch/{sample_rate}Hz/{bits}bit"
+        except Exception as e:
+            return False, str(e)
     def start_mic_test(self):
         """开始麦克风测试"""
         print("=== 开始麦克风测试 ===")
@@ -246,15 +318,16 @@ class TestOperations:
                 stderr=subprocess.PIPE,
                 text=True
             )
+            proc = self.mic_process
             
-            print(f"录制进程已启动，PID: {self.mic_process.pid}")
+            print(f"录制进程已启动，PID: {proc.pid}")
             safe_update_ui("录制中...请对着麦克风说话")
             
             # 检查进程是否正常启动
             time.sleep(3)
-            if self.mic_process.poll() is not None:
+            if proc.poll() is not None:
                 # 进程已退出
-                stdout, stderr = self.mic_process.communicate()
+                stdout, stderr = proc.communicate()
                 error_msg = f"录制进程启动失败: {stderr.strip() if stderr else stdout.strip()}"
                 print(error_msg)
                 safe_update_ui(error_msg)
@@ -264,7 +337,9 @@ class TestOperations:
             safe_update_ui("录制中... (点击停止录制结束)")
             
             # 保持线程运行，直到被停止
-            while self.mic_process.poll() is None and self.mic_is_testing:
+            while self.mic_is_testing:
+                if proc.poll() is not None:
+                    break
                 time.sleep(1)
             
             print("录制线程结束")
@@ -323,7 +398,19 @@ class TestOperations:
                 if result.returncode == 0 and os.path.exists(local_file):
                     file_size = os.path.getsize(local_file)
                     print(f"文件保存成功: {local_file} ({file_size} bytes)")
+                    fixed_ok, fixed_reason = self._repair_mic_wav_header_inplace(local_file)
+                    if fixed_ok:
+                        print(f"WAV头修复完成: {fixed_reason}")
+                    else:
+                        print(f"WAV头修复跳过/失败: {fixed_reason}")
                     self.mic_info_var.set(f"录制完成，文件已保存: {self.mic_filename}")
+                    # 记录最近一次录音文件，供“查看刚录音波形”按钮直接打开
+                    self.latest_mic_recording_path = local_file
+                    if hasattr(self, "view_mic_waveform_button") and self.view_mic_waveform_button:
+                        try:
+                            self.view_mic_waveform_button.config(state="normal")
+                        except Exception:
+                            pass
 
                     # 自动打开录音文件所在文件夹（用户要求：录制完成后自动打开）
                     try:
@@ -3744,15 +3831,16 @@ class TestOperations:
         rate = self.multi_rate_var.get()
         bit = self.multi_bit_var.get()
         preset = (getattr(self, "multichannel_preset_var", None) and self.multichannel_preset_var.get() or "").strip() or "7.1"
+        play_device = (getattr(self, "multichannel_play_device_var", None) and self.multichannel_play_device_var.get() or "0").strip() or "0"
         
         self.status_var.set("正在执行多声道测试...")
         
         # 在新线程中运行测试，避免GUI冻结
         threading.Thread(target=self._multichannel_test_thread, 
-                        args=(rate, bit, preset), 
+                        args=(rate, bit, preset, play_device), 
                         daemon=True).start()
 
-    def _multichannel_test_thread(self, rate, bit, preset):
+    def _multichannel_test_thread(self, rate, bit, preset, play_device):
         try:
             # 准备工作
             subprocess.run(self.get_adb_command("root"), shell=True)
@@ -3776,20 +3864,29 @@ class TestOperations:
             
             # 播放音频
             self.root.after(0, lambda: self.status_var.set("正在播放多声道音频..."))
-            play_cmd = self.get_adb_command(f"shell tinyplay /sdcard/{audio_name} -r {rate} -b {bit}")
-            
-            # 显示命令以便调试
-            print(f"执行命令: {play_cmd}")
-            
-            # 执行播放命令
-            subprocess.run(play_cmd, shell=True)
+            candidates = [
+                self.get_adb_command(f"shell tinyplay /sdcard/{audio_name} -r {rate} -b {bit} -d {play_device}"),
+                self.get_adb_command(f"shell tinyplay /sdcard/{audio_name} -r {rate} -b {bit} -D 0 -d {play_device}"),
+                self.get_adb_command(f"shell tinyplay /sdcard/{audio_name} -r {rate} -b {bit}"),
+            ]
+            last_err = ""
+            ok = False
+            for idx, play_cmd in enumerate(candidates, 1):
+                print(f"执行命令(方案{idx}): {play_cmd}")
+                r = subprocess.run(play_cmd, shell=True, capture_output=True, text=True)
+                if r.returncode == 0:
+                    ok = True
+                    break
+                last_err = (r.stderr or r.stdout or "").strip()
+            if not ok:
+                raise RuntimeError(f"播放失败（tinyplay）: {last_err[:180]}")
             
             self.root.after(0, lambda: self.status_var.set("多声道测试完成"))
-            messagebox.showinfo("测试完成", "多声道测试完成")
+            self.root.after(0, lambda: messagebox.showinfo("测试完成", "多声道测试完成"))
             
         except Exception as e:
             self.root.after(0, lambda: self.status_var.set(f"测试出错: {str(e)}"))
-            messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"测试过程中出现错误:\n{str(e)}"))
 
     def stop_multichannel_test(self):
         """停止多声道测试"""
