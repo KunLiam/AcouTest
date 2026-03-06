@@ -106,6 +106,10 @@
   - 默认鉴权 token：`acoutest-local-token`（可通过环境变量 `ACOUTEST_API_TOKEN` 覆盖）。
   - 支持动作：刷新设备、选择设备、开始/停止麦克风测试、开始/停止 logcat 抓取、开始/停止多声道测试、无弹窗截图。
 
+- **录音波形查看增强**
+  - 在 `Loopback和Ref测试` 与 `扫频测试` 页面新增“查看录音波形”按钮。
+  - 录制成功并保存后自动记住最近录音文件，按钮自动可用，可直接查看最新一次 WAV 波形。
+
 - **波形查看器（播放进度与时间轴对齐）**
   - 修复“红色播放进度线与真实音频时间不一致/看起来延迟”的问题：播放进度改为“高精度系统时钟实时驱动 + 播放器时间校准”，不再只依赖 `pygame.mixer.music.get_pos()`。
   - 进度刷新频率提升到约 30ms 一次，波形上的播放位置、点击光标位置与横轴秒数更稳定对应实际播放时间。
@@ -411,7 +415,7 @@
 | `audio/speaker/speaker_default.wav` | 喇叭测试默认音频 | 界面选「默认音频」时用此文件做喇叭测试 |
 
 - **只需保留一套**：若你之前有 `大象扫频文件`、`自定义扫频文件20Hz-20KHz_0dB` 等中文目录，内容与 `elephant`、`custom` 相同，可只保留 `elephant` 和 `custom`，删除中文目录或不再拷贝到 dist，避免重复。
-- **喇叭默认音频**：请把默认用的 wav 放在 `audio/speaker/speaker_default.wav`（旧版若为 `test.wav`，可重命名为 `speaker_default.wav`）。
+- **喇叭默认音频**：请把默认用的 wav 放在 `audio/speaker/speaker_default.wav`。
 
 ### 打包体积为什么会变大？（audio 文件夹很大）
 

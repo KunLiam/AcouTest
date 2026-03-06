@@ -1944,6 +1944,15 @@ class UIComponents:
             state="disabled"
         )
         self.stop_loopback_button.pack(side="left", padx=20)
+
+        self.view_loopback_waveform_button = ttk.Button(
+            button_frame,
+            text="查看录音波形",
+            command=self.show_latest_loopback_waveform,
+            width=15,
+            state="disabled",
+        )
+        self.view_loopback_waveform_button.pack(side="left", padx=20)
         
         # 状态显示
         status_frame = ttk.Frame(frame)
@@ -2186,29 +2195,56 @@ class UIComponents:
     
     def show_latest_mic_waveform(self):
         """查看最近一次麦克风录音的波形（若无缓存路径则从保存目录找最新 wav）。"""
-        latest = getattr(self, "latest_mic_recording_path", "")
-        if latest and os.path.isfile(latest):
-            self.open_audio_waveform_viewer(latest, title="麦克风录音波形")
-            return
-        save_dir = (getattr(self, "mic_save_path_var", None) and self.mic_save_path_var.get() or "").strip()
-        if not save_dir or not os.path.isdir(save_dir):
+        latest = self._resolve_latest_wav_path(
+            latest_attr_name="latest_mic_recording_path",
+            save_dir=(getattr(self, "mic_save_path_var", None) and self.mic_save_path_var.get() or "").strip(),
+        )
+        if not latest:
             messagebox.showwarning("提示", "暂无可查看的录音文件，请先完成一次麦克风录制。")
             return
+        latest_path = latest
+        self.latest_mic_recording_path = latest_path
+        self.open_audio_waveform_viewer(latest_path, title="麦克风录音波形")
+
+    def _resolve_latest_wav_path(self, latest_attr_name, save_dir):
+        """优先用缓存路径，否则从保存目录中取最新 WAV。"""
+        latest = getattr(self, latest_attr_name, "")
+        if latest and os.path.isfile(latest):
+            return latest
+        if not save_dir or not os.path.isdir(save_dir):
+            return ""
         wav_files = []
         for name in os.listdir(save_dir):
             if name.lower().endswith(".wav"):
-                path = os.path.join(save_dir, name)
+                p = os.path.join(save_dir, name)
                 try:
-                    wav_files.append((os.path.getmtime(path), path))
+                    wav_files.append((os.path.getmtime(p), p))
                 except Exception:
                     pass
         if not wav_files:
-            messagebox.showwarning("提示", "保存目录中未找到 WAV 文件，请先录制。")
-            return
+            return ""
         wav_files.sort(key=lambda x: x[0], reverse=True)
-        latest_path = wav_files[0][1]
-        self.latest_mic_recording_path = latest_path
-        self.open_audio_waveform_viewer(latest_path, title="麦克风录音波形")
+        return wav_files[0][1]
+
+    def show_latest_loopback_waveform(self):
+        """查看最近一次 Loopback/Ref 录音波形。"""
+        save_dir = (getattr(self, "loopback_save_path_var", None) and self.loopback_save_path_var.get() or "").strip()
+        latest = self._resolve_latest_wav_path("latest_loopback_recording_path", save_dir)
+        if not latest:
+            messagebox.showwarning("提示", "暂无可查看的 Loopback/Ref 录音文件，请先完成一次录制。")
+            return
+        self.latest_loopback_recording_path = latest
+        self.open_audio_waveform_viewer(latest, title="Loopback/Ref 录音波形")
+
+    def show_latest_sweep_waveform(self):
+        """查看最近一次扫频录音波形。"""
+        save_dir = (getattr(self, "sweep_save_path_var", None) and self.sweep_save_path_var.get() or "").strip()
+        latest = self._resolve_latest_wav_path("latest_sweep_recording_path", save_dir)
+        if not latest:
+            messagebox.showwarning("提示", "暂无可查看的扫频录音文件，请先完成一次扫频录制。")
+            return
+        self.latest_sweep_recording_path = latest
+        self.open_audio_waveform_viewer(latest, title="扫频录音波形")
     
     def _extract_wav_samples(self, raw_bytes, sample_width):
         """将 WAV 原始字节转为 int 样本数组（支持 8/16/24/32bit PCM）。"""
@@ -2369,6 +2405,24 @@ class UIComponents:
         except Exception as e:
             messagebox.showerror("错误", f"解析音频波形失败：\n{e}")
             return
+        # 播放兼容层：pygame 对 >2 声道 WAV 兼容较差，自动下混为 2 声道用于播放。
+        # 注意：仅影响“播放源”，波形显示仍使用原始多通道数据。
+        playback_channels = channels
+        playback_samples = samples
+        playback_base_path = display_path
+        playback_note = ""
+        if channels > 2:
+            downmixed = []
+            for fidx in range(total_frames):
+                base = fidx * channels
+                left = samples[base]
+                right = samples[base + 1] if channels > 1 else left
+                downmixed.append(left)
+                downmixed.append(right)
+            playback_channels = 2
+            playback_samples = downmixed
+            playback_base_path = ""  # 下混后需生成临时播放文件
+            playback_note = f"（播放兼容：原始 {channels} 声道已下混为 2 声道，波形显示保持原始通道）"
         win = tk.Toplevel(getattr(self, "root", None) or getattr(self, "parent", None) or self)
         win.title(f"{title} - {os.path.basename(file_path)}")
         win.geometry("1040x620")
@@ -2410,6 +2464,8 @@ class UIComponents:
         )
         if repaired_note:
             info += f"\n{repaired_note}"
+        if playback_note:
+            info += f"\n{playback_note}"
         ttk.Label(win, text=info, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(8, 4))
         
         hint_var = tk.StringVar(value="操作：鼠标左键拖动选择区间；单击设光标；右键清除选区；Ctrl + 滚轮缩放时间轴")
@@ -2467,11 +2523,14 @@ class UIComponents:
             "play_start_offset": 0.0,
             "play_end_time": 0.0,
             "progress_job": None,
+            "playback_latency_s": 0.0,
             "clock_anchor_time": 0.0,
             "clock_anchor_perf": 0.0,
             "first_valid_pos_seen": False,
             "start_grace_until_perf": 0.0,
             "click_dragged": False,
+            "is_dragging": False,
+            "last_drag_render_perf": 0.0,
             "click_start_x": 0,
             "select_anchor_t": 0.0,
             "sel_start_t": None,
@@ -2484,6 +2543,10 @@ class UIComponents:
             "tracks_bottom": 540,
             "gain_play_path": "",
             "gain_play_db": None,
+            "gain_play_seg": None,
+            "drag_overlay_tag": "wave_drag_overlay",
+            "cursor_line_id": None,
+            "progress_line_id": None,
         }
         total_duration = total_frames / float(sample_rate)
 
@@ -2549,9 +2612,13 @@ class UIComponents:
                 fit_zoom = view_w / float(max(1, points))
                 state["zoom"] = max(0.01, min(64.0, fit_zoom))
             draw_points = max(view_w, int(points * state["zoom"]))
+            # 关键修复：当窗口放大导致 draw_points > points*zoom 时，
+            # 采样映射必须使用“实际渲染缩放比”，否则会把有效波形挤到左侧并造成时轴错位。
+            effective_zoom = draw_points / float(max(1, points))
             state["total_width"] = draw_points
             state["left_px"] = left
             state["draw_points"] = draw_points
+            state["effective_zoom"] = effective_zoom
             state["tracks_top"] = tracks_top
             state["tracks_bottom"] = tracks_top + track_h * channels
             xview = canvas.xview()
@@ -2561,7 +2628,8 @@ class UIComponents:
             vis_r = int(max(0.0, min(1.0, xview[1])) * draw_points)
             if vis_r <= vis_l:
                 vis_l, vis_r = 0, min(draw_points, view_w)
-            margin = 160
+            # 拖拽选区时降低渲染范围，提升交互流畅度；松手后恢复完整边界
+            margin = 60 if state.get("is_dragging", False) else 160
             draw_l = max(0, vis_l - margin)
             draw_r = min(draw_points, vis_r + margin)
             
@@ -2636,8 +2704,9 @@ class UIComponents:
                 color = "#3ECF8E" if ch % 2 == 0 else "#56B6F7"
                 for i in range(draw_l, draw_r):
                     # 关键修复：缩小时按区间取包络，避免“只取单点”导致波形发黑/看不见
-                    src_start = int(i / state["zoom"])
-                    src_end = int((i + 1) / state["zoom"])
+                    zoom_for_sampling = max(1e-9, float(state.get("effective_zoom", state["zoom"])))
+                    src_start = int(i / zoom_for_sampling)
+                    src_end = int((i + 1) / zoom_for_sampling)
                     if src_end <= src_start:
                         src_end = src_start + 1
                     src_start = max(0, min(points - 1, src_start))
@@ -2662,12 +2731,6 @@ class UIComponents:
                     y_max = max(y0 + 1, min(y1 - 1, y_max))
                     wc["line"](x, y_min, x, y_max, fill=color)
             
-            # 点击定位线（黄色）+ 播放进度线（红色）
-            if total_duration > 0:
-                cx = left + int((max(0.0, min(total_duration, state.get("cursor_time", 0.0))) / total_duration) * draw_points)
-                px = left + int((max(0.0, min(total_duration, state.get("playback_time", 0.0))) / total_duration) * draw_points)
-                wc["line"](cx, top, cx, tracks_top + track_h * channels, fill="#f0c040")
-                wc["line"](px, top, px, tracks_top + track_h * channels, fill="#ff4444")
             canvas.config(scrollregion=(0, 0, left + draw_points + 20, tracks_top + track_h * channels + 10))
             
             # 固定右侧 dB 面板（不随横向滚动变化）
@@ -2713,6 +2776,7 @@ class UIComponents:
                 db_canvas.delete(old_db)
             state["wave_tag"] = new_wave_tag
             state["db_tag"] = new_db_tag
+            _update_playhead_overlay()
             hint_var.set(
                 f"操作：左键拖动选区/单击设光标/右键清选区；Ctrl+滚轮缩放（当前 {state['zoom']:.2f}x）"
                 f"；振幅 {state['amp_scale']:.2f}x({state['amp_db']:+.1f}dB)；增益 {state['gain_db']:+.1f} dB"
@@ -2725,16 +2789,83 @@ class UIComponents:
                 except Exception:
                     pass
             state["render_job"] = win.after(delay, render)
+
+        def _clear_drag_overlay():
+            try:
+                canvas.delete(state.get("drag_overlay_tag", "wave_drag_overlay"))
+            except Exception:
+                pass
+
+        def _draw_drag_overlay():
+            """拖拽中仅更新轻量选区层，避免整图重绘造成卡顿。"""
+            _clear_drag_overlay()
+            if not (state.get("is_dragging", False) or state.get("selection_active", False)):
+                return
+            sel_s = state.get("sel_start_t", None)
+            sel_e = state.get("sel_end_t", None)
+            if sel_s is None or sel_e is None:
+                return
+            sx = _time_to_x(min(sel_s, sel_e))
+            ex = _time_to_x(max(sel_s, sel_e))
+            if ex <= sx:
+                return
+            top = 10
+            tracks_top = int(state.get("tracks_top", 34))
+            tracks_bottom = int(state.get("tracks_bottom", tracks_top + 1))
+            canvas.create_rectangle(
+                sx, top, ex, tracks_bottom,
+                outline="", fill="#d8d8d8", stipple="gray25",
+                tags=(state.get("drag_overlay_tag", "wave_drag_overlay"),),
+            )
+            canvas.create_line(
+                sx, top, sx, tracks_bottom,
+                fill="#b04040",
+                tags=(state.get("drag_overlay_tag", "wave_drag_overlay"),),
+            )
+            canvas.create_line(
+                ex, top, ex, tracks_bottom,
+                fill="#b04040",
+                tags=(state.get("drag_overlay_tag", "wave_drag_overlay"),),
+            )
+
+        def _update_playhead_overlay():
+            """轻量更新光标线/播放线，避免整图重绘造成卡顿与不同步。"""
+            if total_duration <= 0:
+                return
+            left_px = int(state.get("left_px", 10))
+            draw_pts = max(1, int(state.get("draw_points", 1)))
+            top = 10
+            bottom = int(state.get("tracks_bottom", state.get("tracks_top", 34) + 1))
+            cx = left_px + int((max(0.0, min(total_duration, state.get("cursor_time", 0.0))) / total_duration) * draw_pts)
+            px = left_px + int((max(0.0, min(total_duration, state.get("playback_time", 0.0))) / total_duration) * draw_pts)
+            try:
+                if not state.get("cursor_line_id"):
+                    state["cursor_line_id"] = canvas.create_line(cx, top, cx, bottom, fill="#f0c040")
+                else:
+                    canvas.coords(state["cursor_line_id"], cx, top, cx, bottom)
+                if not state.get("progress_line_id"):
+                    state["progress_line_id"] = canvas.create_line(px, top, px, bottom, fill="#ff4444")
+                else:
+                    canvas.coords(state["progress_line_id"], px, top, px, bottom)
+                canvas.tag_raise(state["cursor_line_id"])
+                canvas.tag_raise(state["progress_line_id"])
+                # 播放线应在选区遮罩之上，避免被遮住看起来“卡住”
+                if state.get("drag_overlay_tag"):
+                    canvas.tag_raise(state.get("drag_overlay_tag"))
+                    canvas.tag_raise(state["progress_line_id"])
+            except Exception:
+                pass
         
         def on_drag_start(event):
             state["click_dragged"] = False
+            state["is_dragging"] = True
             state["click_start_x"] = event.x
             anchor_t = _x_to_time(canvas.canvasx(event.x))
             state["select_anchor_t"] = anchor_t
             state["sel_start_t"] = anchor_t
             state["sel_end_t"] = anchor_t
             state["selection_active"] = True
-            request_render(1)
+            _draw_drag_overlay()
         
         def on_drag_move(event):
             if abs(event.x - state.get("click_start_x", event.x)) > 4:
@@ -2742,9 +2873,15 @@ class UIComponents:
             cur_t = _x_to_time(canvas.canvasx(event.x))
             state["sel_start_t"] = min(state.get("select_anchor_t", cur_t), cur_t)
             state["sel_end_t"] = max(state.get("select_anchor_t", cur_t), cur_t)
-            request_render(1)
+            # 拖拽中仅更新轻量选区层，避免每个鼠标事件都触发高成本重绘
+            now = time.perf_counter()
+            last = float(state.get("last_drag_render_perf", 0.0) or 0.0)
+            if (now - last) >= 0.03:  # 约 33 FPS
+                state["last_drag_render_perf"] = now
+                _draw_drag_overlay()
         
         def on_click_release(event):
+            state["is_dragging"] = False
             # 点击（非拖动）时设置播放起点
             if state.get("click_dragged", False):
                 sel_s = state.get("sel_start_t", None)
@@ -2754,26 +2891,34 @@ class UIComponents:
                     state["cursor_time"] = sel_s
                     if not state.get("is_playing", False):
                         state["playback_time"] = sel_s
+                    _draw_drag_overlay()
+                    _update_playhead_overlay()
                 else:
                     state["sel_start_t"] = None
                     state["sel_end_t"] = None
                     state["selection_active"] = False
-                request_render(1)
+                    _clear_drag_overlay()
+                request_render(0)
                 return
             t = _x_to_time(canvas.canvasx(event.x))
             # 单击：清除选区，只保留光标
+            _clear_drag_overlay()
             state["sel_start_t"] = None
             state["sel_end_t"] = None
             state["selection_active"] = False
             state["cursor_time"] = t
             if not state.get("is_playing", False):
                 state["playback_time"] = t
+            _update_playhead_overlay()
             request_render(1)
 
         def clear_selection(_event=None):
+            state["is_dragging"] = False
+            _clear_drag_overlay()
             state["sel_start_t"] = None
             state["sel_end_t"] = None
             state["selection_active"] = False
+            _update_playhead_overlay()
             request_render(1)
         
         def on_ctrl_wheel(event=None, direction=None):
@@ -2859,24 +3004,43 @@ class UIComponents:
             raise ValueError(f"不支持的样本位宽: {sw}")
         
         def _build_gain_playback_file(gdb):
-            """按当前增益生成临时播放文件；0dB 时直接用原文件。"""
-            if abs(gdb) < 0.05:
-                return display_path
+            """按当前增益与播放区间生成可播放文件。"""
             rounded = round(gdb, 2)
-            if state.get("gain_play_path") and state.get("gain_play_db") == rounded and os.path.exists(state["gain_play_path"]):
+            seg_start = int(max(0, min(total_frames, round(float(state.get("play_seg_start_frame", 0) or 0)))))
+            seg_end = int(max(seg_start + 1, min(total_frames, round(float(state.get("play_seg_end_frame", total_frames) or total_frames)))))
+            seg_key = (seg_start, seg_end, playback_channels)
+            # 只有“无需下混 + 无增益 + 全段播放”时可直接用原文件
+            if (
+                abs(gdb) < 0.05 and
+                playback_base_path and
+                seg_start <= 0 and
+                seg_end >= total_frames and
+                os.path.exists(playback_base_path)
+            ):
+                return playback_base_path
+            if (
+                state.get("gain_play_path")
+                and state.get("gain_play_db") == rounded
+                and state.get("gain_play_seg") == seg_key
+                and os.path.exists(state["gain_play_path"])
+            ):
                 return state["gain_play_path"]
             gain_factor = 10 ** (gdb / 20.0)
             bits_local = sample_width * 8
             max_v = (1 << (bits_local - 1)) - 1
             min_v = -(1 << (bits_local - 1))
             boosted = []
-            for v in samples:
-                vv = int(round(v * gain_factor))
-                if vv > max_v:
-                    vv = max_v
-                elif vv < min_v:
-                    vv = min_v
-                boosted.append(vv)
+            ch = max(1, int(playback_channels))
+            for fi in range(seg_start, seg_end):
+                base = fi * ch
+                for ci in range(ch):
+                    v = playback_samples[base + ci]
+                    vv = int(round(v * gain_factor))
+                    if vv > max_v:
+                        vv = max_v
+                    elif vv < min_v:
+                        vv = min_v
+                    boosted.append(vv)
             pcm_bytes = _samples_to_bytes(boosted, sample_width)
             if state.get("gain_play_path"):
                 try:
@@ -2886,12 +3050,13 @@ class UIComponents:
             temp_name = f"acoutest_gainplay_{int(time.time()*1000)}.wav"
             temp_path = os.path.join(tempfile.gettempdir(), temp_name)
             with wave.open(temp_path, "wb") as wf:
-                wf.setnchannels(channels)
+                wf.setnchannels(playback_channels)
                 wf.setsampwidth(sample_width)
                 wf.setframerate(sample_rate)
                 wf.writeframes(pcm_bytes)
             state["gain_play_path"] = temp_path
             state["gain_play_db"] = rounded
+            state["gain_play_seg"] = seg_key
             return temp_path
         
         def play_audio():
@@ -2925,24 +3090,14 @@ class UIComponents:
                         play_end = max(sel_s, sel_e)
                     else:
                         play_end = total_duration
+                if play_end <= start_at + 1e-4:
+                    play_end = min(total_duration, start_at + 0.01)
                 state["resume_from_cursor"] = False
+                state["play_seg_start_frame"] = int(max(0, min(total_frames, round(start_at * sample_rate))))
+                state["play_seg_end_frame"] = int(max(state["play_seg_start_frame"] + 1, min(total_frames, round(play_end * sample_rate))))
                 play_source = _build_gain_playback_file(state.get("gain_db", 0.0))
                 pg.mixer.music.load(play_source)
-                started = False
-                try:
-                    pg.mixer.music.play(start=start_at)
-                    started = True
-                except Exception:
-                    pg.mixer.music.play()
-                    if start_at > 0:
-                        try:
-                            pg.mixer.music.set_pos(start_at)
-                            started = True
-                        except Exception:
-                            started = False
-                if not started and start_at > 0:
-                    messagebox.showwarning("提示", "当前音频格式不支持精确跳转播放，已从开头播放。")
-                    start_at = 0.0
+                pg.mixer.music.play()
                 state["play_start_offset"] = start_at
                 state["play_end_time"] = max(start_at, play_end)
                 state["playback_time"] = start_at
@@ -3013,6 +3168,7 @@ class UIComponents:
                 except Exception:
                     pass
                 state["progress_job"] = None
+            _update_playhead_overlay()
             request_render(1)
         
         def _schedule_progress():
@@ -3030,8 +3186,11 @@ class UIComponents:
             pg = _get_pg()
             if not pg:
                 return
+            # 拖拽选区时暂停高成本重绘，避免“松手后延迟显示选区”。
+            if state.get("is_dragging", False):
+                _schedule_progress()
+                return
             now_perf = time.perf_counter()
-            clock_t = max(0.0, min(total_duration, _get_clock_time()))
             try:
                 pos_ms = pg.mixer.music.get_pos()
             except Exception:
@@ -3041,32 +3200,30 @@ class UIComponents:
             except Exception:
                 is_busy = False
             if pos_ms >= 0:
-                pos_t = state.get("play_start_offset", 0.0) + (pos_ms / 1000.0)
-                if not state.get("first_valid_pos_seen", False):
-                    # 首次拿到有效播放器时间，校准时钟原点，减少启动抖动/偏移。
-                    state["first_valid_pos_seen"] = True
-                    _set_play_clock(pos_t)
-                    clock_t = pos_t
-                else:
-                    drift = pos_t - clock_t
-                    if abs(drift) > 0.12:
-                        _set_play_clock(pos_t)
-                        clock_t = pos_t
-                    else:
-                        clock_t = max(clock_t, pos_t)
+                # 以播放器返回位置为主，避免“界面时钟超前于真实声音”。
+                state["first_valid_pos_seen"] = True
+                latency_s = max(0.0, float(state.get("playback_latency_s", 0.0) or 0.0))
+                audible_pos_s = max(0.0, (pos_ms / 1000.0) - latency_s)
+                state["playback_time"] = max(
+                    0.0,
+                    min(total_duration, state.get("play_start_offset", 0.0) + audible_pos_s)
+                )
+                _set_play_clock(state["playback_time"])
+            elif is_busy and state.get("first_valid_pos_seen", False):
+                # 极短暂拿不到位置时，用最近锚点平滑补间，避免光标停住抖动。
+                state["playback_time"] = max(0.0, min(total_duration, _get_clock_time()))
             elif (not is_busy) and now_perf >= float(state.get("start_grace_until_perf", 0.0)):
                 state["is_playing"] = False
                 state["is_paused"] = False
                 self._wave_pause_btn.config(text="暂停")
                 request_render(1)
                 return
-            state["playback_time"] = max(0.0, min(total_duration, clock_t))
             if state["playback_time"] >= max(state.get("play_start_offset", 0.0), state.get("play_end_time", total_duration)) - 0.02:
                 state["cursor_time"] = max(state.get("play_start_offset", 0.0), state.get("play_end_time", total_duration))
                 state["playback_time"] = state["cursor_time"]
                 stop_audio()
                 return
-            request_render(1)
+            _update_playhead_overlay()
             _schedule_progress()
         
         def on_scroll(*args):
@@ -3704,6 +3861,14 @@ class UIComponents:
         self.stop_sweep_button = ttk.Button(button_frame, text="停止测试", 
                                        command=lambda: self.stop_sweep_test(handler), state="disabled")
         self.stop_sweep_button.pack(side="left", padx=5)
+
+        self.view_sweep_waveform_button = ttk.Button(
+            button_frame,
+            text="查看录音波形",
+            command=self.show_latest_sweep_waveform,
+            state="disabled",
+        )
+        self.view_sweep_waveform_button.pack(side="left", padx=5)
         
         ttk.Button(button_frame, text="打开文件夹", 
                   command=self.open_sweep_folder).pack(side="left", padx=5)
@@ -7284,6 +7449,12 @@ class UIComponents:
                     if fix_wav_header_after_tinycap(local_file_path, channels, sample_rate, bit_depth):
                         getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("已修正录制文件 WAV 头，时长与波形可正常显示。"))
                     local_file_size = os.path.getsize(local_file_path)
+                    self.latest_sweep_recording_path = local_file_path
+                    if hasattr(self, "view_sweep_waveform_button") and self.view_sweep_waveform_button:
+                        try:
+                            getattr(self, "root", self.parent).after(0, lambda: self.view_sweep_waveform_button.config(state="normal"))
+                        except Exception:
+                            pass
                     getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"✓ 测试完成: {recording_filename} ({local_file_size} bytes)"))
                     getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("测试完成"))
                 else:
@@ -7419,6 +7590,12 @@ class UIComponents:
                 if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                     self.update_sweep_info(f"扫频测试完成，文件已保存为: {local_path}")
                     self.sweep_status_var.set("测试完成")
+                    self.latest_sweep_recording_path = local_path
+                    if hasattr(self, "view_sweep_waveform_button") and self.view_sweep_waveform_button:
+                        try:
+                            self.view_sweep_waveform_button.config(state="normal")
+                        except Exception:
+                            pass
                     
                     # 询问是否打开文件夹
                     if messagebox.askyesno("测试完成", f"扫频测试完成，文件已保存为:\n{local_path}\n\n是否打开文件夹？"):
@@ -7529,6 +7706,12 @@ class UIComponents:
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                 self.status_var.set(f"通道测试完成，文件已保存为: {os.path.basename(local_path)}")
                 self.loopback_status_var.set(f"测试完成，已保存: {os.path.basename(local_path)}")
+                self.latest_loopback_recording_path = local_path
+                if hasattr(self, "view_loopback_waveform_button") and self.view_loopback_waveform_button:
+                    try:
+                        self.view_loopback_waveform_button.config(state="normal")
+                    except Exception:
+                        pass
                 
                 # 询问是否打开文件夹
                 if messagebox.askyesno("测试完成", f"通道测试完成，文件已保存为:\n{local_path}\n\n是否打开文件夹？"):

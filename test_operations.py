@@ -3220,7 +3220,7 @@ class TestOperations:
             
             # 推送音频文件到设备
             self.speaker_status_var.set("正在推送音频文件...")
-            push_cmd = self.get_adb_command(f"push \"{audio_file}\" /sdcard/test.wav")
+            push_cmd = self.get_adb_command(f"push \"{audio_file}\" /sdcard/speaker_default.wav")
             result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
