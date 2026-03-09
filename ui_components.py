@@ -7398,11 +7398,11 @@ class UIComponents:
 
         choice = messagebox.askyesnocancel(
             "选择测试模式",
-            "请选择本次测试模式：\n\n是：堵mic测试\n否：不堵mic测试\n取消：不开始",
+            "请选择本次测试模式：\n\n是：不堵mic测试（建议先做）\n否：堵mic测试\n取消：不开始",
         )
         if choice is None:
             return
-        mode = "du_mic" if choice else "open_mic"
+        mode = "open_mic" if choice else "du_mic"
         self._launch_airtightness_mode(mode)
 
     def _launch_airtightness_mode(self, mode):
@@ -7570,10 +7570,10 @@ class UIComponents:
         win.grab_set()
         self._apply_window_icon(win)
 
-        if mode == "du_mic":
+        if mode == "open_mic":
             message = (
                 f"{mode_label}测试完成。\n\n"
-                "下一步请去掉橡皮泥后继续不堵mic测试。"
+                "下一步请使用橡皮泥堵住麦克风孔后继续堵mic测试。"
             )
         else:
             message = (
@@ -7594,8 +7594,8 @@ class UIComponents:
 
         def on_continue():
             win.destroy()
-            if mode == "du_mic":
-                self._launch_airtightness_mode("open_mic")
+            if mode == "open_mic":
+                self._launch_airtightness_mode("du_mic")
             else:
                 if self.latest_airtight_du_path and self.latest_airtight_open_path:
                     self.show_airtight_compare_waveforms()
@@ -7910,6 +7910,148 @@ class UIComponents:
             vals = dst
         return vals
 
+    def _save_canvas_snapshot(self, canvas, default_path):
+        """保存 Canvas 图像：优先 PostScript 转 PNG；失败时保存为 PS。"""
+        try:
+            save_path = filedialog.asksaveasfilename(
+                title="保存频谱对比图",
+                initialfile=os.path.basename(default_path),
+                initialdir=os.path.dirname(default_path),
+                defaultextension=".png",
+                filetypes=[("PNG 图片", "*.png"), ("PostScript", "*.ps")],
+            )
+            if not save_path:
+                return ""
+            ext = os.path.splitext(save_path)[1].lower()
+            if ext == ".ps":
+                canvas.postscript(file=save_path, colormode="color")
+                return save_path
+
+            # 先尝试从 Canvas PostScript 直接转 PNG（不受窗口遮挡影响）
+            try:
+                import tempfile
+                from PIL import Image  # type: ignore
+                ps_data = canvas.postscript(colormode="color")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".ps") as tmp:
+                    tmp.write(ps_data.encode("utf-8", errors="ignore"))
+                    tmp_ps = tmp.name
+                try:
+                    with Image.open(tmp_ps) as img:
+                        img.save(save_path, format="PNG")
+                    return save_path
+                finally:
+                    try:
+                        os.remove(tmp_ps)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # 最后兜底：保存为 PS（即使用户填的是 .png）
+            fallback = os.path.splitext(save_path)[0] + ".ps"
+            canvas.postscript(file=fallback, colormode="color")
+            return fallback
+        except Exception:
+            return ""
+
+    def _export_airtight_compare_png(
+        self,
+        save_path,
+        ch_text,
+        spec1,
+        spec2,
+        freq_max,
+        db_min,
+        db_max,
+        du_range,
+        open_range,
+        avg_text,
+    ):
+        """基于频谱数据直接绘制 PNG，不依赖屏幕截图，避免窗口遮挡污染。"""
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+        w, h = 1600, 900
+        left, right = 82, 24
+        top, bottom = 28, 66
+        pw = w - left - right
+        ph = h - top - bottom
+
+        img = Image.new("RGB", (w, h), "#101216")
+        draw = ImageDraw.Draw(img)
+
+        # Windows 下优先使用常见中文字体，避免导出文字乱码
+        font_candidates = [
+            r"C:\Windows\Fonts\msyh.ttc",      # 微软雅黑
+            r"C:\Windows\Fonts\msyhbd.ttc",    # 微软雅黑粗体
+            r"C:\Windows\Fonts\simhei.ttf",    # 黑体
+            r"C:\Windows\Fonts\simsun.ttc",    # 宋体
+        ]
+
+        def _load_font(size, bold=False):
+            for fp in font_candidates:
+                try:
+                    if bold and fp.lower().endswith("msyh.ttc"):
+                        continue
+                    return ImageFont.truetype(fp, size=size)
+                except Exception:
+                    continue
+            return ImageFont.load_default()
+
+        font_axis = _load_font(14)
+        font_title = _load_font(20, bold=True)
+        font_meta = _load_font(18, bold=True)
+        font_footer = _load_font(15)
+
+        # 网格
+        major_hz = 500 if freq_max <= 10000 else 1000
+        minor_hz = max(100, major_hz // 2)
+        hz = 0
+        while hz <= int(freq_max):
+            x = left + (hz / freq_max) * pw
+            is_major = (hz % major_hz == 0)
+            draw.line((x, top, x, top + ph), fill="#263626" if is_major else "#1b271b", width=1)
+            if is_major:
+                label = f"{int(hz)}" if hz < 1000 else f"{hz/1000:.1f}k"
+                draw.text((x - 12, top + ph + 14), label, fill="#aeb8c2", font=font_axis)
+            hz += minor_hz
+
+        db = int(db_max)
+        while db >= int(db_min):
+            y = top + ((db_max - db) / (db_max - db_min)) * ph
+            is_major = (db % 10 == 0)
+            draw.line((left, y, left + pw, y), fill="#263626" if is_major else "#1b271b", width=1)
+            draw.text((left - 34, y - 7), f"{db}", fill="#aeb8c2", font=font_axis)
+            db -= 5
+
+        draw.rectangle((left, top, left + pw, top + ph), outline="#3a3a3a", width=1)
+        draw.text((left + 2, top - 22), f"{ch_text} 频谱对比", fill="#d8dde5", font=font_title)
+        draw.text((left + pw - 60, top - 22), "dBFS", fill="#d8dde5", font=font_axis)
+
+        def _curve_points(spec):
+            points = []
+            for f, d in zip(spec.get("freqs") or [], spec.get("dbs") or []):
+                if f <= 0 or f > freq_max:
+                    continue
+                x = left + (f / freq_max) * pw
+                y = top + ((db_max - max(db_min, min(db_max, d))) / (db_max - db_min)) * ph
+                points.append((x, y))
+            return points
+
+        p1 = _curve_points(spec1)
+        p2 = _curve_points(spec2)
+        if len(p1) >= 2:
+            draw.line(p1, fill="#ff4040", width=2)
+        if len(p2) >= 2:
+            draw.line(p2, fill="#4aa3ff", width=2)
+
+        draw.text((left + pw - 420, top + 8), avg_text, fill="#ffd166", font=font_meta)
+        footer = (
+            f"当前通道: {ch_text} | 频率范围: 0 ~ {int(freq_max)} Hz | 红=堵mic 蓝=不堵mic | "
+            f"堵mic选段: {du_range[0]:.2f}s~{du_range[1]:.2f}s | 不堵mic选段: {open_range[0]:.2f}s~{open_range[1]:.2f}s"
+        )
+        draw.text((left, h - 30), footer, fill="#d8dde5", font=font_footer)
+        img.save(save_path, format="PNG")
+
     def open_airtight_spectrum_compare_viewer(self, du_path, open_path):
         win = tk.Toplevel(getattr(self, "root", self.parent))
         win.title("气密性频谱对比（堵mic vs 不堵mic）")
@@ -7995,8 +8137,7 @@ class UIComponents:
                 raise ValueError(f"{name}时间段太短，至少 0.2 秒")
             return (round(s0, 3), round(s1, 3))
 
-        def render():
-            canvas.delete("all")
+        def _get_current_specs():
             ch_text = channel_var.get().strip().upper()
             try:
                 ch_idx = max(0, int(ch_text.replace("CH", "")) - 1)
@@ -8012,13 +8153,18 @@ class UIComponents:
 
             key1 = (du_path, ch_idx, du_range[0], du_range[1])
             key2 = (open_path, ch_idx, open_range[0], open_range[1])
+            if key1 not in cache:
+                cache[key1] = self._compute_channel_spectrum(du_path, ch_idx, du_range[0], du_range[1])
+            if key2 not in cache:
+                cache[key2] = self._compute_channel_spectrum(open_path, ch_idx, open_range[0], open_range[1])
+            spec1 = cache[key1]
+            spec2 = cache[key2]
+            return ch_text, du_range, open_range, spec1, spec2
+
+        def render():
+            canvas.delete("all")
             try:
-                if key1 not in cache:
-                    cache[key1] = self._compute_channel_spectrum(du_path, ch_idx, du_range[0], du_range[1])
-                if key2 not in cache:
-                    cache[key2] = self._compute_channel_spectrum(open_path, ch_idx, open_range[0], open_range[1])
-                spec1 = cache[key1]
-                spec2 = cache[key2]
+                ch_text, du_range, open_range, spec1, spec2 = _get_current_specs()
             except Exception as e:
                 status_var.set(f"频谱分析失败: {e}")
                 return
@@ -8080,6 +8226,58 @@ class UIComponents:
                 f"堵mic选段: {du_range[0]:.2f}s~{du_range[1]:.2f}s | 不堵mic选段: {open_range[0]:.2f}s~{open_range[1]:.2f}s"
             )
 
+        def save_compare_image():
+            ch_text = channel_var.get().strip().upper() or "CH1"
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            base_name = f"airtight_compare_{ch_text}_{ts}.png"
+            default_dir = self.airtight_save_path_var.get().strip() or get_output_dir(DIR_AIRTIGHTNESS)
+            os.makedirs(default_dir, exist_ok=True)
+            default_path = os.path.join(default_dir, base_name)
+            save_path = filedialog.asksaveasfilename(
+                title="保存频谱对比图",
+                initialfile=os.path.basename(default_path),
+                initialdir=os.path.dirname(default_path),
+                defaultextension=".png",
+                filetypes=[("PNG 图片", "*.png"), ("PostScript", "*.ps")],
+            )
+            if not save_path:
+                status_var.set("保存已取消")
+                return
+            ext = os.path.splitext(save_path)[1].lower()
+            if ext == ".ps":
+                try:
+                    canvas.postscript(file=save_path, colormode="color")
+                    status_var.set(f"已保存对比图: {save_path}")
+                except Exception as e:
+                    status_var.set(f"保存失败: {e}")
+                return
+            try:
+                ch_text, du_range, open_range, spec1, spec2 = _get_current_specs()
+                freq_max = min(spec1["sample_rate"], spec2["sample_rate"]) / 2.0
+                freq_max = max(1000.0, freq_max)
+                db_min, db_max = -125.0, 0.0
+                du_avg_db = self._compute_average_spectrum_db(spec1, 0.0, freq_max)
+                open_avg_db = self._compute_average_spectrum_db(spec2, 0.0, freq_max)
+                if du_avg_db is None or open_avg_db is None:
+                    avg_text = "平均dB(选段全频): N/A"
+                else:
+                    avg_text = f"平均dB(选段全频) Δ(堵-不堵): {du_avg_db - open_avg_db:+.2f} dB"
+                self._export_airtight_compare_png(
+                    save_path,
+                    ch_text,
+                    spec1,
+                    spec2,
+                    freq_max,
+                    db_min,
+                    db_max,
+                    du_range,
+                    open_range,
+                    avg_text,
+                )
+                status_var.set(f"已保存对比图: {save_path}")
+            except Exception as e:
+                status_var.set(f"保存失败: {e}")
+
         def _on_waveform_selection(which, start_s, end_s):
             # 波形窗口框选后自动回填到对比窗口
             if start_s is None or end_s is None:
@@ -8104,6 +8302,7 @@ class UIComponents:
             open_end_var.set(f"{open_dur:.2f}")
             render()
         ttk.Button(range_frame, text="全段", command=_set_full_range).pack(side="left", padx=(6, 0))
+        ttk.Button(range_frame, text="保存对比图", command=save_compare_image).pack(side="left", padx=(12, 0))
         ttk.Button(
             ctrl,
             text="打开堵mic波形(框选回填)",
