@@ -13,6 +13,7 @@ import platform
 import re
 import shutil
 import shlex
+import cmath
 import datetime
 import sys
 import ctypes
@@ -28,6 +29,7 @@ from output_paths import (
     DIR_SCREENSHOTS,
     DIR_MIC_TEST,
     DIR_SWEEP_RECORDINGS,
+    DIR_AIRTIGHTNESS,
     DIR_HAL_DUMP,
     DIR_HAL_CUSTOM,
     DIR_LOOPBACK,
@@ -514,12 +516,14 @@ class UIComponents:
         desc = (
             "声测大师(AcouTest) 面向 Android 设备的音频测试与远程控制，支持 ADB，便于设备管理与调试。\n\n"
             "【硬件测试】\n"
-            "• 麦克风测试：多麦录音与自定义参数配置\n"
-            "• 雷达检查：雷达传感器检测\n"
-            "• 喇叭测试：喇叭播放测试\n"
-            "• 多声道测试：多声道播放与测试\n\n"
+            "• 麦克风测试：多麦录音与参数配置\n"
+            "• 雷达检查：雷达相关日志监测\n"
+            "• 喇叭测试：默认/自定义音频播放验证\n"
+            "• 多声道测试：7.1/2.1/2.0 音频播放验证\n\n"
             "【声学测试】\n"
-            "• 扫频测试：大象扫频文件播放与录制\n\n"
+            "• 气密性测试：堵mic/不堵mic双阶段录制、自动命名、频谱对比\n"
+            "• 震音测试：震音播放与听感结果记录\n"
+            "• 扫频测试：扫频文件播放录制、批量测试、波形查看\n\n"
             "【音频调试】\n"
             "• Loopback和Ref测试：回路与参考通道测试\n"
             "• HAL录音：HAL 录音与拉取\n"
@@ -529,6 +533,7 @@ class UIComponents:
             "【常用功能】\n"
             "• 遥控器：常用遥控器按键模拟\n"
             "• 截图功能：设备截图\n"
+            "• OpenClaw：HTTP接口控制与连接状态日志\n"
             "• 账号登录：账号密码输入辅助\n\n"
             "【烧大象key】\n"
             "• u盘烧key\n"
@@ -559,6 +564,40 @@ class UIComponents:
         if getattr(sys, "frozen", False):
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(__file__))
+
+    def _apply_window_icon(self, win):
+        """给弹窗统一设置与主程序一致的图标（优先 exe 同级资源）。"""
+        try:
+            base_dir = self._get_runtime_base_dir()
+            png_paths = [
+                os.path.join(base_dir, "logo", "AcouTest.png"),
+                os.path.join("logo", "AcouTest.png"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
+            ]
+            for path in png_paths:
+                if path and os.path.exists(path):
+                    try:
+                        icon_img = tk.PhotoImage(file=path)
+                        win.iconphoto(True, icon_img)
+                        win._icon_image = icon_img
+                        break
+                    except Exception:
+                        pass
+
+            if platform.system() == "Windows":
+                ico_paths = [
+                    os.path.join(base_dir, "logo", "AcouTest.ico"),
+                    os.path.join("logo", "AcouTest.ico"),
+                ]
+                for ico_path in ico_paths:
+                    if os.path.exists(ico_path):
+                        try:
+                            win.iconbitmap(ico_path)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     @staticmethod
     def _bind_mousewheel_to_canvas(widget, canvas):
@@ -1455,16 +1494,21 @@ class UIComponents:
         # 创建子标签页
         acoustic_notebook = ttk.Notebook(parent)
         acoustic_notebook.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        if is_sub_tab_enabled("声学测试", "扫频测试"):
-            sweep_frame = ttk.Frame(acoustic_notebook)
-            acoustic_notebook.add(sweep_frame, text="扫频测试")
-            self.setup_sweep_tab(sweep_frame)
+
+        if is_sub_tab_enabled("声学测试", "气密性测试"):
+            airtight_frame = ttk.Frame(acoustic_notebook)
+            acoustic_notebook.add(airtight_frame, text="气密性测试")
+            self.setup_airtightness_tab(airtight_frame)
 
         if is_sub_tab_enabled("声学测试", "震音测试"):
             jitter_frame = ttk.Frame(acoustic_notebook)
             acoustic_notebook.add(jitter_frame, text="震音测试")
             self.setup_jitter_tab(jitter_frame)
+
+        if is_sub_tab_enabled("声学测试", "扫频测试"):
+            sweep_frame = ttk.Frame(acoustic_notebook)
+            acoustic_notebook.add(sweep_frame, text="扫频测试")
+            self.setup_sweep_tab(sweep_frame)
 
     def setup_hardware_tab(self, parent):
         """设置硬件测试标签页"""
@@ -1544,15 +1588,15 @@ class UIComponents:
             common_notebook.add(screenshot_frame, text="截图功能")
             self.setup_screenshot_tab(screenshot_frame)
 
-        if is_sub_tab_enabled("常用功能", "OpenClaw"):
-            openclaw_frame = ttk.Frame(common_notebook)
-            common_notebook.add(openclaw_frame, text="OpenClaw")
-            self.setup_openclaw_tab(openclaw_frame)
-
         if is_sub_tab_enabled("常用功能", "账号登录"):
             account_login_frame = ttk.Frame(common_notebook)
             common_notebook.add(account_login_frame, text="账号登录")
             self.setup_account_login_tab(account_login_frame)
+
+        if is_sub_tab_enabled("常用功能", "OpenClaw"):
+            openclaw_frame = ttk.Frame(common_notebook)
+            common_notebook.add(openclaw_frame, text="OpenClaw")
+            self.setup_openclaw_tab(openclaw_frame)
 
     def setup_openclaw_tab(self, parent):
         """OpenClaw 对接状态与日志面板。"""
@@ -2360,7 +2404,7 @@ class UIComponents:
             wf.writeframes(payload)
         return fixed_path
     
-    def open_audio_waveform_viewer(self, file_path, title="音频波形"):
+    def open_audio_waveform_viewer(self, file_path, title="音频波形", on_selection_changed=None):
         """弹出窗口显示 WAV 波形（多通道分轨显示）。"""
         if not os.path.isfile(file_path):
             messagebox.showerror("错误", f"文件不存在：\n{file_path}")
@@ -2488,12 +2532,12 @@ class UIComponents:
         btn_gain_up.pack(side="left", padx=2)
         btn_gain_reset = ttk.Button(toolbar, text="0dB", width=6)
         btn_gain_reset.pack(side="left", padx=(2, 10))
-        self._wave_play_btn = ttk.Button(toolbar, text="播放", width=6)
-        self._wave_play_btn.pack(side="left", padx=(8, 2))
-        self._wave_pause_btn = ttk.Button(toolbar, text="暂停", width=6)
-        self._wave_pause_btn.pack(side="left", padx=2)
-        self._wave_stop_btn = ttk.Button(toolbar, text="停止", width=6)
-        self._wave_stop_btn.pack(side="left", padx=2)
+        wave_play_btn = ttk.Button(toolbar, text="播放", width=6)
+        wave_play_btn.pack(side="left", padx=(8, 2))
+        wave_pause_btn = ttk.Button(toolbar, text="暂停", width=6)
+        wave_pause_btn.pack(side="left", padx=2)
+        wave_stop_btn = ttk.Button(toolbar, text="停止", width=6)
+        wave_stop_btn.pack(side="left", padx=2)
         
         canvas_wrap = ttk.Frame(win)
         canvas_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -2597,6 +2641,20 @@ class UIComponents:
             draw_pts = max(1, int(state.get("draw_points", 1)))
             tt = max(0.0, min(total_duration, float(t)))
             return left_px + int((tt / max(1e-9, total_duration)) * draw_pts)
+
+        def _emit_selection_change():
+            cb = on_selection_changed
+            if not callable(cb):
+                return
+            try:
+                sel_s = state.get("sel_start_t", None)
+                sel_e = state.get("sel_end_t", None)
+                if state.get("selection_active", False) and sel_s is not None and sel_e is not None and abs(sel_e - sel_s) >= 0.01:
+                    cb(min(sel_s, sel_e), max(sel_s, sel_e))
+                else:
+                    cb(None, None)
+            except Exception:
+                pass
         
         def render():
             state["render_job"] = None
@@ -2893,11 +2951,13 @@ class UIComponents:
                         state["playback_time"] = sel_s
                     _draw_drag_overlay()
                     _update_playhead_overlay()
+                    _emit_selection_change()
                 else:
                     state["sel_start_t"] = None
                     state["sel_end_t"] = None
                     state["selection_active"] = False
                     _clear_drag_overlay()
+                    _emit_selection_change()
                 request_render(0)
                 return
             t = _x_to_time(canvas.canvasx(event.x))
@@ -2910,6 +2970,7 @@ class UIComponents:
             if not state.get("is_playing", False):
                 state["playback_time"] = t
             _update_playhead_overlay()
+            _emit_selection_change()
             request_render(1)
 
         def clear_selection(_event=None):
@@ -2919,6 +2980,7 @@ class UIComponents:
             state["sel_end_t"] = None
             state["selection_active"] = False
             _update_playhead_overlay()
+            _emit_selection_change()
             request_render(1)
         
         def on_ctrl_wheel(event=None, direction=None):
@@ -3106,7 +3168,7 @@ class UIComponents:
                 state["first_valid_pos_seen"] = False
                 state["start_grace_until_perf"] = time.perf_counter() + 1.0
                 _set_play_clock(start_at)
-                self._wave_pause_btn.config(text="暂停")
+                wave_pause_btn.config(text="暂停")
                 _schedule_progress()
             except Exception as e:
                 messagebox.showerror("播放失败", f"播放音频失败：\n{e}")
@@ -3127,7 +3189,7 @@ class UIComponents:
             state["is_paused"] = False
             state["cursor_time"] = cur_t
             state["resume_from_cursor"] = True
-            self._wave_pause_btn.config(text="暂停")
+            wave_pause_btn.config(text="暂停")
             play_audio()
         
         def pause_resume_audio():
@@ -3139,12 +3201,12 @@ class UIComponents:
                     state["playback_time"] = max(0.0, min(total_duration, _get_clock_time()))
                     pg.mixer.music.pause()
                     state["is_paused"] = True
-                    self._wave_pause_btn.config(text="继续")
+                    wave_pause_btn.config(text="继续")
                 elif state["is_paused"]:
                     pg.mixer.music.unpause()
                     state["is_paused"] = False
                     _set_play_clock(state.get("playback_time", 0.0))
-                    self._wave_pause_btn.config(text="暂停")
+                    wave_pause_btn.config(text="暂停")
                     _schedule_progress()
             except Exception:
                 pass
@@ -3161,7 +3223,10 @@ class UIComponents:
             state["is_paused"] = False
             state["playback_time"] = state.get("cursor_time", 0.0)
             state["play_end_time"] = state.get("playback_time", 0.0)
-            self._wave_pause_btn.config(text="暂停")
+            try:
+                wave_pause_btn.config(text="暂停")
+            except Exception:
+                pass
             if state.get("progress_job") is not None:
                 try:
                     win.after_cancel(state["progress_job"])
@@ -3215,7 +3280,10 @@ class UIComponents:
             elif (not is_busy) and now_perf >= float(state.get("start_grace_until_perf", 0.0)):
                 state["is_playing"] = False
                 state["is_paused"] = False
-                self._wave_pause_btn.config(text="暂停")
+                try:
+                    wave_pause_btn.config(text="暂停")
+                except Exception:
+                    pass
                 request_render(1)
                 return
             if state["playback_time"] >= max(state.get("play_start_offset", 0.0), state.get("play_end_time", total_duration)) - 0.02:
@@ -3248,9 +3316,9 @@ class UIComponents:
         btn_gain_up.config(command=lambda: gain_step(+1))
         btn_gain_down.config(command=lambda: gain_step(-1))
         btn_gain_reset.config(command=gain_reset)
-        self._wave_play_btn.config(command=play_audio)
-        self._wave_pause_btn.config(command=pause_resume_audio)
-        self._wave_stop_btn.config(command=stop_audio)
+        wave_play_btn.config(command=play_audio)
+        wave_pause_btn.config(command=pause_resume_audio)
+        wave_stop_btn.config(command=stop_audio)
         
         def _on_wave_win_close():
             stop_audio()
@@ -7032,6 +7100,1029 @@ class UIComponents:
             self.hal_status_var.set(f"打开文件夹出错: {str(e)}")
             self.update_info_text(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
+
+    def setup_airtightness_tab(self, parent):
+        """设置气密性测试标签页（堵mic/不堵mic）"""
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill="both", expand=True)
+
+        test_frame = ttk.LabelFrame(frame, text="测试设置（固定脚本）")
+        test_frame.pack(fill="x", pady=5)
+
+        line1 = ttk.Frame(test_frame)
+        line1.pack(fill="x", padx=10, pady=4)
+        ttk.Label(line1, text="录制时长(秒):").pack(side="left")
+        self.airtight_duration_var = tk.StringVar(value="15")
+        ttk.Entry(line1, textvariable=self.airtight_duration_var, width=6).pack(side="left", padx=(6, 18))
+        ttk.Label(line1, text="固定录制参数: 设备0 / 卡3 / 通道4 / 采样率16000 / 位深16").pack(side="left")
+
+        line2 = ttk.Frame(test_frame)
+        line2.pack(fill="x", padx=10, pady=4)
+        ttk.Label(line2, text="播放文件:").grid(row=0, column=0, sticky="w")
+        self.airtight_play_file_var = tk.StringVar(value="")
+        self.airtight_play_file_combo = ttk.Combobox(
+            line2,
+            textvariable=self.airtight_play_file_var,
+            width=34,
+            state="readonly",
+        )
+        self.airtight_play_file_combo.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        self.airtight_play_file_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_airtight_play_file_combo_selected())
+        ttk.Button(
+            line2,
+            text="刷新",
+            width=6,
+            style="Small.TButton",
+            command=self.refresh_airtight_play_files,
+        ).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(
+            line2,
+            text="浏览",
+            width=6,
+            style="Small.TButton",
+            command=self.browse_airtight_play_file,
+        ).grid(row=0, column=3)
+        line2.grid_columnconfigure(1, weight=1)
+
+        path_frame = ttk.Frame(frame)
+        path_frame.pack(fill="x", pady=5)
+        ttk.Label(path_frame, text="保存路径:").pack(side="left")
+        self.airtight_save_path_var = tk.StringVar(value=get_output_dir(DIR_AIRTIGHTNESS))
+        ttk.Entry(path_frame, textvariable=self.airtight_save_path_var, width=52).pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", pady=8)
+        btn_row1 = ttk.Frame(btn_frame)
+        btn_row1.pack(fill="x", pady=(0, 4))
+        btn_row2 = ttk.Frame(btn_frame)
+        btn_row2.pack(fill="x")
+        self.start_airtight_button = ttk.Button(
+            btn_row1, text="开始测试", width=9, style="Small.TButton", command=self.start_airtightness_test
+        )
+        self.start_airtight_button.pack(side="left", padx=5)
+        self.stop_airtight_button = ttk.Button(
+            btn_row1,
+            text="停止测试",
+            width=9,
+            style="Small.TButton",
+            command=self.stop_airtightness_test,
+            state="disabled",
+        )
+        self.stop_airtight_button.pack(side="left", padx=5)
+        self.view_airtight_du_button = ttk.Button(
+            btn_row1,
+            text="堵mic波形",
+            width=10,
+            style="Small.TButton",
+            command=lambda: self.show_latest_airtight_waveform("du_mic"),
+            state="disabled",
+        )
+        self.view_airtight_du_button.pack(side="left", padx=5)
+        self.view_airtight_open_button = ttk.Button(
+            btn_row1,
+            text="不堵mic波形",
+            width=11,
+            style="Small.TButton",
+            command=lambda: self.show_latest_airtight_waveform("open_mic"),
+            state="disabled",
+        )
+        self.view_airtight_open_button.pack(side="left", padx=5)
+        self.view_airtight_compare_button = ttk.Button(
+            btn_row1,
+            text="对比波形",
+            width=9,
+            style="Small.TButton",
+            command=self.show_airtight_compare_waveforms,
+            state="disabled",
+        )
+        self.view_airtight_compare_button.pack(side="left", padx=5)
+        ttk.Button(
+            btn_row1, text="打开文件夹", width=9, style="Small.TButton", command=self.open_airtight_folder
+        ).pack(side="left", padx=5)
+
+        status_frame = ttk.Frame(frame)
+        status_frame.pack(fill="both", expand=True, pady=5)
+        self.airtight_status_var = tk.StringVar(value="就绪")
+        ttk.Label(status_frame, textvariable=self.airtight_status_var, font=("Arial", 10, "bold")).pack(anchor="w")
+
+        info_box = ttk.LabelFrame(status_frame, text="测试信息")
+        info_box.pack(fill="both", expand=True, pady=(6, 0))
+        self.airtight_info_text = tk.Text(info_box, height=6, wrap="word")
+        self.airtight_info_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self.airtight_info_text.insert("end", "点击【开始测试】后会先让你选择堵mic/不堵mic。\n")
+        self.airtight_info_text.config(state="disabled")
+
+        manual_box = ttk.LabelFrame(frame, text="手动对比文件（无需先测）")
+        manual_box.pack(fill="x", pady=(0, 5), before=status_frame)
+        manual_row1 = ttk.Frame(manual_box)
+        manual_row1.pack(fill="x", padx=8, pady=(6, 4))
+        ttk.Label(manual_row1, text="堵mic文件:").pack(side="left")
+        self.airtight_du_manual_path_var = tk.StringVar(value="")
+        ttk.Entry(manual_row1, textvariable=self.airtight_du_manual_path_var, width=58).pack(side="left", padx=(6, 6), fill="x", expand=True)
+        ttk.Button(
+            manual_row1,
+            text="浏览",
+            width=6,
+            style="Small.TButton",
+            command=lambda: self.browse_airtight_compare_file("du_mic"),
+        ).pack(side="left")
+
+        manual_row2 = ttk.Frame(manual_box)
+        manual_row2.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(manual_row2, text="不堵mic文件:").pack(side="left")
+        self.airtight_open_manual_path_var = tk.StringVar(value="")
+        ttk.Entry(manual_row2, textvariable=self.airtight_open_manual_path_var, width=58).pack(side="left", padx=(6, 6), fill="x", expand=True)
+        ttk.Button(
+            manual_row2,
+            text="浏览",
+            width=6,
+            style="Small.TButton",
+            command=lambda: self.browse_airtight_compare_file("open_mic"),
+        ).pack(side="left")
+
+        self._airtight_test_running = False
+        self._airtight_stop_requested = False
+        self._airtight_record_proc = None
+        self._airtight_play_proc = None
+        self.latest_airtight_du_path = ""
+        self.latest_airtight_open_path = ""
+        self._airtight_play_file_map = {}
+        self._airtight_play_file_manual_path = ""
+        self.refresh_airtight_play_files()
+
+    def _append_airtight_info(self, message):
+        if not hasattr(self, "airtight_info_text"):
+            return
+        try:
+            self.airtight_info_text.config(state="normal")
+            self.airtight_info_text.insert("end", f"{message}\n")
+            self.airtight_info_text.see("end")
+            self.airtight_info_text.config(state="disabled")
+        except Exception:
+            pass
+
+    def browse_airtight_save_path(self):
+        base_dir = self.airtight_save_path_var.get().strip() or get_output_dir(DIR_AIRTIGHTNESS)
+        selected = filedialog.askdirectory(title="选择气密性测试保存目录", initialdir=base_dir)
+        if selected:
+            self.airtight_save_path_var.set(selected)
+
+    def refresh_airtight_play_files(self):
+        """刷新气密性测试可选播放文件列表（audio/elephant 与 audio/custom）。"""
+        file_map = {}
+        candidates = []
+        base_dir = self._get_runtime_base_dir()
+        for folder, tag in (("elephant", "大象"), ("custom", "自定义")):
+            for root in (
+                os.path.join(base_dir, "audio", folder),
+                os.path.join(os.getcwd(), "audio", folder),
+            ):
+                if not os.path.isdir(root):
+                    continue
+                for name in os.listdir(root):
+                    if not name.lower().endswith(".wav"):
+                        continue
+                    full = os.path.join(root, name)
+                    label = f"[{tag}] {name}"
+                    file_map[label] = full
+                    candidates.append(label)
+        candidates = sorted(set(candidates))
+        self._airtight_play_file_map = file_map
+        if hasattr(self, "airtight_play_file_combo"):
+            self.airtight_play_file_combo["values"] = candidates
+        # 若已手动选择文件，优先显示手动条目
+        if getattr(self, "_airtight_play_file_manual_path", ""):
+            manual = self._airtight_play_file_manual_path
+            self.airtight_play_file_var.set(f"[手动] {os.path.basename(manual)}")
+            return
+        # 默认选 sweep_speech_48k.wav
+        preferred = ""
+        for label in candidates:
+            if label.lower().endswith("sweep_speech_48k.wav"):
+                preferred = label
+                break
+        if preferred:
+            self.airtight_play_file_var.set(preferred)
+        elif candidates and not self.airtight_play_file_var.get().strip():
+            self.airtight_play_file_var.set(candidates[0])
+
+    def browse_airtight_play_file(self):
+        file_path = filedialog.askopenfilename(
+            title="选择气密性播放文件",
+            filetypes=[("WAV文件", "*.wav"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+        self._airtight_play_file_manual_path = file_path
+        self.airtight_play_file_var.set(f"[手动] {os.path.basename(file_path)}")
+        self._append_airtight_info(f"已选择手动播放文件: {file_path}")
+
+    def _on_airtight_play_file_combo_selected(self):
+        """下拉选择后，取消手动文件覆盖。"""
+        self._airtight_play_file_manual_path = ""
+
+    def _resolve_airtight_play_source(self):
+        manual = getattr(self, "_airtight_play_file_manual_path", "")
+        if manual and os.path.isfile(manual):
+            return manual, os.path.basename(manual)
+        selected_label = (self.airtight_play_file_var.get() or "").strip()
+        mapped = (self._airtight_play_file_map or {}).get(selected_label)
+        if mapped and os.path.isfile(mapped):
+            return mapped, os.path.basename(mapped)
+        fallback = self._find_airtight_source_file()
+        if fallback:
+            return fallback, os.path.basename(fallback)
+        return "", ""
+
+    def _refresh_airtight_compare_buttons(self):
+        du_ok = bool(self.latest_airtight_du_path and os.path.exists(self.latest_airtight_du_path))
+        open_ok = bool(self.latest_airtight_open_path and os.path.exists(self.latest_airtight_open_path))
+        try:
+            self.view_airtight_du_button.config(state="normal" if du_ok else "disabled")
+            self.view_airtight_open_button.config(state="normal" if open_ok else "disabled")
+            self.view_airtight_compare_button.config(state="normal" if (du_ok and open_ok) else "disabled")
+        except Exception:
+            pass
+
+    def browse_airtight_compare_file(self, mode):
+        file_path = filedialog.askopenfilename(
+            title="选择气密性对比录音文件",
+            filetypes=[("WAV文件", "*.wav"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+        mode = "du_mic" if mode == "du_mic" else "open_mic"
+        if mode == "du_mic":
+            self.airtight_du_manual_path_var.set(file_path)
+            self.latest_airtight_du_path = file_path
+            self._append_airtight_info(f"已手动指定堵mic文件: {file_path}")
+        else:
+            self.airtight_open_manual_path_var.set(file_path)
+            self.latest_airtight_open_path = file_path
+            self._append_airtight_info(f"已手动指定不堵mic文件: {file_path}")
+        self._refresh_airtight_compare_buttons()
+
+    def open_airtight_folder(self):
+        save_dir = self.airtight_save_path_var.get().strip() or get_output_dir(DIR_AIRTIGHTNESS)
+        os.makedirs(save_dir, exist_ok=True)
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", save_dir])
+            else:
+                subprocess.run(["xdg-open", save_dir])
+        except Exception as e:
+            self.airtight_status_var.set(f"打开文件夹失败: {e}")
+            messagebox.showerror("错误", f"打开文件夹失败:\n{e}")
+
+    def _find_airtight_source_file(self):
+        base = self._get_runtime_base_dir()
+        candidates = [
+            os.path.join(base, "audio", "elephant", "sweep_speech_48k.wav"),
+            os.path.join(base, "audio", "custom", "sweep_speech_48k.wav"),
+            os.path.join(os.getcwd(), "audio", "elephant", "sweep_speech_48k.wav"),
+            os.path.join(os.getcwd(), "audio", "custom", "sweep_speech_48k.wav"),
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return ""
+
+    def start_airtightness_test(self):
+        if self._airtight_test_running:
+            messagebox.showwarning("提示", "气密性测试正在运行，请先停止或等待完成。")
+            return
+        if not self.check_device_selected():
+            return
+
+        choice = messagebox.askyesnocancel(
+            "选择测试模式",
+            "请选择本次测试模式：\n\n是：堵mic测试\n否：不堵mic测试\n取消：不开始",
+        )
+        if choice is None:
+            return
+        mode = "du_mic" if choice else "open_mic"
+        self._launch_airtightness_mode(mode)
+
+    def _launch_airtightness_mode(self, mode):
+        if self._airtight_test_running:
+            messagebox.showwarning("提示", "气密性测试正在运行，请先停止或等待完成。")
+            return
+        mode = "du_mic" if mode == "du_mic" else "open_mic"
+        mode_label = "堵mic" if mode == "du_mic" else "不堵mic"
+
+        if mode == "du_mic":
+            messagebox.showinfo("堵mic测试提醒", "请先使用橡皮泥堵住麦克风孔，再点击确定开始测试。")
+        else:
+            messagebox.showinfo("不堵mic测试提醒", "请确认已去掉橡皮泥（麦克风孔不堵），再点击确定开始测试。")
+
+        save_dir = self.airtight_save_path_var.get().strip() or ensure_output_dir(DIR_AIRTIGHTNESS)
+        os.makedirs(save_dir, exist_ok=True)
+        self.airtight_save_path_var.set(save_dir)
+
+        source_file, source_name = self._resolve_airtight_play_source()
+        if not source_file:
+            messagebox.showerror("错误", "未找到可用播放文件，请先在“播放文件”选择或手动浏览 WAV 文件。")
+            return
+
+        self._airtight_stop_requested = False
+        self._airtight_test_running = True
+        self.start_airtight_button.config(state="disabled")
+        self.stop_airtight_button.config(state="normal")
+        self.airtight_status_var.set(f"正在测试: {mode_label}")
+        self._append_airtight_info(f"=== 开始{mode_label}测试 ===")
+        self._append_airtight_info(f"播放文件: {source_name}")
+
+        threading.Thread(
+            target=self._run_airtightness_test,
+            args=(mode, mode_label, source_file, source_name, save_dir),
+            daemon=True,
+        ).start()
+
+    def stop_airtightness_test(self):
+        if not self._airtight_test_running:
+            return
+        self._airtight_stop_requested = True
+        self.airtight_status_var.set("正在停止气密性测试...")
+        self._append_airtight_info("收到停止指令，正在终止录制/播放...")
+        try:
+            # 直接复用扫频测试的停止逻辑，确保 tinyplay/tinycap 清理一致
+            self.stop_sweep_test()
+        except Exception:
+            pass
+
+    def _terminate_airtight_processes(self):
+        for proc_name in ("_airtight_play_proc", "_airtight_record_proc"):
+            proc = getattr(self, proc_name, None)
+            if not proc:
+                continue
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            setattr(self, proc_name, None)
+        try:
+            subprocess.run(self.get_adb_command('shell su -c "killall tinyplay"'), shell=True, capture_output=True, text=True)
+            subprocess.run(self.get_adb_command('shell su -c "killall tinycap"'), shell=True, capture_output=True, text=True)
+        except Exception:
+            pass
+
+    def _run_airtightness_test(self, mode, mode_label, source_file, source_name, save_dir):
+        ui = getattr(self, "root", self.parent)
+        success_mode = None
+
+        def ui_log(msg):
+            ui.after(0, lambda m=msg: self._append_airtight_info(m))
+
+        old_settings = {
+            "record_device": self.record_device_var.get(),
+            "record_card": self.record_card_var.get(),
+            "record_channels": self.record_channels_var.get(),
+            "record_rate": self.record_rate_var.get(),
+            "record_bits": self.record_bits_var.get(),
+            "duration": self.sweep_duration_var.get(),
+        }
+
+        try:
+            # 固定脚本参数：与扫频测试共用同一执行通道，避免两套逻辑不一致
+            self.record_device_var.set("0")
+            self.record_card_var.set("3")
+            self.record_channels_var.set("4")
+            self.record_rate_var.set("16000")
+            self.record_bits_var.set("16")
+            self.sweep_duration_var.set(self.airtight_duration_var.get())
+
+            device_id = ""
+            if hasattr(self, "device_var"):
+                device_id = str(self.device_var.get() or "").strip()
+            if not device_id:
+                device_id = str(getattr(self, "selected_device", "") or "").strip()
+
+            sweep_file = (source_name or "sweep_speech_48k.wav").strip()
+            ui_log(f"模式: {mode_label}，开始调用扫频测试执行接口（固定文件 {sweep_file}）...")
+            try:
+                ui_log(
+                    f"本次播放参数沿用扫频设置: 设备{self.play_device_var.get()} / 卡{self.play_card_var.get()}"
+                )
+            except Exception:
+                pass
+            # 与扫频入口完全一致的前置准备（清理 tiny 进程 + 重启 audioserver）
+            self._prepare_sweep_runtime_environment(device_id, log_fn=ui_log)
+
+            ok = self._run_sweep_test(source_file, sweep_file, save_dir, device_id)
+            if not ok:
+                raise RuntimeError("扫频执行接口返回失败")
+            if not bool(getattr(self, "_last_sweep_play_started", False)):
+                raise RuntimeError("播放未成功启动（本次仅录制成功）。请检查播放设备/卡号或设备音频权限。")
+
+            generated_path = str(getattr(self, "latest_sweep_recording_path", "") or "").strip()
+            if not generated_path or not os.path.exists(generated_path):
+                raise RuntimeError("扫频执行完成，但未找到录音输出文件")
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            final_name = f"airtight_{mode}_{timestamp}_sweep_speech_48k.wav"
+            final_path = os.path.join(save_dir, final_name)
+            if os.path.abspath(generated_path) != os.path.abspath(final_path):
+                os.replace(generated_path, final_path)
+
+            if mode == "du_mic":
+                self.latest_airtight_du_path = final_path
+            else:
+                self.latest_airtight_open_path = final_path
+            ui.after(0, self._refresh_airtight_compare_buttons)
+
+            ui.after(0, lambda: self.airtight_status_var.set(f"{mode_label}测试完成"))
+            ui_log(f"保存完成: {final_path}")
+            ui_log(f"保存目录: {save_dir}")
+            success_mode = mode
+        except Exception as e:
+            err = str(e).strip() or "未知错误"
+            ui.after(0, lambda m=err: self.airtight_status_var.set(f"测试失败: {m}"))
+            ui_log(f"测试失败: {err}")
+        finally:
+            # 恢复扫频参数，避免影响用户在扫频页的原始设置
+            try:
+                self.record_device_var.set(old_settings["record_device"])
+                self.record_card_var.set(old_settings["record_card"])
+                self.record_channels_var.set(old_settings["record_channels"])
+                self.record_rate_var.set(old_settings["record_rate"])
+                self.record_bits_var.set(old_settings["record_bits"])
+                self.sweep_duration_var.set(old_settings["duration"])
+            except Exception:
+                pass
+
+            self._airtight_test_running = False
+            self._airtight_stop_requested = False
+            ui.after(0, lambda: self.start_airtight_button.config(state="normal"))
+            ui.after(0, lambda: self.stop_airtight_button.config(state="disabled"))
+            if success_mode:
+                ui.after(0, lambda m=success_mode, d=save_dir: self._show_airtight_finish_dialog(m, d))
+
+    def _show_airtight_finish_dialog(self, mode, save_dir):
+        mode = "du_mic" if mode == "du_mic" else "open_mic"
+        mode_label = "堵mic" if mode == "du_mic" else "不堵mic"
+        win = tk.Toplevel(getattr(self, "root", self.parent))
+        win.title("气密性测试完成")
+        win.geometry("460x170")
+        win.resizable(False, False)
+        win.transient(getattr(self, "root", self.parent))
+        win.grab_set()
+        self._apply_window_icon(win)
+
+        if mode == "du_mic":
+            message = (
+                f"{mode_label}测试完成。\n\n"
+                "下一步请去掉橡皮泥后继续不堵mic测试。"
+            )
+        else:
+            message = (
+                f"{mode_label}测试完成。\n\n"
+                "可继续进行频谱对比查看。"
+            )
+        ttk.Label(win, text=message, justify="left").pack(fill="x", padx=20, pady=(20, 12))
+        ttk.Label(win, text=f"保存目录: {save_dir}", foreground="#555").pack(fill="x", padx=20, pady=(0, 14))
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=20, pady=(0, 16))
+
+        def on_open_folder():
+            try:
+                self.open_airtight_folder()
+            except Exception:
+                pass
+
+        def on_continue():
+            win.destroy()
+            if mode == "du_mic":
+                self._launch_airtightness_mode("open_mic")
+            else:
+                if self.latest_airtight_du_path and self.latest_airtight_open_path:
+                    self.show_airtight_compare_waveforms()
+
+        tk.Button(btns, text="打开文件夹", width=14, command=on_open_folder).pack(side="left", padx=(0, 8))
+        tk.Button(btns, text="继续下一步测试", width=14, command=on_continue).pack(side="left")
+        tk.Button(btns, text="关闭", width=12, command=win.destroy).pack(side="right")
+
+    def show_latest_airtight_waveform(self, mode):
+        mode = "du_mic" if mode == "du_mic" else "open_mic"
+        target_path = self.latest_airtight_du_path if mode == "du_mic" else self.latest_airtight_open_path
+        mode_label = "堵mic" if mode == "du_mic" else "不堵mic"
+        if target_path and os.path.exists(target_path):
+            self.open_audio_waveform_viewer(target_path)
+            return
+
+        save_dir = self.airtight_save_path_var.get().strip() or get_output_dir(DIR_AIRTIGHTNESS)
+        if not os.path.isdir(save_dir):
+            messagebox.showwarning("提示", f"未找到{mode_label}录音目录：{save_dir}")
+            return
+        prefix = f"airtight_{mode}_"
+        files = [
+            os.path.join(save_dir, name)
+            for name in os.listdir(save_dir)
+            if name.startswith(prefix) and name.lower().endswith(".wav")
+        ]
+        if not files:
+            messagebox.showwarning("提示", f"未找到{mode_label}录音文件。")
+            return
+        latest = max(files, key=lambda p: os.path.getmtime(p))
+        if mode == "du_mic":
+            self.latest_airtight_du_path = latest
+        else:
+            self.latest_airtight_open_path = latest
+        self.open_audio_waveform_viewer(latest)
+
+    def show_airtight_compare_waveforms(self):
+        du_path = self.latest_airtight_du_path
+        open_path = self.latest_airtight_open_path
+        if not du_path or not os.path.exists(du_path):
+            messagebox.showwarning("提示", "请先完成并保存堵mic测试录音。")
+            return
+        if not open_path or not os.path.exists(open_path):
+            messagebox.showwarning("提示", "请先完成并保存不堵mic测试录音。")
+            return
+        self.open_airtight_spectrum_compare_viewer(du_path, open_path)
+
+    def _read_wav_channel_samples(self, file_path, channel_index, start_s=None, end_s=None):
+        with wave.open(file_path, "rb") as wf:
+            channels = wf.getnchannels()
+            sample_rate = wf.getframerate()
+            sample_width = wf.getsampwidth()
+            total_frames = wf.getnframes()
+            if channels <= 0 or total_frames <= 0:
+                raise ValueError("WAV 文件为空")
+            if channel_index < 0 or channel_index >= channels:
+                raise ValueError(f"通道索引越界: {channel_index + 1}/{channels}")
+            total_duration = total_frames / float(sample_rate)
+            s0 = 0.0 if start_s is None else max(0.0, float(start_s))
+            s1 = total_duration if end_s is None else max(0.0, float(end_s))
+            if s1 <= s0:
+                raise ValueError("时间段无效：结束时间必须大于开始时间")
+            s0 = min(s0, total_duration)
+            s1 = min(s1, total_duration)
+            start_frame = int(s0 * sample_rate)
+            frame_count = max(1, int((s1 - s0) * sample_rate))
+
+            wf.setpos(start_frame)
+            raw = wf.readframes(frame_count)
+
+        values = []
+        if sample_width == 1:
+            values = [b - 128 for b in raw]
+            full_scale = 128.0
+        elif sample_width == 2:
+            arr = array("h")
+            arr.frombytes(raw)
+            values = arr.tolist()
+            full_scale = 32768.0
+        elif sample_width == 3:
+            out = []
+            for i in range(0, len(raw) - 2, 3):
+                v = raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
+                if v & 0x800000:
+                    v -= 0x1000000
+                out.append(v)
+            values = out
+            full_scale = 8388608.0
+        elif sample_width == 4:
+            arr = array("i")
+            arr.frombytes(raw)
+            values = arr.tolist()
+            full_scale = 2147483648.0
+        else:
+            raise ValueError(f"暂不支持位宽: {sample_width * 8}bit")
+
+        if not values:
+            raise ValueError("音频数据读取失败")
+
+        channel_samples = []
+        for i in range(channel_index, len(values), channels):
+            channel_samples.append(float(values[i]) / full_scale)
+        if len(channel_samples) < 256:
+            raise ValueError("有效采样点太少，无法进行频谱分析")
+        return channel_samples, sample_rate, channels
+
+    def _fft_complex(self, vec):
+        n = len(vec)
+        j = 0
+        for i in range(1, n):
+            bit = n >> 1
+            while j & bit:
+                j ^= bit
+                bit >>= 1
+            j ^= bit
+            if i < j:
+                vec[i], vec[j] = vec[j], vec[i]
+
+        size = 2
+        while size <= n:
+            half = size // 2
+            wm = cmath.exp(complex(0.0, -2.0 * math.pi / size))
+            for k in range(0, n, size):
+                w = 1.0 + 0.0j
+                for m in range(half):
+                    u = vec[k + m]
+                    t = w * vec[k + m + half]
+                    vec[k + m] = u + t
+                    vec[k + m + half] = u - t
+                    w *= wm
+            size <<= 1
+
+    def _compute_channel_spectrum(self, file_path, channel_index, start_s=None, end_s=None):
+        samples, sample_rate, channels = self._read_wav_channel_samples(
+            file_path,
+            channel_index,
+            start_s=start_s,
+            end_s=end_s,
+        )
+        if len(samples) < 512:
+            raise ValueError("可用于频谱分析的数据不足")
+
+        # 去直流分量，减少低频偏置影响
+        mean_val = sum(samples) / len(samples)
+        samples = [v - mean_val for v in samples]
+
+        # Welch 参数：行业常见做法（Hann + 50% overlap + 功率平均）
+        n = 1
+        max_n = min(32768, len(samples))
+        while (n << 1) <= max_n:
+            n <<= 1
+        if n < 512:
+            n = 512
+        if n > len(samples):
+            n = 1
+            while (n << 1) <= len(samples):
+                n <<= 1
+        if n < 256:
+            raise ValueError("可用于FFT的数据不足")
+
+        step = max(1, n // 2)  # 50% overlap
+        window = [0.5 - 0.5 * math.cos(2.0 * math.pi * i / (n - 1)) for i in range(n)]
+        sum_w2 = max(1e-18, sum(w * w for w in window))
+        cg = max(1e-12, sum(window) / n)  # coherent gain（幅度校正）
+        half = n // 2
+        df = sample_rate / n
+
+        acc_psd = [0.0] * (half + 1)
+        acc_amp2 = [0.0] * (half + 1)
+        max_amp = [0.0] * (half + 1)
+        seg_count = 0
+
+        for start in range(0, len(samples) - n + 1, step):
+            seg = samples[start:start + n]
+            vec = [complex(seg[i] * window[i], 0.0) for i in range(n)]
+            self._fft_complex(vec)
+
+            for k in range(0, half + 1):
+                mag = abs(vec[k])
+                one_side_factor = 1.0 if (k == 0 or (k == half and n % 2 == 0)) else 2.0
+
+                # 单边 PSD（dB/Hz 基础）：Pxx = factor * |X|^2 / (Fs * sum(w^2))
+                psd = (one_side_factor * (mag * mag)) / (sample_rate * sum_w2)
+                acc_psd[k] += psd
+                # 单边幅度谱（dBFS）：A ~= factor * |X| / (N * CG)
+                amp = (one_side_factor * mag) / (n * cg)
+                acc_amp2[k] += (amp * amp)
+                if amp > max_amp[k]:
+                    max_amp[k] = amp
+
+            seg_count += 1
+
+        if seg_count <= 0:
+            raise ValueError("频谱分段失败")
+
+        avg_psd = [v / seg_count for v in acc_psd]
+        # 幅度 RMS 平均用于统计；显示曲线采用“选区扫描峰值包络”（更接近 Adobe 扫描选区观感）
+        avg_amp = [math.sqrt(v / seg_count) for v in acc_amp2]
+        freqs = []
+        dbs = []
+        raw_freqs = []
+        raw_mags = []
+        raw_psd = []
+        eps = 1e-20
+        # 跳过 DC（k=0），避免直流附近主导视觉；保留 Nyquist 前全部
+        for k in range(1, half):
+            f = k * df
+            p = avg_psd[k]
+            a = max(max_amp[k], 1e-12)
+            db = 20.0 * math.log10(a)
+            freqs.append(f)
+            dbs.append(db)
+            raw_freqs.append(f)
+            raw_mags.append(max(avg_amp[k], 1e-12))
+            raw_psd.append(max(p, eps))
+
+        # 降采样到最多约 1200 点，提升绘制性能（保留峰值特征）
+        if len(freqs) > 1200:
+            step_ds = int(math.ceil(len(freqs) / 1200.0))
+            f2, d2 = [], []
+            for i in range(0, len(freqs), step_ds):
+                f_slice = freqs[i:i + step_ds]
+                d_slice = dbs[i:i + step_ds]
+                if not f_slice:
+                    continue
+                f2.append(sum(f_slice) / len(f_slice))
+                d2.append(sum(d_slice) / len(d_slice))
+            freqs, dbs = f2, d2
+
+        # 仅用于显示的轻量平滑，减少毛刺感；不影响 raw_* 原始统计
+        dbs = self._smooth_display_db_curve(dbs, passes=2)
+        return {
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "freqs": freqs,
+            "dbs": dbs,
+            "raw_freqs": raw_freqs,
+            "raw_mags": raw_mags,
+            "raw_psd": raw_psd,
+        }
+
+    def _compute_band_energy_db(self, spec, f_low=300.0, f_high=3000.0):
+        freqs = spec.get("raw_freqs") or []
+        psd = spec.get("raw_psd") or []
+        if freqs and psd and len(freqs) == len(psd):
+            # 行业标准：频段能量 = ∫ PSD(f) df（离散化为 sum(PSD * df)）
+            if len(freqs) >= 2:
+                df = max(1e-12, freqs[1] - freqs[0])
+            else:
+                sr = float(spec.get("sample_rate") or 1.0)
+                df = sr / max(1.0, 2.0 * max(1.0, len(freqs)))
+            band_energy = 0.0
+            for f, p in zip(freqs, psd):
+                if f_low <= f <= f_high:
+                    band_energy += float(p) * df
+            if band_energy <= 0.0:
+                return None
+            return 10.0 * math.log10(max(band_energy, 1e-20))
+
+        # 兼容旧数据格式
+        mags = spec.get("raw_mags")
+        if mags is None:
+            mags = [10.0 ** (d / 20.0) for d in (spec.get("dbs") or [])]
+            freqs = spec.get("raw_freqs") or spec.get("freqs") or []
+        total_power = 0.0
+        count = 0
+        for f, m in zip(freqs, mags):
+            if f_low <= f <= f_high:
+                total_power += (float(m) * float(m))
+                count += 1
+        if count <= 0:
+            return None
+        return 10.0 * math.log10(max(total_power / count, 1e-20))
+
+    def _compute_average_spectrum_db(self, spec, f_low=0.0, f_high=None):
+        """计算频谱平均电平（基于 PSD 均值，返回 dB）。"""
+        freqs = spec.get("raw_freqs") or []
+        psd = spec.get("raw_psd") or []
+        if not freqs or not psd or len(freqs) != len(psd):
+            return None
+        if f_high is None:
+            f_high = float(spec.get("sample_rate") or 0.0) / 2.0
+        s = 0.0
+        c = 0
+        for f, p in zip(freqs, psd):
+            if f_low <= f <= f_high:
+                s += float(p)
+                c += 1
+        if c <= 0:
+            return None
+        return 10.0 * math.log10(max(s / c, 1e-20))
+
+    def _smooth_display_db_curve(self, dbs, passes=2):
+        """仅用于显示曲线的平滑，避免频谱视觉过毛。"""
+        if not dbs or len(dbs) < 5:
+            return dbs
+        vals = list(dbs)
+        for _ in range(max(1, int(passes))):
+            src = vals
+            dst = [src[0], src[1]]
+            for i in range(2, len(src) - 2):
+                # 5点加权平滑：1,2,3,2,1
+                v = (
+                    src[i - 2]
+                    + 2.0 * src[i - 1]
+                    + 3.0 * src[i]
+                    + 2.0 * src[i + 1]
+                    + src[i + 2]
+                ) / 9.0
+                dst.append(v)
+            dst.extend([src[-2], src[-1]])
+            vals = dst
+        return vals
+
+    def open_airtight_spectrum_compare_viewer(self, du_path, open_path):
+        win = tk.Toplevel(getattr(self, "root", self.parent))
+        win.title("气密性频谱对比（堵mic vs 不堵mic）")
+        win.geometry("1180x760")
+        win.minsize(980, 620)
+        self._apply_window_icon(win)
+
+        header = ttk.Frame(win, padding=8)
+        header.pack(fill="x")
+        ttk.Label(header, text=f"堵mic文件: {os.path.basename(du_path)}", foreground="#b33").pack(anchor="w")
+        ttk.Label(header, text=f"不堵mic文件: {os.path.basename(open_path)}", foreground="#228").pack(anchor="w")
+
+        try:
+            with wave.open(du_path, "rb") as wf1, wave.open(open_path, "rb") as wf2:
+                max_ch = min(max(1, wf1.getnchannels()), max(1, wf2.getnchannels()))
+                du_dur = wf1.getnframes() / float(max(1, wf1.getframerate()))
+                open_dur = wf2.getnframes() / float(max(1, wf2.getframerate()))
+        except Exception as e:
+            messagebox.showerror("错误", f"读取录音通道信息失败:\n{e}")
+            win.destroy()
+            return
+
+        ctrl = ttk.Frame(win, padding=(8, 4))
+        ctrl.pack(fill="x")
+        ttk.Label(ctrl, text="对比通道:").pack(side="left")
+        ch_values = [f"CH{i}" for i in range(1, max_ch + 1)]
+        channel_var = tk.StringVar(value=ch_values[0])
+        channel_combo = ttk.Combobox(ctrl, state="readonly", width=8, textvariable=channel_var, values=ch_values)
+        channel_combo.pack(side="left", padx=(6, 12))
+        ttk.Label(ctrl, text="红色=堵mic，蓝色=不堵mic").pack(side="left")
+
+        range_frame = ttk.Frame(win, padding=(8, 0))
+        range_frame.pack(fill="x")
+        ttk.Label(range_frame, text="堵mic选段(s):").pack(side="left")
+        du_start_var = tk.StringVar(value="0.00")
+        du_end_var = tk.StringVar(value=f"{du_dur:.2f}")
+        ttk.Entry(range_frame, textvariable=du_start_var, width=8).pack(side="left", padx=(6, 2))
+        ttk.Label(range_frame, text="~").pack(side="left")
+        ttk.Entry(range_frame, textvariable=du_end_var, width=8).pack(side="left", padx=(2, 12))
+
+        ttk.Label(range_frame, text="不堵mic选段(s):").pack(side="left")
+        open_start_var = tk.StringVar(value="0.00")
+        open_end_var = tk.StringVar(value=f"{open_dur:.2f}")
+        ttk.Entry(range_frame, textvariable=open_start_var, width=8).pack(side="left", padx=(6, 2))
+        ttk.Label(range_frame, text="~").pack(side="left")
+        ttk.Entry(range_frame, textvariable=open_end_var, width=8).pack(side="left", padx=(2, 12))
+
+        canvas = tk.Canvas(win, bg="#101216", highlightthickness=0)
+        canvas.pack(fill="both", expand=True, padx=8, pady=8)
+
+        status_var = tk.StringVar(value="就绪")
+        ttk.Label(win, textvariable=status_var, anchor="w").pack(fill="x", padx=10, pady=(0, 8))
+        avg_db_var = tk.StringVar(value="平均dB: --")
+        ttk.Label(win, textvariable=avg_db_var, anchor="w", foreground="#ffd166", font=("Arial", 10, "bold")).pack(fill="x", padx=10, pady=(0, 8))
+
+        cache = {}
+
+        def _draw_curve(spec, color, left, top, width, height, freq_max, db_min, db_max):
+            pts = []
+            for f, d in zip(spec["freqs"], spec["dbs"]):
+                if f <= 0 or f > freq_max:
+                    continue
+                x = left + (f / freq_max) * width
+                y = top + ((db_max - max(db_min, min(db_max, d))) / (db_max - db_min)) * height
+                pts.extend((x, y))
+            if len(pts) >= 4:
+                # 细线+轻微平滑插值，视觉更接近 Adobe
+                canvas.create_line(*pts, fill=color, width=1, smooth=True, splinesteps=8)
+
+        def _parse_range(start_var, end_var, total_dur, name):
+            try:
+                s0 = float((start_var.get() or "0").strip())
+                s1 = float((end_var.get() or f"{total_dur}").strip())
+            except Exception:
+                raise ValueError(f"{name}时间段格式错误，请输入数字秒数")
+            if s0 < 0:
+                s0 = 0.0
+            if s1 > total_dur:
+                s1 = total_dur
+            if s1 <= s0:
+                raise ValueError(f"{name}时间段无效：结束时间必须大于开始时间")
+            if (s1 - s0) < 0.2:
+                raise ValueError(f"{name}时间段太短，至少 0.2 秒")
+            return (round(s0, 3), round(s1, 3))
+
+        def render():
+            canvas.delete("all")
+            ch_text = channel_var.get().strip().upper()
+            try:
+                ch_idx = max(0, int(ch_text.replace("CH", "")) - 1)
+            except Exception:
+                ch_idx = 0
+
+            try:
+                du_range = _parse_range(du_start_var, du_end_var, du_dur, "堵mic")
+                open_range = _parse_range(open_start_var, open_end_var, open_dur, "不堵mic")
+            except Exception as e:
+                status_var.set(str(e))
+                return
+
+            key1 = (du_path, ch_idx, du_range[0], du_range[1])
+            key2 = (open_path, ch_idx, open_range[0], open_range[1])
+            try:
+                if key1 not in cache:
+                    cache[key1] = self._compute_channel_spectrum(du_path, ch_idx, du_range[0], du_range[1])
+                if key2 not in cache:
+                    cache[key2] = self._compute_channel_spectrum(open_path, ch_idx, open_range[0], open_range[1])
+                spec1 = cache[key1]
+                spec2 = cache[key2]
+            except Exception as e:
+                status_var.set(f"频谱分析失败: {e}")
+                return
+
+            w = max(400, canvas.winfo_width())
+            h = max(260, canvas.winfo_height())
+            left, right = 62, 24
+            top, bottom = 20, 42
+            pw = max(200, w - left - right)
+            ph = max(120, h - top - bottom)
+            db_min, db_max = -125.0, 0.0
+            freq_max = min(spec1["sample_rate"], spec2["sample_rate"]) / 2.0
+            freq_max = max(1000.0, freq_max)
+
+            # 背景网格
+            major_hz = 500 if freq_max <= 10000 else 1000
+            minor_hz = max(100, major_hz // 2)
+            hz = 0
+            while hz <= int(freq_max):
+                x = left + (hz / freq_max) * pw
+                is_major = (hz % major_hz == 0)
+                canvas.create_line(x, top, x, top + ph, fill="#263626" if is_major else "#1b271b")
+                if is_major:
+                    label = f"{int(hz)}" if hz < 1000 else f"{hz/1000:.1f}k"
+                    canvas.create_text(x, top + ph + 16, text=label, fill="#aeb8c2", font=("Arial", 9))
+                hz += minor_hz
+
+            db = int(db_max)
+            while db >= int(db_min):
+                y = top + ((db_max - db) / (db_max - db_min)) * ph
+                is_major = (db % 10 == 0)
+                canvas.create_line(left, y, left + pw, y, fill="#263626" if is_major else "#1b271b")
+                canvas.create_text(left - 8, y, text=f"{db}", fill="#aeb8c2", font=("Arial", 9), anchor="e")
+                db -= 5
+
+            canvas.create_rectangle(left, top, left + pw, top + ph, outline="#3a3a3a")
+            canvas.create_text(left + 2, top - 6, text=f"{ch_text} 频谱对比", fill="#d8dde5", anchor="sw", font=("Arial", 10, "bold"))
+            canvas.create_text(left + pw - 2, top - 6, text="dBFS", fill="#d8dde5", anchor="se", font=("Arial", 9))
+
+            _draw_curve(spec1, "#ff4040", left, top, pw, ph, freq_max, db_min, db_max)
+            _draw_curve(spec2, "#4aa3ff", left, top, pw, ph, freq_max, db_min, db_max)
+
+            # 这里的平均 dB 使用“当前选段”的频谱结果计算（非整段文件）
+            du_avg_db = self._compute_average_spectrum_db(spec1, 0.0, freq_max)
+            open_avg_db = self._compute_average_spectrum_db(spec2, 0.0, freq_max)
+            if du_avg_db is None or open_avg_db is None:
+                avg_db_var.set("平均dB: 数据不足")
+                avg_text = "平均dB(选段全频): N/A"
+            else:
+                delta_db = du_avg_db - open_avg_db
+                avg_db_var.set(
+                    f"平均dB(选段全频): 堵mic={du_avg_db:.2f} dB, 不堵mic={open_avg_db:.2f} dB, 差值(堵-不堵)={delta_db:+.2f} dB"
+                )
+                avg_text = f"平均dB(选段全频) Δ(堵-不堵): {delta_db:+.2f} dB"
+            canvas.create_text(left + pw - 4, top + 14, text=avg_text, fill="#ffd166", anchor="ne", font=("Arial", 10, "bold"))
+
+            status_var.set(
+                f"当前通道: {ch_text} | 频率范围: 0 ~ {int(freq_max)} Hz | 红=堵mic 蓝=不堵mic | "
+                f"堵mic选段: {du_range[0]:.2f}s~{du_range[1]:.2f}s | 不堵mic选段: {open_range[0]:.2f}s~{open_range[1]:.2f}s"
+            )
+
+        def _on_waveform_selection(which, start_s, end_s):
+            # 波形窗口框选后自动回填到对比窗口
+            if start_s is None or end_s is None:
+                return
+            s0 = max(0.0, float(start_s))
+            s1 = max(s0, float(end_s))
+            if which == "du":
+                du_start_var.set(f"{s0:.2f}")
+                du_end_var.set(f"{s1:.2f}")
+            else:
+                open_start_var.set(f"{s0:.2f}")
+                open_end_var.set(f"{s1:.2f}")
+            render()
+
+        channel_combo.bind("<<ComboboxSelected>>", lambda _e: render())
+        canvas.bind("<Configure>", lambda _e: render())
+        ttk.Button(range_frame, text="应用选段", command=render).pack(side="left", padx=(6, 0))
+        def _set_full_range():
+            du_start_var.set("0.00")
+            du_end_var.set(f"{du_dur:.2f}")
+            open_start_var.set("0.00")
+            open_end_var.set(f"{open_dur:.2f}")
+            render()
+        ttk.Button(range_frame, text="全段", command=_set_full_range).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            ctrl,
+            text="打开堵mic波形(框选回填)",
+            command=lambda: self.open_audio_waveform_viewer(
+                du_path,
+                title="堵mic波形",
+                on_selection_changed=lambda s, e: _on_waveform_selection("du", s, e),
+            ),
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            ctrl,
+            text="打开不堵mic波形(框选回填)",
+            command=lambda: self.open_audio_waveform_viewer(
+                open_path,
+                title="不堵mic波形",
+                on_selection_changed=lambda s, e: _on_waveform_selection("open", s, e),
+            ),
+        ).pack(side="right")
+        render()
     
     def update_sweep_file_options(self, handler):
         """更新扫频文件选项"""
@@ -7140,6 +8231,36 @@ class UIComponents:
             self.update_sweep_file_options(handler)
         else:
             self.update_sweep_info("没有成功添加任何文件")
+
+    def _prepare_sweep_runtime_environment(self, device_id="", log_fn=None):
+        """统一的播放/录制前环境准备：清理残留 tiny 进程并重启 audioserver。"""
+        import time
+        import subprocess
+
+        def _log(msg):
+            if callable(log_fn):
+                try:
+                    log_fn(msg)
+                except Exception:
+                    pass
+
+        _log("准备测试环境：清理残留 tinyplay/tinycap ...")
+        if device_id:
+            subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True, capture_output=True)
+            subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True, capture_output=True)
+        else:
+            subprocess.run("adb shell pkill tinyplay", shell=True, capture_output=True)
+            subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
+
+        time.sleep(0.5)
+        _log("准备测试环境：重启 audioserver ...")
+        for _ in range(3):
+            if device_id:
+                cmd = f"adb -s {device_id} shell killall audioserver"
+            else:
+                cmd = "adb shell killall audioserver"
+            subprocess.run(cmd, shell=True, capture_output=True)
+            time.sleep(0.5)
     
     def start_sweep_test(self, handler=None):
         """启动扫频测试"""
@@ -7193,25 +8314,8 @@ class UIComponents:
             
             # 导入必要的模块
             import threading
-            import time
-            import subprocess
-            
-            # 先结束上次可能残留的 tinyplay/tinycap，避免占用设备导致第二次无声音
-            if device_id:
-                subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True, capture_output=True)
-                subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True, capture_output=True)
-            else:
-                subprocess.run("adb shell pkill tinyplay", shell=True, capture_output=True)
-                subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
-            time.sleep(0.5)
-            # 重启audioserver
-            for _ in range(3):
-                if device_id:
-                    cmd = f"adb -s {device_id} shell killall audioserver"
-                else:
-                    cmd = "adb shell killall audioserver"
-                subprocess.run(cmd, shell=True)
-                time.sleep(0.5)
+            # 与气密性测试共用相同准备逻辑，保证播放链路一致
+            self._prepare_sweep_runtime_environment(device_id, log_fn=self.update_sweep_info)
             
             # 启动测试线程
             self.sweep_test_thread = threading.Thread(
@@ -7232,6 +8336,7 @@ class UIComponents:
 
     def _run_sweep_test(self, source_path, sweep_file, save_dir, device_id):
         """执行单个扫频测试"""
+        self._last_sweep_play_started = False
         try:
             # 获取录制参数（录制时长为数值，用于后续比较与等待）
             try:
@@ -7356,6 +8461,7 @@ class UIComponents:
                 if proc.poll() is None:
                     play_process = proc
                     play_used_desc = desc
+                    self._last_sweep_play_started = True
                     getattr(self, "root", self.parent).after(0, lambda d=desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
                     break
                 try:

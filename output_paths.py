@@ -16,6 +16,7 @@ DIR_LOGCAT = "logcat"           # Logcat 抓取
 DIR_SCREENSHOTS = "screenshots" # 截图
 DIR_MIC_TEST = "mic_test"       # 麦克风测试录音
 DIR_SWEEP_RECORDINGS = "sweep_recordings"  # 扫频录音
+DIR_AIRTIGHTNESS = "airtightness"  # 气密性测试录音（堵mic/不堵mic）
 DIR_LOOPBACK = "loopback"       # Loopback/Ref 测试录音
 DIR_HAL_DUMP = "hal_dump"       # HAL 录音拉取
 DIR_HAL_CUSTOM = "hal_custom"   # 自定义 HAL 录音拉取
@@ -49,6 +50,7 @@ def _ensure_output_readme():
             f.write("  screenshots/     设备截图\n")
             f.write("  mic_test/        麦克风测试录音\n")
             f.write("  sweep_recordings/ 扫频测试录音\n")
+            f.write("  airtightness/    气密性测试录音（堵mic/不堵mic）\n")
             f.write("  loopback/        Loopback/Ref 测试录音\n")
             f.write("  hal_dump/        HAL 录音拉取\n")
             f.write("  hal_custom/      自定义 HAL 录音拉取\n")
