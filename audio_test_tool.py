@@ -9,13 +9,17 @@ import shutil
 import re  # 用于解析设备列表
 import platform
 import urllib.parse
+import urllib.request
+import json
+import tempfile
+import zipfile
 
 from ui_components import UIComponents
 from devices_operations import DeviceOperations
 from test_operations import TestOperations
 from optional_deps import try_import_pygame
 from output_paths import get_output_dir, DIR_MIC_TEST
-from feature_config import APP_VERSION
+from feature_config import APP_VERSION, UPDATE_MANIFEST_URL, UPDATE_MANIFEST_URLS, UPDATE_AUTO_CHECK
 from control_api import AcouTestControlApi
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
@@ -124,6 +128,10 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         self._start_control_api()
         self._schedule_control_api_indicator_refresh()
 
+        # 启动时异步检查更新（不阻塞主界面）
+        self._update_dialog = None
+        self.root.after(1200, self._check_update_on_startup)
+
         # 关闭窗口时，先停接口服务再退出
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         
@@ -230,6 +238,334 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             self.root.destroy()
         except Exception:
             pass
+
+    # ========== 自动更新 ==========
+    def _check_update_on_startup(self):
+        """启动后自动检查更新（可通过环境变量关闭）。"""
+        if not bool(UPDATE_AUTO_CHECK):
+            return
+        auto_flag = str(os.environ.get("ACOUTEST_UPDATE_AUTO_CHECK", "1")).strip().lower()
+        if auto_flag in ("0", "false", "no", "off"):
+            return
+        self._check_update_async(manual=False)
+
+    def _split_manifest_urls(self, value):
+        out = []
+        if isinstance(value, str):
+            parts = [x.strip() for x in value.replace(";", ",").split(",")]
+            out.extend([x for x in parts if x])
+        elif isinstance(value, (list, tuple)):
+            for x in value:
+                s = str(x or "").strip()
+                if s:
+                    out.append(s)
+        return out
+
+    def _get_update_manifest_urls(self):
+        """
+        获取更新清单地址列表（按优先级）：
+        1) 环境变量 ACOUTEST_UPDATE_MANIFEST_URL
+        2) feature_config.py 中 UPDATE_MANIFEST_URL / UPDATE_MANIFEST_URLS
+        3) 安装目录 update_config.json 中 manifest_url / manifest_urls
+        4) 安装目录 update_manifest.json（本地文件）
+        """
+        urls = []
+        env_urls = str(os.environ.get("ACOUTEST_UPDATE_MANIFEST_URL", "")).strip()
+        urls.extend(self._split_manifest_urls(env_urls))
+        urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URL))
+        urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URLS))
+
+        base_dir = self._get_runtime_base_dir()
+        cfg_path = os.path.join(base_dir, "update_config.json")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f) or {}
+                urls.extend(self._split_manifest_urls(cfg.get("manifest_url")))
+                urls.extend(self._split_manifest_urls(cfg.get("manifest_urls")))
+            except Exception:
+                pass
+
+        local_manifest = os.path.join(base_dir, "update_manifest.json")
+        if os.path.isfile(local_manifest):
+            urls.append(local_manifest)
+
+        # 去重并保持顺序
+        dedup = []
+        seen = set()
+        for u in urls:
+            key = str(u).strip()
+            if not key or key in seen:
+                continue
+            # 本地路径支持：若是相对路径，则按 exe 同目录解析
+            if not key.lower().startswith(("http://", "https://")) and not os.path.isabs(key):
+                key = os.path.join(base_dir, key)
+            seen.add(key)
+            dedup.append(key)
+        return dedup
+
+    def _parse_version_key(self, ver):
+        nums = re.findall(r"\d+", str(ver or "0"))
+        vals = [int(n) for n in nums[:4]]
+        while len(vals) < 4:
+            vals.append(0)
+        return tuple(vals)
+
+    def _fetch_update_manifest(self, manifest_url):
+        """读取更新清单 JSON，支持 http(s) 和本地文件路径。"""
+        if not manifest_url:
+            return None
+        raw = ""
+        if manifest_url.lower().startswith(("http://", "https://")):
+            req = urllib.request.Request(manifest_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                charset = resp.headers.get_content_charset() or "utf-8"
+                raw = resp.read().decode(charset, errors="replace")
+        else:
+            with open(manifest_url, "r", encoding="utf-8") as f:
+                raw = f.read()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def _normalize_update_info(self, manifest):
+        latest = str((manifest or {}).get("latest_version") or "").strip()
+        if not latest:
+            return None
+        current = str(APP_VERSION).strip()
+        if self._parse_version_key(latest) <= self._parse_version_key(current):
+            return None
+
+        notes = (manifest or {}).get("notes", "")
+        if isinstance(notes, list):
+            notes_text = "\n".join([f"• {str(x)}" for x in notes if str(x).strip()])
+        else:
+            notes_text = str(notes or "").strip()
+        download_url = str((manifest or {}).get("download_url") or "").strip()
+        if not download_url:
+            return None
+        return {
+            "current_version": current,
+            "latest_version": latest,
+            "publish_date": str((manifest or {}).get("publish_date") or "").strip(),
+            "notes": notes_text,
+            "download_url": download_url,
+        }
+
+    def _check_update_async(self, manual=False):
+        def _worker():
+            try:
+                manifest_urls = self._get_update_manifest_urls()
+                if not manifest_urls:
+                    if manual:
+                        base_dir = self._get_runtime_base_dir()
+                        cfg_path = os.path.join(base_dir, "update_config.json")
+                        self.root.after(
+                            0,
+                            lambda b=base_dir, c=cfg_path: messagebox.showinfo(
+                                "检查更新",
+                                "未配置更新地址。\n\n"
+                                "请设置以下任一项：\n"
+                                "1) feature_config.py -> UPDATE_MANIFEST_URL / UPDATE_MANIFEST_URLS\n"
+                                "2) 环境变量 ACOUTEST_UPDATE_MANIFEST_URL\n"
+                                "3) 在安装目录放 update_config.json\n\n"
+                                f"当前安装目录: {b}\n"
+                                f"期望配置文件: {c}",
+                            ),
+                        )
+                    return
+                manifest = None
+                last_err = ""
+                tried = []
+                for url in manifest_urls:
+                    tried.append(url)
+                    try:
+                        manifest = self._fetch_update_manifest(url)
+                        if isinstance(manifest, dict):
+                            break
+                    except Exception as e:
+                        last_err = str(e)
+                        continue
+                if not isinstance(manifest, dict):
+                    raise RuntimeError(
+                        "所有更新源均不可用。\n\n"
+                        f"尝试地址:\n- " + "\n- ".join(tried) + "\n\n"
+                        f"最后错误: {last_err or '未知错误'}"
+                    )
+                info = self._normalize_update_info(manifest)
+                if not info:
+                    if manual:
+                        self.root.after(0, lambda: messagebox.showinfo("检查更新", f"当前已是最新版本（v{APP_VERSION}）。"))
+                    return
+                self.root.after(0, lambda i=info: self._show_update_dialog(i))
+            except Exception as e:
+                if manual:
+                    self.root.after(0, lambda m=str(e): messagebox.showerror("检查更新失败", m))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_dialog(self, info):
+        if self._update_dialog and self._update_dialog.winfo_exists():
+            try:
+                self._update_dialog.lift()
+                self._update_dialog.focus_force()
+            except Exception:
+                pass
+            return
+
+        win = tk.Toplevel(self.root)
+        self._update_dialog = win
+        win.title("发现新版本")
+        win.geometry("520x360")
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._apply_window_icon(win)
+
+        top = tk.Frame(win, bg="#2d9cff", height=78)
+        top.pack(fill="x")
+        top.pack_propagate(False)
+        tk.Label(top, text="发现新版本", bg="#2d9cff", fg="white", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w", padx=16, pady=(12, 0))
+        tk.Label(top, text=f"v{info['latest_version']}", bg="#2d9cff", fg="white", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=16, pady=(0, 10))
+
+        body = tk.Frame(win, bg="white")
+        body.pack(fill="both", expand=True)
+        date_text = info.get("publish_date") or time.strftime("%Y-%m-%d")
+        tk.Label(body, text=f"发布日期：{date_text}", bg="white", fg="#333", anchor="w", font=("Microsoft YaHei UI", 10)).pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(body, text="更新说明", bg="white", fg="#111", anchor="w", font=("Microsoft YaHei UI", 11, "bold")).pack(fill="x", padx=16, pady=(6, 4))
+
+        notes_box = tk.Text(body, height=10, wrap="word", font=("Microsoft YaHei UI", 10), bg="white", bd=0)
+        notes_box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        notes_box.insert("1.0", info.get("notes") or "修复若干问题，优化使用体验。")
+        notes_box.config(state="disabled")
+
+        foot = tk.Frame(body, bg="white")
+        foot.pack(fill="x", padx=16, pady=(4, 14))
+        tk.Button(foot, text="稍后再说", width=12, command=win.destroy).pack(side="right")
+        tk.Button(
+            foot,
+            text="立即更新",
+            width=12,
+            bg="#2d9cff",
+            fg="white",
+            command=lambda i=info: self._download_and_apply_update(i, win),
+        ).pack(side="right", padx=(0, 10))
+
+    def _download_and_apply_update(self, info, dialog):
+        download_url = str((info or {}).get("download_url") or "").strip()
+        if not download_url:
+            messagebox.showerror("更新失败", "缺少下载地址 download_url")
+            return
+
+        prog = tk.Toplevel(self.root)
+        prog.title("正在下载更新")
+        prog.geometry("420x120")
+        prog.resizable(False, False)
+        prog.transient(self.root)
+        self._apply_window_icon(prog)
+        tk.Label(prog, text="正在下载新版本，请稍候...", anchor="w").pack(fill="x", padx=14, pady=(14, 6))
+        bar_var = tk.DoubleVar(value=0.0)
+        pb = ttk.Progressbar(prog, maximum=100, variable=bar_var)
+        pb.pack(fill="x", padx=14, pady=(0, 6))
+        tip_var = tk.StringVar(value="0%")
+        tk.Label(prog, textvariable=tip_var, anchor="w", fg="#666").pack(fill="x", padx=14)
+
+        def _worker():
+            tmp_dir = tempfile.mkdtemp(prefix="acoutest_update_")
+            try:
+                parsed = urllib.parse.urlparse(download_url)
+                name = os.path.basename(parsed.path) or f"acoutest_update_{int(time.time())}.zip"
+                pkg_path = os.path.join(tmp_dir, name)
+
+                req = urllib.request.Request(download_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
+                with urllib.request.urlopen(req, timeout=25) as resp, open(pkg_path, "wb") as out:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    done = 0
+                    while True:
+                        chunk = resp.read(1024 * 256)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done += len(chunk)
+                        if total > 0:
+                            pct = max(0.0, min(100.0, (done * 100.0) / total))
+                            self.root.after(0, lambda p=pct: (bar_var.set(p), tip_var.set(f"{p:.1f}%")))
+
+                self.root.after(0, lambda: (bar_var.set(100.0), tip_var.set("下载完成，准备安装...")))
+                self._apply_downloaded_update(pkg_path, tmp_dir, dialog, prog)
+            except Exception as e:
+                self.root.after(0, lambda m=str(e): messagebox.showerror("更新失败", f"下载失败：{m}"))
+                self.root.after(0, prog.destroy)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_downloaded_update(self, pkg_path, tmp_dir, dialog, prog_win):
+        """执行安装：生成外部 updater 脚本，关闭当前程序后替换文件并重启。"""
+        try:
+            install_dir = self._get_runtime_base_dir()
+            is_frozen = bool(getattr(sys, "frozen", False))
+            app_entry = os.path.basename(sys.executable if is_frozen else sys.argv[0])
+            ext = os.path.splitext(pkg_path)[1].lower()
+
+            payload_dir = os.path.join(tmp_dir, "payload")
+            os.makedirs(payload_dir, exist_ok=True)
+
+            if ext == ".zip":
+                with zipfile.ZipFile(pkg_path, "r") as zf:
+                    zf.extractall(payload_dir)
+            else:
+                shutil.copy2(pkg_path, os.path.join(payload_dir, os.path.basename(pkg_path)))
+
+            # 若 zip 有单层目录，自动下钻
+            entries = [os.path.join(payload_dir, x) for x in os.listdir(payload_dir)]
+            if len(entries) == 1 and os.path.isdir(entries[0]):
+                payload_root = entries[0]
+            else:
+                payload_root = payload_dir
+
+            updater_bat = os.path.join(tmp_dir, "run_update.bat")
+            if ext == ".exe" and is_frozen:
+                # 单 exe 包：覆盖当前 exe
+                src_exe = os.path.join(payload_root, os.path.basename(pkg_path))
+                target_exe = os.path.join(install_dir, os.path.basename(sys.executable))
+                bat = (
+                    "@echo off\r\n"
+                    "setlocal\r\n"
+                    "timeout /t 2 /nobreak >nul\r\n"
+                    f'copy /y "{src_exe}" "{target_exe}" >nul\r\n'
+                    f'start "" "{target_exe}"\r\n'
+                    "del \"%~f0\"\r\n"
+                )
+            else:
+                # 通用目录更新：复制 payload 到安装目录并重启入口
+                target_entry = os.path.join(install_dir, app_entry)
+                bat = (
+                    "@echo off\r\n"
+                    "setlocal\r\n"
+                    "timeout /t 2 /nobreak >nul\r\n"
+                    f'robocopy "{payload_root}" "{install_dir}" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul\r\n'
+                    f'if exist "{target_entry}" start "" "{target_entry}"\r\n'
+                    "del \"%~f0\"\r\n"
+                )
+            with open(updater_bat, "w", encoding="utf-8", newline="") as f:
+                f.write(bat)
+
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+            try:
+                prog_win.destroy()
+            except Exception:
+                pass
+
+            messagebox.showinfo("更新提示", "更新包下载完成，程序将退出并自动安装，然后重启。")
+            subprocess.Popen(f'cmd /c start "" "{updater_bat}"', shell=True)
+            self._on_app_close()
+        except Exception as e:
+            try:
+                prog_win.destroy()
+            except Exception:
+                pass
+            messagebox.showerror("安装失败", str(e))
         
     def ensure_directories(self):
         """确保必要的目录结构存在"""
@@ -448,6 +784,11 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 self._about_tooltip_win = None
         about_icon.bind("<Enter>", _on_about_enter)
         about_icon.bind("<Leave>", _on_about_leave)
+
+        # 手动检查更新（方便用户自检，不用重启）
+        check_update_btn = ttk.Button(device_frame, text="检查更新", width=8, command=lambda: self._check_update_async(manual=True))
+        check_update_btn.pack(side="left", padx=(0, 5))
+        check_update_btn.configure(style="Small.TButton")
         
         # 创建小字体样式
         style = ttk.Style()

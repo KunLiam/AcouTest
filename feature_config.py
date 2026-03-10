@@ -11,7 +11,19 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
+
+# ========== 自动更新配置 ==========
+# 说明：
+# - UPDATE_MANIFEST_URL 填你的更新清单地址（http/https）。
+# - UPDATE_MANIFEST_URLS 可配置多个地址（主地址失败会自动尝试备用地址）。
+# - 留空时可通过环境变量 ACOUTEST_UPDATE_MANIFEST_URL 覆盖，或读取安装目录下 update_config.json / update_manifest.json。
+# - UPDATE_AUTO_CHECK=False 可关闭启动时自动检查（仍可保留后续手动触发）。
+UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest.json"
+UPDATE_MANIFEST_URLS = [
+    "https://cdn.jsdelivr.net/gh/KunLiam/AcouTest@master/update_manifest.json",
+]
+UPDATE_AUTO_CHECK = True
 
 # ========== 主标签页（五大类） ==========
 # 设为 False 时，整个大类不会出现在界面上

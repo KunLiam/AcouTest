@@ -429,6 +429,46 @@
 - **默认测试音频不再自动生成**：如果你选择了“默认音频”但目录里没有对应文件，程序会提示你把文件放进 `audio/speaker/speaker_default.wav` 或改选“自定义音频”。
 - **扫频与喇叭用**：请把文件放在 `audio/elephant/`、`audio/custom/`、`audio/speaker/speaker_default.wav`；这些文件不会因为存在于源码目录就自动进入 exe（除非你在打包命令里显式 `--add-data audio;audio`）。
 
+### 启动自动更新（推荐）
+
+你可以让用户在启动旧版本时自动弹出“发现新版本”窗口，并一键更新到当前安装目录，不需要你每次手工发新包。
+
+#### 1) 准备更新清单（manifest）
+
+- 使用项目根目录的 `update_manifest.json` 作为更新清单模板，按同样字段维护线上 JSON 文件。
+- 必填字段：
+  - `latest_version`：最新版本号（例如 `1.8.2`）
+  - `download_url`：新版本安装包地址（支持 zip 或 exe）
+  - `notes`：更新说明（字符串或字符串数组）
+
+#### 2) 配置清单地址（任选其一）
+
+- 方式 A：在 `feature_config.py` 填 `UPDATE_MANIFEST_URL`（单地址）或 `UPDATE_MANIFEST_URLS`（多地址）
+- 方式 B：设置环境变量 `ACOUTEST_UPDATE_MANIFEST_URL`（支持多个地址，逗号分隔）
+- 方式 C：在安装目录放 `update_config.json`，内容示例（主地址失败自动尝试备用地址）：
+
+```json
+{
+  "manifest_urls": [
+    "https://cdn.jsdelivr.net/gh/your-org/acoutest-release@main/update_manifest.json",
+    "https://raw.githubusercontent.com/your-org/acoutest-release/main/update_manifest.json"
+  ]
+}
+```
+
+如果你希望不改代码，也可以在安装目录放 `update_config.json`，直接写你的更新地址。
+
+#### 3) 用户侧体验
+
+- 启动程序后自动后台检查更新（可用 `UPDATE_AUTO_CHECK=False` 关闭）。
+- 顶部工具栏支持“检查更新”按钮，用户可随时手动检查，不用重启程序。
+- 发现新版本会弹窗显示版本号与更新说明。
+- 用户点击“立即更新”后：
+  - 自动下载更新包
+  - 关闭当前程序
+  - 覆盖安装目录文件
+  - 自动重启新版本
+
 ## 联系与支持
 
 如有问题或建议，请联系开发者，邮箱：807946809@qq.com。
