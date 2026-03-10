@@ -2066,6 +2066,41 @@ class UIComponents:
             values.append(pcm)
             detail.append(txt)
         return values, ("\n".join(detail) if detail else "未找到可用 playback 设备")
+
+    def _query_playback_card_device_pairs(self, device_id=""):
+        """读取 /proc/asound/pcm，返回可用播放 (card, pcm) 列表（优先 alsaPORT-pcm）。"""
+        if device_id:
+            cmd = f"adb -s {device_id} shell cat /proc/asound/pcm"
+        else:
+            cmd = "adb shell cat /proc/asound/pcm"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return []
+        lines = [ln.strip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+        preferred = []
+        fallback = []
+        for ln in lines:
+            m = re.match(r"^(\d+)-(\d+):\s*(.*)$", ln)
+            if not m:
+                continue
+            card, pcm, desc = m.group(1), m.group(2), m.group(3)
+            if "playback" not in desc.lower():
+                continue
+            item = (card, pcm, desc)
+            if "alsaport-pcm" in desc.lower():
+                preferred.append(item)
+            else:
+                fallback.append(item)
+        ordered = preferred or fallback
+        out = []
+        seen = set()
+        for card, pcm, _desc in ordered:
+            key = f"{card}:{pcm}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((card, pcm))
+        return out
     
     def _refresh_loopback_playback_devices(self):
         """读取当前设备的 alsaPORT 播放设备索引并更新 Loopback 播放设备下拉。"""
@@ -3433,14 +3468,14 @@ class UIComponents:
         messagebox.showinfo("多声道播放设备", detail)
     
     def setup_jitter_tab(self, parent):
-        """震音测试：播放指定音频，系统音量设为 20，测试完成后恢复原音量，人工判断通过/不通过"""
+        """震音测试：播放指定音频（tinyplay），人工判断通过/不通过"""
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
         
         # 说明
         desc = ttk.Label(
             frame,
-            text="播放指定音频进行震音测试。\n播放前将设备系统音量设为 20，测试完成后自动恢复原音量。\n请根据听感人工判断测试是否通过。",
+            text="播放指定音频进行震音测试（tinyplay）。\n请根据听感人工判断测试是否通过。",
             justify=tk.LEFT,
         )
         desc.pack(anchor="w", pady=(0, 10))
@@ -3484,7 +3519,7 @@ class UIComponents:
         self.jitter_status_var = tk.StringVar(value="就绪")
         ttk.Label(frame, textvariable=self.jitter_status_var, font=("Arial", 9)).pack(anchor="w", pady=6)
         
-        # 过程日志（显示音量读取/设置结果与播放过程）
+        # 过程日志（显示播放过程）
         log_frame = ttk.LabelFrame(frame, text="震音测试日志")
         log_frame.pack(fill="both", expand=True, pady=(2, 0))
         self.jitter_log_text = tk.Text(log_frame, height=8, wrap="word", font=("Consolas", 9), state="disabled")
@@ -3536,6 +3571,32 @@ class UIComponents:
             _do()
         else:
             root.after(0, _do)
+
+    def _adb_run_for_device(self, device_id, cmd, timeout=15):
+        if device_id:
+            full = f"adb -s {device_id} {cmd}"
+        else:
+            full = f"adb {cmd}"
+        return subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
+
+    def _release_audioserver_for_tinyplay(self, device_id, max_rounds=6, wait_s=0.35):
+        """
+        释放 audioserver 对播放设备的占用（适配部分机型需多次 killall 才能 tinyplay 成功）。
+        返回：(rounds_used, released)
+        """
+        rounds_used = 0
+        released = False
+        for i in range(max_rounds):
+            rounds_used = i + 1
+            self._adb_run_for_device(device_id, "shell killall audioserver", timeout=5)
+            time.sleep(wait_s)
+            # 若系统仍拉起 audioserver，继续尝试；若已无进程，认为释放成功
+            pid_res = self._adb_run_for_device(device_id, "shell pidof audioserver", timeout=5)
+            pid_txt = ((pid_res.stdout or "") + (pid_res.stderr or "")).strip()
+            if pid_res.returncode != 0 or not pid_txt:
+                released = True
+                break
+        return rounds_used, released
     
     def _jitter_judge_pass(self):
         """震音测试人工判定：通过"""
@@ -3552,7 +3613,7 @@ class UIComponents:
         messagebox.showinfo("震音测试", "已记录：不通过")
     
     def run_jitter_test(self):
-        """开始震音测试：保存当前音量 -> 设为 20 -> 推送并播放音频"""
+        """开始震音测试：推送并播放音频"""
         if not self.check_device_selected():
             return
         path = (self.jitter_audio_path_var.get() or "").strip()
@@ -3573,57 +3634,20 @@ class UIComponents:
             self.jitter_log_text.config(state="disabled")
         self._append_jitter_log(f"开始测试，设备: {device_id or '默认设备'}")
         self._append_jitter_log(f"测试音频: {path}")
-        threading.Thread(target=self._jitter_test_thread, args=(path, device_id), daemon=True).start()
+        self._append_jitter_log("播放方式: tinyplay")
+        threading.Thread(
+            target=self._jitter_test_thread,
+            args=(path, device_id),
+            daemon=True,
+        ).start()
     
     def _jitter_test_thread(self, path, device_id):
-        """震音测试后台：获取音量 -> 设为 20 -> 推送播放 -> 结束后恢复音量"""
+        """震音测试后台：推送播放"""
         try:
-            def adb_cmd(cmd):
-                if device_id:
-                    return subprocess.run(f"adb -s {device_id} {cmd}", shell=True, capture_output=True, text=True, timeout=15)
-                return subprocess.run(f"adb {cmd}", shell=True, capture_output=True, text=True, timeout=15)
-            
-            def get_system_volume():
-                """读取系统媒体音量，返回 (volume, raw_output)。volume 读取不到时为 None。"""
-                raw_outputs = []
-                for get_cmd in ["shell cmd media_session volume --get", "shell media volume --stream 3 --get"]:
-                    r = adb_cmd(get_cmd)
-                    out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-                    if out:
-                        raw_outputs.append(f"[{get_cmd}] {out}")
-                    simple = (r.stdout or "").strip()
-                    if simple.isdigit():
-                        return int(simple), " | ".join(raw_outputs)
-                    for part in simple.replace(":", " ").split():
-                        if part.isdigit():
-                            return int(part), " | ".join(raw_outputs)
-                return None, " | ".join(raw_outputs)
-            
-            # 1. 获取当前音量并保存（尝试 media_session 或 media volume）
-            saved_volume, raw_before = get_system_volume()
-            if saved_volume is None:
-                saved_volume = 0
-                self._append_jitter_log(f"读取当前音量失败，按 0 兜底。原始输出: {raw_before or '无'}")
-            else:
-                self._append_jitter_log(f"当前系统音量: {saved_volume}")
-            
-            # 2. 设置音量为 20
-            set_ok = False
-            for set_cmd in ["shell cmd media_session volume --set 20", "shell media volume --stream 3 --set 20"]:
-                if adb_cmd(set_cmd).returncode == 0:
-                    set_ok = True
-                    break
-            current_after_set, raw_after_set = get_system_volume()
-            self._append_jitter_log(f"设置系统音量到 20: {'成功' if set_ok else '可能失败'}")
-            if current_after_set is None:
-                self._append_jitter_log(f"设置后音量读取失败。原始输出: {raw_after_set or '无'}")
-            else:
-                self._append_jitter_log(f"设置后系统音量: {current_after_set}")
-            
             root = getattr(self, "root", None) or getattr(self, "parent", None)
-            root.after(0, lambda: self.jitter_status_var.set("已设置音量为 20，正在推送并播放音频..."))
-            
-            # 3. 推送到设备并播放
+            root.after(0, lambda: self.jitter_status_var.set("正在准备播放环境..."))
+
+            # 2. 推送到设备
             remote_name = "jitter_test_audio.wav"
             if device_id:
                 push_result = subprocess.run(
@@ -3645,36 +3669,46 @@ class UIComponents:
                 raise RuntimeError(f"推送音频失败: {(push_result.stderr or push_result.stdout or '').strip()}")
             self._append_jitter_log("音频推送成功，准备播放...")
             
-            # 与扫频测试保持一致：播放前清理占用并重启 audioserver
+            # 3. 与扫频测试保持一致：播放前清理占用并重启 audioserver
+            self._append_jitter_log("播放参数: 固定卡0 / 设备0")
+
             if device_id:
                 subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True, capture_output=True)
-                for _ in range(2):
-                    subprocess.run(f"adb -s {device_id} shell killall audioserver", shell=True, capture_output=True)
-                    time.sleep(0.5)
-                play_cmds = [
-                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name} -d 0",
-                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name} -D 0 -d 0",
-                    f"adb -s {device_id} shell tinyplay /sdcard/{remote_name}",
-                ]
+                rounds, released = self._release_audioserver_for_tinyplay(device_id)
+                self._append_jitter_log(
+                    f"释放 audioserver 占用: 已尝试 {rounds} 次，状态={'已释放' if released else '未确认'}"
+                )
+                adb_prefix = f"adb -s {device_id} shell "
             else:
                 subprocess.run("adb shell killall tinyplay", shell=True, capture_output=True)
-                for _ in range(2):
-                    subprocess.run("adb shell killall audioserver", shell=True, capture_output=True)
-                    time.sleep(0.5)
-                play_cmds = [
-                    f"adb shell tinyplay /sdcard/{remote_name} -d 0",
-                    f"adb shell tinyplay /sdcard/{remote_name} -D 0 -d 0",
-                    f"adb shell tinyplay /sdcard/{remote_name}",
-                ]
+                rounds, released = self._release_audioserver_for_tinyplay(device_id)
+                self._append_jitter_log(
+                    f"释放 audioserver 占用: 已尝试 {rounds} 次，状态={'已释放' if released else '未确认'}"
+                )
+                adb_prefix = "adb shell "
+
+            # 用户要求固定播放参数：仅卡0/设备0
+            play_cmds = [
+                f"{adb_prefix}tinyplay /sdcard/{remote_name} -D 0 -d 0",
+            ]
             
-            self._jitter_saved_volume = saved_volume
+            root.after(0, lambda: self.jitter_status_var.set("正在播放测试音频..."))
+
             self._jitter_device_id = device_id
             self.jitter_play_process = None
+
             last_err = ""
             for cmd in play_cmds:
-                self._append_jitter_log(f"尝试播放命令: {cmd}")
-                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                time.sleep(0.8)
+                # 在同一条 shell 中连续释放 audioserver 后立刻 tinyplay，贴近手工命令成功路径
+                inline_cmd = (
+                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"{cmd.replace(adb_prefix, '')}\""
+                )
+                self._append_jitter_log(f"尝试播放命令: {inline_cmd}")
+                proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                time.sleep(1.0)
                 if proc.poll() is None:
                     self.jitter_play_process = proc
                     self._append_jitter_log("tinyplay 已启动。")
@@ -3687,24 +3721,10 @@ class UIComponents:
                 if last_err:
                     self._append_jitter_log(f"该命令启动失败: {last_err[:200]}")
             if self.jitter_play_process is None:
-                raise RuntimeError(f"播放失败（tinyplay）: {last_err[:200]}")
-            root.after(0, lambda: self.jitter_status_var.set("正在播放震音测试音频，请根据听感判断。播放结束后将自动恢复音量。"))
-            
-            # 4. 等待播放结束
+                raise RuntimeError(f"播放失败（tinyplay）: {last_err[:220]}")
+            root.after(0, lambda: self.jitter_status_var.set("正在播放震音测试音频，请根据听感判断。"))
             self.jitter_play_process.wait()
             self.jitter_play_process = None
-            
-            # 5. 恢复音量
-            for set_cmd in ["shell cmd media_session volume --set " + str(saved_volume), "shell media volume --stream 3 --set " + str(saved_volume)]:
-                if device_id:
-                    subprocess.run(f"adb -s {device_id} {set_cmd}", shell=True, capture_output=True, timeout=5)
-                else:
-                    subprocess.run(f"adb {set_cmd}", shell=True, capture_output=True, timeout=5)
-            current_after_restore, raw_after_restore = get_system_volume()
-            if current_after_restore is None:
-                self._append_jitter_log(f"恢复后音量读取失败。原始输出: {raw_after_restore or '无'}")
-            else:
-                self._append_jitter_log(f"恢复后系统音量: {current_after_restore}")
             
             if root and root.winfo_exists():
                 root.after(0, self._jitter_test_finished)
@@ -3718,9 +3738,9 @@ class UIComponents:
         self.jitter_play_process = None
         self.jitter_start_btn.config(state="normal")
         self.jitter_stop_btn.config(state="disabled")
-        self.jitter_status_var.set("播放已结束，已恢复原音量。请根据听感点击「通过」或「不通过」。")
+        self.jitter_status_var.set("播放已结束。请根据听感点击「通过」或「不通过」。")
         self.jitter_result_var.set("播放已结束，请根据听感点击「通过」或「不通过」。")
-        self._append_jitter_log("播放结束，已执行恢复音量。")
+        self._append_jitter_log("播放结束。")
     
     def _jitter_test_error(self, err_msg):
         """震音测试出错"""
@@ -3743,23 +3763,15 @@ class UIComponents:
             pass
         if getattr(self, "jitter_play_process", None):
             self.jitter_play_process = None
-        # 恢复音量
-        saved = getattr(self, "_jitter_saved_volume", None)
-        if saved is not None:
-            for set_cmd in ["shell cmd media_session volume --set " + str(saved), "shell media volume --stream 3 --set " + str(saved)]:
-                if device_id:
-                    subprocess.run(f"adb -s {device_id} {set_cmd}", shell=True, capture_output=True, timeout=5)
-                else:
-                    subprocess.run(f"adb {set_cmd}", shell=True, capture_output=True, timeout=5)
         if hasattr(self, "jitter_start_btn") and self.jitter_start_btn.winfo_exists():
             self.jitter_start_btn.config(state="normal")
         if hasattr(self, "jitter_stop_btn") and self.jitter_stop_btn.winfo_exists():
             self.jitter_stop_btn.config(state="disabled")
         if hasattr(self, "jitter_status_var"):
-            self.jitter_status_var.set("已停止播放，已恢复原音量。")
+            self.jitter_status_var.set("已停止播放。")
         if hasattr(self, "jitter_result_var"):
             self.jitter_result_var.set("请先完成震音测试播放后，根据听感点击下方按钮。")
-        self._append_jitter_log("已手动停止播放，并执行恢复音量。")
+        self._append_jitter_log("已手动停止播放。")
     
     def setup_local_playback_tab(self, parent):
         """设置本地播放选项卡"""
@@ -7488,6 +7500,7 @@ class UIComponents:
     def _run_airtightness_test(self, mode, mode_label, source_file, source_name, save_dir):
         ui = getattr(self, "root", self.parent)
         success_mode = None
+        device_id = ""
 
         def ui_log(msg):
             ui.after(0, lambda m=msg: self._append_airtight_info(m))
@@ -7510,7 +7523,6 @@ class UIComponents:
             self.record_bits_var.set("16")
             self.sweep_duration_var.set(self.airtight_duration_var.get())
 
-            device_id = ""
             if hasattr(self, "device_var"):
                 device_id = str(self.device_var.get() or "").strip()
             if not device_id:
@@ -8672,7 +8684,15 @@ class UIComponents:
                     play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted} -D {d_val} -d {c_val}"
                 else:
                     play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted}"
-                proc = subprocess.Popen(play_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                # 同一条命令内先多次释放 audioserver，再立即 tinyplay，提升某些机型成功率
+                inner_cmd = play_cmd.replace(adb_prefix, "", 1)
+                inline_cmd = (
+                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"{inner_cmd}\""
+                )
+                proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 time.sleep(0.6)
                 if proc.poll() is None:
                     play_process = proc

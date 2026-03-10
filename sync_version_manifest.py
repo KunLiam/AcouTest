@@ -4,6 +4,7 @@
 从 feature_config.py 读取 APP_VERSION，并同步到 update_manifest.json：
 1) latest_version
 2) download_url 中的 tag 版本与文件名版本（_vX.Y.Z.exe）
+3) notes（从 release_notes.txt 读取）
 """
 import json
 import os
@@ -59,10 +60,27 @@ def main() -> int:
             data["download_url"] = new_url
             changed = True
 
+    # notes 同步：读取根目录 release_notes.txt（每行一条，支持 - 或 • 开头）
+    notes_path = os.path.join(root, "release_notes.txt")
+    if os.path.isfile(notes_path):
+        notes = []
+        with open(notes_path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.startswith("-") or s.startswith("•"):
+                    s = s[1:].strip()
+                if s:
+                    notes.append(s)
+        if notes and notes != (data.get("notes") or []):
+            data["notes"] = notes
+            changed = True
+
     if changed:
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[OK] 已同步 update_manifest.json -> v{app_version}")
+        print(f"[OK] 已同步 update_manifest.json -> v{app_version}（含 notes）")
     else:
         print(f"[OK] 无需同步，当前已是 v{app_version}")
     return 0

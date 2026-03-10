@@ -1,8 +1,9 @@
 {
-  "latest_version": "1.8.5",
+  "latest_version": "1.8.6",
   "publish_date": "2026-03-10",
   "notes": [
-    "修复更新软件失败问题"
+    "震音与气密测试移除系统音量设置/恢复逻辑，避免误导",
+    "优化测试状态与日志文案，流程更简洁稳定"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.5/AcouTest.v1.8.5.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.6/AcouTest.v1.8.6.exe"
 }
