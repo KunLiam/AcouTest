@@ -489,21 +489,39 @@ class UIComponents:
             pass
         f = ttk.Frame(win, padding=15)
         f.pack(fill="both", expand=True)
-        # 版本号、作者、邮箱
-        ttk.Label(f, text="版本号:", font=("Arial", 10)).pack(anchor="w")
-        ttk.Label(f, text=f"v{APP_VERSION}", font=("Arial", 10), foreground="#0066cc").pack(anchor="w", pady=(0, 4))
-        ttk.Label(f, text="作者:", font=("Arial", 10)).pack(anchor="w")
-        ttk.Label(f, text="liangk", font=("Arial", 10), foreground="#0066cc").pack(anchor="w", pady=(0, 4))
-        ttk.Label(f, text="邮箱:", font=("Arial", 10)).pack(anchor="w")
+        # 版本号、作者、邮箱（标签与具体信息同一行横向展示）
+        info_frame = ttk.Frame(f)
+        info_frame.pack(fill="x", pady=(0, 6))
+
+        ttk.Label(info_frame, text="版本号:", font=("Arial", 10)).grid(row=0, column=0, sticky="w")
+        ttk.Label(info_frame, text=f"v{APP_VERSION}", font=("Arial", 10), foreground="#0066cc").grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(info_frame, text="作者:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(info_frame, text="liangk", font=("Arial", 10), foreground="#0066cc").grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+
+        ttk.Label(info_frame, text="邮箱:", font=("Arial", 10)).grid(row=2, column=0, sticky="w", pady=(4, 0))
         email_text = "807946809@qq.com"
-        email_lbl = ttk.Label(f, text=email_text, font=("Arial", 10), foreground="#0066cc", cursor="hand2")
-        email_lbl.pack(anchor="w", pady=(0, 8))
+        email_lbl = ttk.Label(info_frame, text=email_text, font=("Arial", 10), foreground="#0066cc", cursor="hand2")
+        email_lbl.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
         try:
             import webbrowser
             email_lbl.bind("<Button-1>", lambda e: webbrowser.open("mailto:" + email_text))
         except Exception:
             pass
+        info_frame.grid_columnconfigure(1, weight=1)
         ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
+
+        # 检查更新按钮放在“功能说明”上方
+        top_btn_frame = ttk.Frame(f)
+        top_btn_frame.pack(fill="x", pady=(0, 6))
+        if hasattr(self, "_check_update_async"):
+            tk.Button(
+                top_btn_frame,
+                text="检查更新",
+                width=8,
+                command=lambda: self._check_update_async(manual=True),
+            ).pack(side="left")
+
         # 功能说明（可滚动）
         ttk.Label(f, text="功能说明", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
         desc_frame = ttk.Frame(f)
@@ -542,7 +560,6 @@ class UIComponents:
         txt.config(state="normal")
         txt.insert("1.0", desc)
         txt.config(state="disabled")
-        ttk.Button(f, text="确定", command=win.destroy, width=8).pack(pady=(12, 0))
 
     def setup_keyburn_tab(self, parent):
         """设置烧大象key标签页"""

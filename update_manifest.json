@@ -1,10 +1,10 @@
 {
-  "latest_version": "1.8.3",
+  "latest_version": "1.8.4",
   "publish_date": "2026-03-10",
   "notes": [
     "修复若干稳定性问题",
-    "优化气密性频谱对比图保存效果",
-    "新增启动自动更新提示"
+    "新增启动自动更新提示",
+    "修改软件信息"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/archive/refs/heads/master.zip"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.4/AcouTest_v1.8.4.exe"
 }

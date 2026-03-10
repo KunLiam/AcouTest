@@ -12,7 +12,6 @@ import urllib.parse
 import urllib.request
 import json
 import tempfile
-import zipfile
 
 from ui_components import UIComponents
 from devices_operations import DeviceOperations
@@ -473,7 +472,7 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             tmp_dir = tempfile.mkdtemp(prefix="acoutest_update_")
             try:
                 parsed = urllib.parse.urlparse(download_url)
-                name = os.path.basename(parsed.path) or f"acoutest_update_{int(time.time())}.zip"
+                name = os.path.basename(parsed.path) or f"acoutest_update_{int(time.time())}.exe"
                 pkg_path = os.path.join(tmp_dir, name)
 
                 req = urllib.request.Request(download_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
@@ -490,63 +489,33 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                             pct = max(0.0, min(100.0, (done * 100.0) / total))
                             self.root.after(0, lambda p=pct: (bar_var.set(p), tip_var.set(f"{p:.1f}%")))
 
-                self.root.after(0, lambda: (bar_var.set(100.0), tip_var.set("下载完成，准备安装...")))
-                self._apply_downloaded_update(pkg_path, tmp_dir, dialog, prog)
+                self.root.after(0, lambda: (bar_var.set(100.0), tip_var.set("下载完成，准备保存到安装目录...")))
+                self._save_downloaded_update_file(pkg_path, dialog, prog)
             except Exception as e:
                 self.root.after(0, lambda m=str(e): messagebox.showerror("更新失败", f"下载失败：{m}"))
                 self.root.after(0, prog.destroy)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_downloaded_update(self, pkg_path, tmp_dir, dialog, prog_win):
-        """执行安装：生成外部 updater 脚本，关闭当前程序后替换文件并重启。"""
+    def _save_downloaded_update_file(self, pkg_path, dialog, prog_win):
+        """将下载包保存到安装目录，提示用户重启生效（不强制自动替换）。"""
         try:
             install_dir = self._get_runtime_base_dir()
             is_frozen = bool(getattr(sys, "frozen", False))
-            app_entry = os.path.basename(sys.executable if is_frozen else sys.argv[0])
-            ext = os.path.splitext(pkg_path)[1].lower()
+            current_name = os.path.basename(sys.executable if is_frozen else sys.argv[0])
+            base_name = os.path.basename(pkg_path) or "AcouTest_update.exe"
+            stem, ext = os.path.splitext(base_name)
+            ext = ext.lower()
 
-            payload_dir = os.path.join(tmp_dir, "payload")
-            os.makedirs(payload_dir, exist_ok=True)
-
-            if ext == ".zip":
-                with zipfile.ZipFile(pkg_path, "r") as zf:
-                    zf.extractall(payload_dir)
+            if ext == ".exe":
+                if base_name.lower() == current_name.lower():
+                    base_name = f"{stem}_new.exe"
+                target_path = os.path.join(install_dir, base_name)
             else:
-                shutil.copy2(pkg_path, os.path.join(payload_dir, os.path.basename(pkg_path)))
+                if not ext:
+                    base_name = f"{base_name}.exe"
+                target_path = os.path.join(install_dir, base_name)
 
-            # 若 zip 有单层目录，自动下钻
-            entries = [os.path.join(payload_dir, x) for x in os.listdir(payload_dir)]
-            if len(entries) == 1 and os.path.isdir(entries[0]):
-                payload_root = entries[0]
-            else:
-                payload_root = payload_dir
-
-            updater_bat = os.path.join(tmp_dir, "run_update.bat")
-            if ext == ".exe" and is_frozen:
-                # 单 exe 包：覆盖当前 exe
-                src_exe = os.path.join(payload_root, os.path.basename(pkg_path))
-                target_exe = os.path.join(install_dir, os.path.basename(sys.executable))
-                bat = (
-                    "@echo off\r\n"
-                    "setlocal\r\n"
-                    "timeout /t 2 /nobreak >nul\r\n"
-                    f'copy /y "{src_exe}" "{target_exe}" >nul\r\n'
-                    f'start "" "{target_exe}"\r\n'
-                    "del \"%~f0\"\r\n"
-                )
-            else:
-                # 通用目录更新：复制 payload 到安装目录并重启入口
-                target_entry = os.path.join(install_dir, app_entry)
-                bat = (
-                    "@echo off\r\n"
-                    "setlocal\r\n"
-                    "timeout /t 2 /nobreak >nul\r\n"
-                    f'robocopy "{payload_root}" "{install_dir}" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul\r\n'
-                    f'if exist "{target_entry}" start "" "{target_entry}"\r\n'
-                    "del \"%~f0\"\r\n"
-                )
-            with open(updater_bat, "w", encoding="utf-8", newline="") as f:
-                f.write(bat)
+            shutil.copy2(pkg_path, target_path)
 
             try:
                 dialog.destroy()
@@ -557,9 +526,21 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             except Exception:
                 pass
 
-            messagebox.showinfo("更新提示", "更新包下载完成，程序将退出并自动安装，然后重启。")
-            subprocess.Popen(f'cmd /c start "" "{updater_bat}"', shell=True)
-            self._on_app_close()
+            message = (
+                "新版本已下载完成。\n\n"
+                f"保存路径：{target_path}\n\n"
+                "请关闭当前程序后，双击新的 exe 启动即可生效。"
+            )
+            if messagebox.askyesno("更新下载完成", message + "\n\n是否现在打开所在文件夹？"):
+                try:
+                    if platform.system() == "Windows":
+                        os.startfile(install_dir)
+                    elif platform.system() == "Darwin":
+                        subprocess.run(["open", install_dir])
+                    else:
+                        subprocess.run(["xdg-open", install_dir])
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 prog_win.destroy()
@@ -785,11 +766,6 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         about_icon.bind("<Enter>", _on_about_enter)
         about_icon.bind("<Leave>", _on_about_leave)
 
-        # 手动检查更新（方便用户自检，不用重启）
-        check_update_btn = ttk.Button(device_frame, text="检查更新", width=8, command=lambda: self._check_update_async(manual=True))
-        check_update_btn.pack(side="left", padx=(0, 5))
-        check_update_btn.configure(style="Small.TButton")
-        
         # 创建小字体样式
         style = ttk.Style()
         style.configure("Small.TButton", font=("Arial", 9))
