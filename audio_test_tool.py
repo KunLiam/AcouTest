@@ -10,6 +10,7 @@ import re  # 用于解析设备列表
 import platform
 import urllib.parse
 import urllib.request
+import urllib.error
 import json
 import tempfile
 
@@ -418,6 +419,8 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         win.geometry("520x360")
         win.resizable(False, False)
         win.transient(self.root)
+        win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_update_dialog(w))
         self._apply_window_icon(win)
 
         top = tk.Frame(win, bg="#2d9cff", height=78)
@@ -432,22 +435,39 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         tk.Label(body, text=f"发布日期：{date_text}", bg="white", fg="#333", anchor="w", font=("Microsoft YaHei UI", 10)).pack(fill="x", padx=16, pady=(14, 6))
         tk.Label(body, text="更新说明", bg="white", fg="#111", anchor="w", font=("Microsoft YaHei UI", 11, "bold")).pack(fill="x", padx=16, pady=(6, 4))
 
-        notes_box = tk.Text(body, height=10, wrap="word", font=("Microsoft YaHei UI", 10), bg="white", bd=0)
-        notes_box.pack(fill="both", expand=True, padx=16, pady=(0, 10))
-        notes_box.insert("1.0", info.get("notes") or "修复若干问题，优化使用体验。")
-        notes_box.config(state="disabled")
-
         foot = tk.Frame(body, bg="white")
-        foot.pack(fill="x", padx=16, pady=(4, 14))
-        tk.Button(foot, text="稍后再说", width=12, command=win.destroy).pack(side="right")
+        # 先固定底部按钮区，避免在小窗口或高 DPI 下被说明文本挤出可视范围
+        foot.pack(side="bottom", fill="x", padx=16, pady=(6, 14))
+        tk.Button(foot, text="稍后再说", width=10, command=lambda w=win: self._close_update_dialog(w)).pack(side="right")
         tk.Button(
             foot,
             text="立即更新",
-            width=12,
+            width=10,
             bg="#2d9cff",
             fg="white",
             command=lambda i=info: self._download_and_apply_update(i, win),
         ).pack(side="right", padx=(0, 10))
+
+        notes_box = tk.Text(body, height=9, wrap="word", font=("Microsoft YaHei UI", 10), bg="white", bd=0)
+        notes_box.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        notes_box.insert("1.0", info.get("notes") or "修复若干问题，优化使用体验。")
+        notes_box.config(state="disabled")
+
+    def _close_update_dialog(self, win=None):
+        target = win or getattr(self, "_update_dialog", None)
+        if not target:
+            self._update_dialog = None
+            return
+        try:
+            target.grab_release()
+        except Exception:
+            pass
+        try:
+            target.destroy()
+        except Exception:
+            pass
+        finally:
+            self._update_dialog = None
 
     def _download_and_apply_update(self, info, dialog):
         download_url = str((info or {}).get("download_url") or "").strip()
@@ -475,7 +495,12 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 name = os.path.basename(parsed.path) or f"acoutest_update_{int(time.time())}.exe"
                 pkg_path = os.path.join(tmp_dir, name)
 
-                req = urllib.request.Request(download_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
+                # 对 URL path 做编码，避免中文/空格路径导致请求失败
+                safe_path = urllib.parse.quote(parsed.path, safe="/-_.~()%")
+                normalized_url = urllib.parse.urlunparse(
+                    (parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment)
+                )
+                req = urllib.request.Request(normalized_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
                 with urllib.request.urlopen(req, timeout=25) as resp, open(pkg_path, "wb") as out:
                     total = int(resp.headers.get("Content-Length") or 0)
                     done = 0
@@ -491,8 +516,21 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
                 self.root.after(0, lambda: (bar_var.set(100.0), tip_var.set("下载完成，准备保存到安装目录...")))
                 self._save_downloaded_update_file(pkg_path, dialog, prog)
+            except urllib.error.HTTPError as e:
+                def _on_http_error():
+                    msg = (
+                        f"下载失败：HTTP {e.code}\n\n"
+                        f"下载地址：{download_url}\n\n"
+                        "请检查：\n"
+                        "1) GitHub Release 的 tag 是否与版本一致（如 v1.8.4）\n"
+                        "2) Asset 文件名是否与链接完全一致（区分大小写）\n"
+                        "3) Release 是否已发布（不是 Draft/私有）"
+                    )
+                    messagebox.showerror("更新失败", msg)
+                self.root.after(0, _on_http_error)
+                self.root.after(0, prog.destroy)
             except Exception as e:
-                self.root.after(0, lambda m=str(e): messagebox.showerror("更新失败", f"下载失败：{m}"))
+                self.root.after(0, lambda m=str(e): messagebox.showerror("更新失败", f"下载失败：{m}\n\n下载地址：{download_url}"))
                 self.root.after(0, prog.destroy)
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -517,10 +555,7 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
             shutil.copy2(pkg_path, target_path)
 
-            try:
-                dialog.destroy()
-            except Exception:
-                pass
+            self._close_update_dialog(dialog)
             try:
                 prog_win.destroy()
             except Exception:

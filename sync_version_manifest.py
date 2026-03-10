@@ -48,9 +48,10 @@ def main() -> int:
             url,
             flags=re.IGNORECASE,
         )
+        # 文件名中的版本号：兼容 AcouTest_v1.8.4.exe / AcouTest.v1.8.4.exe / AcouTest-v1.8.4.exe
         new_url = re.sub(
-            r"_v\d+(?:\.\d+){0,3}(\.exe)",
-            rf"_v{app_version}\1",
+            r"([._-])v\d+(?:\.\d+){0,3}(\.exe)",
+            rf"\1v{app_version}\2",
             new_url,
             flags=re.IGNORECASE,
         )
