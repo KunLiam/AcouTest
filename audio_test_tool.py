@@ -19,7 +19,17 @@ from devices_operations import DeviceOperations
 from test_operations import TestOperations
 from optional_deps import try_import_pygame
 from output_paths import get_output_dir, DIR_MIC_TEST
-from feature_config import APP_VERSION, UPDATE_MANIFEST_URL, UPDATE_MANIFEST_URLS, UPDATE_AUTO_CHECK
+from feature_config import (
+    APP_VERSION,
+    UPDATE_MANIFEST_URL,
+    UPDATE_MANIFEST_URLS,
+    UPDATE_MANIFEST_URL_PUBLIC,
+    UPDATE_MANIFEST_URLS_PUBLIC,
+    UPDATE_MANIFEST_URL_INTERNAL,
+    UPDATE_MANIFEST_URLS_INTERNAL,
+    RELEASE_CHANNEL,
+    UPDATE_AUTO_CHECK,
+)
 from control_api import AcouTestControlApi
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
@@ -264,16 +274,26 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def _get_update_manifest_urls(self):
         """
         获取更新清单地址列表（按优先级）：
-        1) 环境变量 ACOUTEST_UPDATE_MANIFEST_URL
-        2) feature_config.py 中 UPDATE_MANIFEST_URL / UPDATE_MANIFEST_URLS
+        1) 环境变量 ACOUTEST_UPDATE_MANIFEST_URL（覆盖通道）
+        2) 按 RELEASE_CHANNEL 使用对应通道清单：public -> UPDATE_MANIFEST_URL_PUBLIC，internal -> UPDATE_MANIFEST_URL_INTERNAL
         3) 安装目录 update_config.json 中 manifest_url / manifest_urls
-        4) 安装目录 update_manifest.json（本地文件）
+        4) 兼容：UPDATE_MANIFEST_URL / UPDATE_MANIFEST_URLS
+        5) 安装目录 update_manifest.json（本地文件）
         """
         urls = []
         env_urls = str(os.environ.get("ACOUTEST_UPDATE_MANIFEST_URL", "")).strip()
         urls.extend(self._split_manifest_urls(env_urls))
-        urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URL))
-        urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URLS))
+        if not urls:
+            channel = str(RELEASE_CHANNEL or "public").strip().lower()
+            if channel == "internal":
+                urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URL_INTERNAL))
+                urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URLS_INTERNAL))
+            else:
+                urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URL_PUBLIC))
+                urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URLS_PUBLIC))
+        if not urls:
+            urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URL))
+            urls.extend(self._split_manifest_urls(UPDATE_MANIFEST_URLS))
 
         base_dir = self._get_runtime_base_dir()
         cfg_path = os.path.join(base_dir, "update_config.json")

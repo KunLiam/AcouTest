@@ -11,14 +11,31 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 
-# ========== 自动更新配置 ==========
-# 说明：
-# - UPDATE_MANIFEST_URL 填你的更新清单地址（http/https）。
-# - UPDATE_MANIFEST_URLS 可配置多个地址（主地址失败会自动尝试备用地址）。
-# - 留空时可通过环境变量 ACOUTEST_UPDATE_MANIFEST_URL 覆盖，或读取安装目录下 update_config.json / update_manifest.json。
-# - UPDATE_AUTO_CHECK=False 可关闭启动时自动检查（仍可保留后续手动触发）。
+# ========== 自动更新配置（双通道：外部 / 内部） ==========
+# RELEASE_CHANNEL：当前构建属于哪条更新通道。
+#   - "public"：外部包，不包含烧大象key；检查更新时只拉取 update_manifest_public.json，只升级到外部包。
+#   - "internal"：内部包，包含烧大象key；检查更新时只拉取 update_manifest_internal.json，只升级到内部包。
+RELEASE_CHANNEL = "public"
+
+# 外部通道：清单与下载地址（外部用户只会看到并升级到此外部 exe）
+UPDATE_MANIFEST_URL_PUBLIC = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest_public.json"
+UPDATE_MANIFEST_URLS_PUBLIC = [
+    "https://cdn.jsdelivr.net/gh/KunLiam/AcouTest@master/update_manifest_public.json",
+]
+# 内部通道：清单与下载地址（内部用户只会看到并升级到此内部 exe）
+UPDATE_MANIFEST_URL_INTERNAL = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest_internal.json"
+UPDATE_MANIFEST_URLS_INTERNAL = [
+    "https://cdn.jsdelivr.net/gh/KunLiam/AcouTest@master/update_manifest_internal.json",
+]
+
+# 发布用下载地址模板（sync_version_manifest.py 会用来生成两条清单里的 download_url）
+# {version} 会被替换为 APP_VERSION。内外都用同一文件名 AcouTest.v{version}.exe；内部用 tag v{version}，外部用 tag v{version}-public。
+DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/AcouTest/releases/download/v{version}-public/AcouTest.v{version}.exe"
+DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/AcouTest/releases/download/v{version}/AcouTest.v{version}.exe"
+
+# 以下为兼容旧逻辑：未配置通道专用 URL 时回退使用
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest.json"
 UPDATE_MANIFEST_URLS = [
     "https://cdn.jsdelivr.net/gh/KunLiam/AcouTest@master/update_manifest.json",
@@ -32,7 +49,7 @@ MAIN_TABS = {
     "声学测试": True,
     "音频调试": True,
     "常用功能": True,
-    "烧大象key": True,   # 内部功能，给客户发布时可改为 False
+    "烧大象key": False,   # 内部功能，给客户发布时可改为 False
 }
 
 # ========== 各大类下的子标签 ==========
