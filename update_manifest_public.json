@@ -1,9 +1,8 @@
 {
-  "latest_version": "1.8.8",
+  "latest_version": "1.8.9",
   "publish_date": "2026-03-10",
   "notes": [
-    "更新支持双通道：外部/内部各自清单与安装包，互不串版本",
-    "内外包统一命名为 AcouTest.v版本.exe；内部用 tag v版本，外部用 tag v版本-public"
+    "验证外部软件升级"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.8-public/AcouTest.v1.8.8.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.9-public/AcouTest.v1.8.9.exe"
 }
