@@ -11,13 +11,13 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.9.0"
 
 # ========== 自动更新配置（双通道：外部 / 内部） ==========
 # RELEASE_CHANNEL：当前构建属于哪条更新通道。
 #   - "public"：外部包，不包含烧大象key；检查更新时只拉取 update_manifest_public.json，只升级到外部包。
 #   - "internal"：内部包，包含烧大象key；检查更新时只拉取 update_manifest_internal.json，只升级到内部包。
-RELEASE_CHANNEL = "public"
+RELEASE_CHANNEL = "internal"
 
 # 外部通道：清单与下载地址（外部用户只会看到并升级到此外部 exe）
 UPDATE_MANIFEST_URL_PUBLIC = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest_public.json"
@@ -49,7 +49,7 @@ MAIN_TABS = {
     "声学测试": True,
     "音频调试": True,
     "常用功能": True,
-    "烧大象key": False,   # 内部功能，给客户发布时可改为 False
+    "烧大象key": True,   # 内部功能，给客户发布时可改为 False
 }
 
 # ========== 各大类下的子标签 ==========
