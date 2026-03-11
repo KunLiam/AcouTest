@@ -1,8 +1,8 @@
 {
-  "latest_version": "1.8.9",
+  "latest_version": "1.9.1",
   "publish_date": "2026-03-10",
   "notes": [
-    "验证内部软件升级"
+    "唤醒监测：新增「关闭助手(force-stop)」仅结束 Google 助手弹窗(katniss)，不误退设备播放器，适合无人值守测试"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.9/AcouTest.v1.8.9.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.1/AcouTest.v1.9.1.exe"
 }

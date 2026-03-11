@@ -5156,9 +5156,24 @@ class UIComponents:
         self.hotword_stop_btn.pack(side="left", padx=5)
         ttk.Button(btn_frame, text="重置计数", command=self.reset_hotword_count).pack(side="left", padx=5)
         
-        # 可选：唤醒后发送系统返回键（相当于遥控器返回键）
-        self.hotword_send_back_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="唤醒后发送返回键（勾选后，每次检测到唤醒会向设备发送 KEYCODE_BACK）", variable=self.hotword_send_back_var).pack(anchor="w", pady=(5, 0))
+        # 可选：唤醒后关闭助手弹窗。日志中弹窗为 com.google.android.katniss 的 VoicePlateActivity；force-stop 仅结束助手进程不误退播放器
+        back_frame = ttk.Frame(frame)
+        back_frame.pack(anchor="w", pady=(5, 0))
+        ttk.Label(back_frame, text="唤醒后关闭助手:").pack(side="left")
+        self.hotword_after_key_var = tk.StringVar(value="关闭助手(force-stop)")
+        key_combo = ttk.Combobox(
+            back_frame,
+            textvariable=self.hotword_after_key_var,
+            values=["不关闭", "关闭助手(force-stop)", "返回键(KEYCODE_BACK)", "Home键(KEYCODE_HOME)"],
+            state="readonly",
+            width=22,
+        )
+        key_combo.pack(side="left", padx=(6, 0))
+        ttk.Label(back_frame, text=" 延迟(秒):").pack(side="left", padx=(8, 2))
+        self.hotword_back_delay_var = tk.StringVar(value="2")
+        delay_entry = ttk.Entry(back_frame, textvariable=self.hotword_back_delay_var, width=4)
+        delay_entry.pack(side="left")
+        ttk.Label(back_frame, text="（推荐 force-stop：仅结束 katniss 弹窗）", style="Muted.TLabel").pack(side="left", padx=(4, 0))
         
         # 最近唤醒日志（只读）
         log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（B款 Detected hotword / A款 LIBAS_HOTWORD_DETECTION_RECEIVED）")
@@ -5353,11 +5368,45 @@ class UIComponents:
                     # A款: 每条计 0.5（每次唤醒 2 条，显示数量除以 2）
                     self.hotword_count += 0.5
                 _ui_append(self.hotword_count, line.strip())
-                # 可选：唤醒后发送系统返回键
-                if getattr(self, "hotword_send_back_var", None) and self.hotword_send_back_var.get():
+                # 可选：唤醒后延迟 N 秒再关闭助手（force-stop katniss / 返回键 / Home 键）
+                key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+                if not key_choice or key_choice.strip() in ("不关闭", "不发送") or not root or not root.winfo_exists():
+                    pass
+                else:
                     try:
-                        cmd = getattr(self, "get_adb_command", lambda c: f"adb {c}")("shell input keyevent KEYCODE_BACK")
-                        subprocess.run(cmd, shell=True, timeout=3, capture_output=True)
+                        raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
+                        delay_sec = 2.0
+                        if raw is not None:
+                            try:
+                                delay_sec = float(str(raw).strip())
+                                delay_sec = max(0.0, min(60.0, delay_sec))
+                            except (ValueError, TypeError):
+                                pass
+                        device_id = (getattr(self, "selected_device", None) or "").strip() or (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+
+                        use_force_stop = "force-stop" in key_choice or "关闭助手" in key_choice
+
+                        def _close_assistant_later(dev_id, force_stop_only, keycode):
+                            try:
+                                if force_stop_only:
+                                    if dev_id:
+                                        cmd = f"adb -s {dev_id} shell am force-stop com.google.android.katniss"
+                                    else:
+                                        cmd = "adb shell am force-stop com.google.android.katniss"
+                                else:
+                                    if dev_id:
+                                        cmd = f"adb -s {dev_id} shell input keyevent {keycode}"
+                                    else:
+                                        cmd = f"adb shell input keyevent {keycode}"
+                                subprocess.run(cmd, shell=True, timeout=5, capture_output=True)
+                            except Exception:
+                                pass
+
+                        if use_force_stop:
+                            root.after(int(delay_sec * 1000), lambda d=device_id: _close_assistant_later(d, True, None))
+                        else:
+                            keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
+                            root.after(int(delay_sec * 1000), lambda d=device_id, c=keycode: _close_assistant_later(d, False, c))
                     except Exception:
                         pass
         except Exception:
