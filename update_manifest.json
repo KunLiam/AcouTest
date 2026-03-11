@@ -1,9 +1,9 @@
 {
-  "latest_version": "1.8.6",
+  "latest_version": "1.8.7",
   "publish_date": "2026-03-10",
   "notes": [
-    "震音与气密测试移除系统音量设置/恢复逻辑，避免误导",
-    "优化测试状态与日志文案，流程更简洁稳定"
+    "气密性测试播放链路稳定性修复，降低偶发无声概率",
+    "播放启动增加设备侧 tinyplay 进程校验与失败重试"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.6/AcouTest.v1.8.6.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.8.7/AcouTest.v1.8.7.exe"
 }

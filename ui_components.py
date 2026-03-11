@@ -8581,9 +8581,9 @@ class UIComponents:
             sample_rate = self.record_rate_var.get()      # 采样率
             bit_depth = self.record_bits_var.get()        # 位深
             
-            # 播放参数
-            play_device = self.play_device_var.get()
-            play_card = self.play_card_var.get()
+            # 播放参数固定：设备0 / 卡0（按当前项目默认机型）
+            play_device = "0"
+            play_card = "0"
             
             # 生成录制文件名
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -8666,26 +8666,60 @@ class UIComponents:
             subprocess.run(killall_cmd, shell=True)
             time.sleep(3)
             
-            # 先启动播放再启动录制；若界面设置的 设备/卡号 打开失败，则自动尝试其他常见组合
-            play_candidates = [
-                (play_device, play_card, f"设备{play_device} 卡{play_card}"),
-                ("0", "1", "设备0 卡1"),
-                ("0", "2", "设备0 卡2"),
-                ("1", "0", "设备1 卡0"),
-                ("1", "1", "设备1 卡1"),
-                (None, None, "默认设备(无 -D -d)"),
-            ]
             play_process = None
-            play_used_desc = None
             adb_prefix = f"adb -s {device_id} shell " if device_id else "adb shell "
-            for d_val, c_val, desc in play_candidates:
-                getattr(self, "root", self.parent).after(0, lambda d=desc: self.update_sweep_info(f"启动播放: {sweep_file}（尝试 {d}）"))
-                if d_val is not None and c_val is not None:
-                    play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted} -D {d_val} -d {c_val}"
-                else:
-                    play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted}"
-                # 同一条命令内先多次释放 audioserver，再立即 tinyplay，提升某些机型成功率
-                inner_cmd = play_cmd.replace(adb_prefix, "", 1)
+            play_used_desc = f"设备{play_device} 卡{play_card}"
+            active_play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted} -D {play_device} -d {play_card}"
+
+            def _is_tinyplay_running_on_device():
+                try:
+                    if device_id:
+                        pid_cmd = f"adb -s {device_id} shell pidof tinyplay"
+                    else:
+                        pid_cmd = "adb shell pidof tinyplay"
+                    rr = subprocess.run(pid_cmd, shell=True, capture_output=True, text=True, timeout=5)
+                    pid_txt = ((rr.stdout or "") + (rr.stderr or "")).strip()
+                    return rr.returncode == 0 and bool(pid_txt)
+                except Exception:
+                    return False
+
+            def _restart_playback_after_audio_restart(base_play_cmd, desc):
+                """audioserver 重启后，按原播放参数重新拉起 tinyplay。"""
+                if not base_play_cmd:
+                    return None, "无可用播放命令"
+                inner = base_play_cmd.replace(adb_prefix, "", 1)
+                inline = (
+                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"killall audioserver; sleep 0.35; "
+                    f"{inner}\""
+                )
+                proc = subprocess.Popen(inline, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                time.sleep(0.8)
+                if proc.poll() is None:
+                    # 额外校验：设备侧 tinyplay 进程必须真实存在，避免“主机侧进程存活但设备未播放”的假成功
+                    if _is_tinyplay_running_on_device():
+                        return proc, ""
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return None, f"播放重启失败（{desc}）: 设备侧未检测到 tinyplay 进程"
+                try:
+                    _, stderr = proc.communicate(timeout=1)
+                    err = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip()
+                except Exception:
+                    err = "进程已退出"
+                return None, f"播放重启失败（{desc}）: {err or '未知错误'}"
+            # 固定参数下最多重试 3 次（处理偶发 PCM 占用）
+            last_play_err = ""
+            for i in range(3):
+                attempt = i + 1
+                getattr(self, "root", self.parent).after(
+                    0,
+                    lambda a=attempt, d=play_used_desc: self.update_sweep_info(f"启动播放: {sweep_file}（{d}，第{a}次）"),
+                )
+                inner_cmd = active_play_cmd.replace(adb_prefix, "", 1)
                 inline_cmd = (
                     f"{adb_prefix}\"killall audioserver; sleep 0.35; "
                     f"killall audioserver; sleep 0.35; "
@@ -8693,22 +8727,31 @@ class UIComponents:
                     f"{inner_cmd}\""
                 )
                 proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                time.sleep(0.6)
-                if proc.poll() is None:
+                time.sleep(1.2)
+                if proc.poll() is None and _is_tinyplay_running_on_device():
                     play_process = proc
-                    play_used_desc = desc
                     self._last_sweep_play_started = True
-                    getattr(self, "root", self.parent).after(0, lambda d=desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
+                    getattr(self, "root", self.parent).after(0, lambda d=play_used_desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
                     break
                 try:
                     _, stderr = proc.communicate(timeout=1)
                     err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() or "进程已退出"
                 except Exception:
                     err_text = "进程已退出"
-                getattr(self, "root", self.parent).after(0, lambda msg=err_text, d=desc: self.update_sweep_info(f"播放尝试失败（{d}）: {msg}"))
+                if proc.poll() is None and not _is_tinyplay_running_on_device():
+                    err_text = "设备侧未检测到 tinyplay 进程（疑似被系统抢占）"
+                last_play_err = err_text
+                getattr(self, "root", self.parent).after(
+                    0,
+                    lambda msg=err_text, d=play_used_desc: self.update_sweep_info(f"播放尝试失败（{d}）: {msg}"),
+                )
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                time.sleep(0.3)
             if play_process is None:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(
-                    "所有播放设备尝试均失败。建议：在扫频设置中点击「检查音频设备」查看本机可用播放设备（卡X 设备Y），再将播放的「设备/卡号」改为对应值。"))
+                raise Exception(f"播放失败：固定参数（设备{play_device} 卡{play_card}）启动失败。{last_play_err}")
             
             # 播放已启动时多等一会再开录制，减少「Device or resource busy」
             if play_process is not None:
@@ -8728,6 +8771,13 @@ class UIComponents:
                     getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver(第1次)..."))
                     subprocess.run(killall_cmd, shell=True)
                     time.sleep(2)
+                    if play_process is not None and active_play_cmd:
+                        restarted_proc, restart_err = _restart_playback_after_audio_restart(active_play_cmd, play_used_desc or "原参数")
+                        if restarted_proc is not None:
+                            play_process = restarted_proc
+                            getattr(self, "root", self.parent).after(0, lambda d=(play_used_desc or "原参数"): self.update_sweep_info(f"audioserver 重启后已恢复播放（{d}）"))
+                        elif restart_err:
+                            getattr(self, "root", self.parent).after(0, lambda m=restart_err: self.update_sweep_info(m))
                     record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     time.sleep(0.5)
                 if record_process.poll() is not None:
@@ -8739,6 +8789,13 @@ class UIComponents:
                         time.sleep(1)
                         subprocess.run(killall_cmd, shell=True)
                         time.sleep(2)
+                        if play_process is not None and active_play_cmd:
+                            restarted_proc, restart_err = _restart_playback_after_audio_restart(active_play_cmd, play_used_desc or "原参数")
+                            if restarted_proc is not None:
+                                play_process = restarted_proc
+                                getattr(self, "root", self.parent).after(0, lambda d=(play_used_desc or "原参数"): self.update_sweep_info(f"audioserver 重启后已恢复播放（{d}）"))
+                            elif restart_err:
+                                getattr(self, "root", self.parent).after(0, lambda m=restart_err: self.update_sweep_info(m))
                         record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         time.sleep(0.5)
                     if record_process.poll() is not None:
