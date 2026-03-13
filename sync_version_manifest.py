@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-从 feature_config.py 读取 APP_VERSION 与下载地址模板，同步双通道更新清单：
-- update_manifest_public.json（外部包，download_url 指向 AcouTest.v{version}.exe）
-- update_manifest_internal.json（内部包，download_url 指向 AcouTest.v{version}.internal.exe）
+从 feature_config.py 读取 APP_VERSION、RELEASE_CHANNEL 与下载地址模板，按通道同步更新清单：
+- RELEASE_CHANNEL="internal" 时仅写入 update_manifest_internal.json
+- RELEASE_CHANNEL="public" 时仅写入 update_manifest_public.json（并同步 update_manifest.json 兼容旧链接）
 notes 从 release_notes.txt 读取。
 """
 import json
@@ -19,6 +19,11 @@ def read_app_version(cfg_path: str) -> str:
     if not m:
         raise RuntimeError("未在 feature_config.py 中找到 APP_VERSION")
     return m.group(1).strip()
+
+
+def read_release_channel(cfg_path: str) -> str:
+    ch = read_config_string(cfg_path, "RELEASE_CHANNEL", "internal").strip().lower()
+    return ch if ch in ("internal", "public") else "internal"
 
 
 def read_config_string(cfg_path: str, var_name: str, default: str = "") -> str:
@@ -52,6 +57,7 @@ def main() -> int:
         return 1
 
     app_version = read_app_version(cfg_path)
+    channel = read_release_channel(cfg_path)
     url_public_tpl = read_config_string(
         cfg_path, "DOWNLOAD_URL_PUBLIC",
         "https://github.com/KunLiam/AcouTest/releases/download/v{version}-public/AcouTest.v{version}.exe",
@@ -61,16 +67,8 @@ def main() -> int:
         "https://github.com/KunLiam/AcouTest/releases/download/v{version}/AcouTest.v{version}.exe",
     )
     notes = read_notes(root)
-    publish_date = ""
-    try:
-        with open(os.path.join(root, "update_manifest.json"), "r", encoding="utf-8") as f:
-            d = json.load(f)
-            publish_date = str(d.get("publish_date") or "").strip()
-    except Exception:
-        pass
-    if not publish_date:
-        import time
-        publish_date = time.strftime("%Y-%m-%d")
+    import time
+    publish_date = time.strftime("%Y-%m-%d")
 
     base = {
         "latest_version": app_version,
@@ -80,19 +78,21 @@ def main() -> int:
     manifest_public = {**base, "download_url": url_public_tpl.replace("{version}", app_version)}
     manifest_internal = {**base, "download_url": url_internal_tpl.replace("{version}", app_version)}
 
-    for name, data in (
-        ("update_manifest_public.json", manifest_public),
-        ("update_manifest_internal.json", manifest_internal),
-    ):
-        path = os.path.join(root, name)
+    # 仅同步当前 RELEASE_CHANNEL 对应的清单
+    if channel == "internal":
+        path = os.path.join(root, "update_manifest_internal.json")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[OK] 已写入 {name} -> v{app_version}")
-
-    # 兼容：保留 update_manifest.json 与外部通道一致，便于旧链接
-    with open(os.path.join(root, "update_manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest_public, f, ensure_ascii=False, indent=2)
-    print(f"[OK] 已同步 update_manifest.json（与外部通道一致）")
+            json.dump(manifest_internal, f, ensure_ascii=False, indent=2)
+        print(f"[OK] 已写入 update_manifest_internal.json -> v{app_version}（通道: internal）")
+    else:
+        path = os.path.join(root, "update_manifest_public.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(manifest_public, f, ensure_ascii=False, indent=2)
+        print(f"[OK] 已写入 update_manifest_public.json -> v{app_version}（通道: public）")
+        # 兼容旧链接
+        with open(os.path.join(root, "update_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest_public, f, ensure_ascii=False, indent=2)
+        print(f"[OK] 已同步 update_manifest.json（与外部通道一致）")
     return 0
 
 

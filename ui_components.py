@@ -5131,21 +5131,12 @@ class UIComponents:
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
         
-        # 说明
-        desc = ttk.Label(
-            frame,
-            text="监测设备 logcat：\nB款仅监测「Detected hotword」每条约 1 次；\nA款仅监测「LIBAS_HOTWORD_DETECTION_RECEIVED」；\n开始监测前会清空设备 log 缓冲，只统计本次唤醒。",
-            style="Muted.TLabel",
-            justify=tk.LEFT,
-        )
-        desc.pack(anchor="w", pady=(0, 10))
-        
-        # 唤醒次数显示
+        # 唤醒次数显示（紧凑布局，为下方日志留出空间）
         count_frame = ttk.LabelFrame(frame, text="唤醒次数")
         count_frame.pack(fill="x", pady=5)
         self.hotword_count_var = tk.StringVar(value="0")
-        self.hotword_count_label = ttk.Label(count_frame, textvariable=self.hotword_count_var, font=("Arial", 24))
-        self.hotword_count_label.pack(pady=15, padx=20)
+        self.hotword_count_label = ttk.Label(count_frame, textvariable=self.hotword_count_var, font=("Arial", 16))
+        self.hotword_count_label.pack(pady=6, padx=12)
         
         # 按钮
         btn_frame = ttk.Frame(frame)
@@ -5175,10 +5166,48 @@ class UIComponents:
         delay_entry.pack(side="left")
         ttk.Label(back_frame, text="（推荐 force-stop：仅结束 katniss 弹窗）", style="Muted.TLabel").pack(side="left", padx=(4, 0))
         
-        # 最近唤醒日志（只读）
+        # 100 条唤醒率测试：内置播，仅需 wakeup_count 内 art_100.txt + selected_100
+        rate_frame = ttk.LabelFrame(frame, text="100 条ok google唤醒率测试（内置播放 + 设备唤醒计数）")
+        rate_frame.pack(fill="x", pady=(12, 5))
+        rate_inner = ttk.Frame(rate_frame)
+        rate_inner.pack(fill="x", padx=8, pady=6)
+        ttk.Label(rate_inner, text="预期播放:").pack(side="left")
+        self.hotword_rate_expected_var = tk.StringVar(value="100")
+        ttk.Label(rate_inner, textvariable=self.hotword_rate_expected_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
+        ttk.Label(rate_inner, text="条  已播放:").pack(side="left", padx=(1, 6))
+        self.hotword_rate_played_var = tk.StringVar(value="0")
+        ttk.Label(rate_inner, textvariable=self.hotword_rate_played_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
+        ttk.Label(rate_inner, text="条  当前唤醒:").pack(side="left", padx=(1, 6))
+        self.hotword_rate_count_var = tk.StringVar(value="0")
+        ttk.Label(rate_inner, textvariable=self.hotword_rate_count_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
+        ttk.Label(rate_inner, text="次  唤醒率:").pack(side="left", padx=(1, 6))
+        self.hotword_rate_pct_var = tk.StringVar(value="0.0%")
+        ttk.Label(rate_inner, textvariable=self.hotword_rate_pct_var, font=("Arial", 12)).pack(side="left", padx=2)
+        rate_opts = ttk.Frame(rate_frame)
+        rate_opts.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(rate_opts, text="播放间隔(秒):").pack(side="left")
+        self.hotword_wakeup100_interval_var = tk.StringVar(value="3")
+        interval_entry = ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_interval_var, width=4)
+        interval_entry.pack(side="left", padx=4)
+        rate_btn_frame = ttk.Frame(rate_frame)
+        rate_btn_frame.pack(fill="x", padx=8, pady=(0, 6))
+        self.hotword_wakeup100_start_btn = ttk.Button(rate_btn_frame, text="开始 100 条唤醒率测试", command=self._start_wakeup100_test)
+        self.hotword_wakeup100_start_btn.pack(side="left", padx=(0, 8))
+        self.hotword_wakeup100_stop_btn = ttk.Button(rate_btn_frame, text="停止播放", command=self._stop_wakeup100_test, state="disabled")
+        self.hotword_wakeup100_stop_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(rate_btn_frame, text="保存唤醒率结果", command=self._save_wakeup100_result).pack(side="left")
+        ttk.Label(rate_frame, text="先选设备并开始监测，再点「开始」；请将笔记本扬声器设为蓝牙音响，设备播噪音时可配合「关闭助手」使用。", style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
+        self._wakeup100_play_process = None
+        self._wakeup100_play_thread = None
+        self._wakeup100_stop_requested = False
+        self._wakeup100_expected = 100
+        self._wakeup100_played_count = 0  # 已播放条数，用于唤醒率分母
+        self._wakeup100_update_after_id = None
+        
+        # 最近唤醒日志（只读，expand 占用唤醒次数节省的空间）
         log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（B款 Detected hotword / A款 LIBAS_HOTWORD_DETECTION_RECEIVED）")
         log_frame.pack(fill="both", expand=True, pady=5)
-        self.hotword_log_text = tk.Text(log_frame, height=12, font=("Consolas", 9), state="disabled")
+        self.hotword_log_text = tk.Text(log_frame, height=18, font=("Consolas", 9), state="disabled")
         vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.hotword_log_text.yview)
         self.hotword_log_text.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -5212,6 +5241,7 @@ class UIComponents:
         self._hotword_ui_buffer = []
         self._hotword_ui_flush_scheduled = False
         self.hotword_count = 0
+        self._hotword_last_appended_count = 0  # 仅当“第 N 次”的 N 增加时才追加日志，避免 A 款一次唤醒两条 log 打两行
         self._hotword_last_detected_time = 0.0
         self._hotword_monitor_start_time = time.time()  # 启动后前 1 秒内忽略，避免旧缓冲被计入
         if hasattr(self, "hotword_count_var"):
@@ -5283,12 +5313,261 @@ class UIComponents:
     def reset_hotword_count(self):
         """重置唤醒次数为 0"""
         self.hotword_count = 0
+        self._hotword_last_appended_count = 0
         if hasattr(self, "hotword_count_var"):
             self.hotword_count_var.set("0")
         if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
             self.hotword_log_text.config(state="normal")
             self.hotword_log_text.delete("1.0", "end")
             self.hotword_log_text.config(state="disabled")
+
+    def _append_hotword_log(self, msg):
+        """从任意线程安全地向「最近唤醒日志」追加一行（用于 100 条播放进度等）"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if not root or not root.winfo_exists():
+            return
+        def _do():
+            if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+                self.hotword_log_text.config(state="normal")
+                self.hotword_log_text.insert("end", msg + "\n")
+                self.hotword_log_text.see("end")
+                n = int(self.hotword_log_text.index("end-1c").split(".")[0])
+                if n > getattr(self, "_hotword_log_max_lines", 200):
+                    self.hotword_log_text.delete("1.0", "2.0")
+                self.hotword_log_text.config(state="disabled")
+        root.after(0, _do)
+
+    def _start_wakeup100_test(self):
+        """开始 100 条唤醒率测试：若监测未运行则先启动，再在进程内按 art_100.txt 顺序播放 selected_100 内 wav（间隔 3 秒），无需外置 .py"""
+        if not self.check_device_selected():
+            return
+        base_dir = self._get_runtime_base_dir()
+        wakeup_dir = None
+        for candidate in (base_dir, os.path.dirname(base_dir)):
+            d = os.path.join(candidate, "wakeup_count")
+            list_file = os.path.join(d, "art_100.txt")
+            if os.path.isfile(list_file) and os.path.isdir(os.path.join(d, "selected_100")):
+                wakeup_dir = d
+                break
+        if not wakeup_dir:
+            messagebox.showerror("错误", f"未找到 wakeup_count 数据目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}\n请将 wakeup_count 目录（含 art_100.txt 与 selected_100 文件夹）放在 exe 同目录或上一级目录，无需 .py 文件。")
+            return
+        if getattr(self, "_wakeup100_play_thread", None) and self._wakeup100_play_thread.is_alive():
+            messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」再重新开始。")
+            return
+        if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
+            self.start_hotword_monitor()
+            time.sleep(0.5)
+            if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
+                return
+        self._wakeup100_stop_requested = False
+        list_path = os.path.join(wakeup_dir, "art_100.txt")
+        audio_dir = os.path.join(wakeup_dir, "selected_100")
+        try:
+            with open(list_path, "r", encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            files = []
+            for line in lines:
+                name = os.path.basename(line.replace("/", os.sep))
+                full = os.path.join(audio_dir, name)
+                if os.path.isfile(full):
+                    files.append(full)
+        except Exception as e:
+            messagebox.showerror("错误", f"读取 art_100.txt 或 selected_100 失败: {e}")
+            return
+        if not files:
+            messagebox.showerror("错误", f"art_100.txt 中无有效条目或 selected_100 内无对应 wav 文件。")
+            return
+        self._wakeup100_expected = len(files)
+        self._wakeup100_played_count = 0
+        try:
+            raw_interval = (getattr(self, "hotword_wakeup100_interval_var", None) or tk.StringVar(value="3")).get()
+            interval_sec = max(0.5, min(60.0, float(str(raw_interval).strip() or "3")))
+        except (ValueError, TypeError):
+            interval_sec = 3.0
+        self._wakeup100_interval_sec = interval_sec
+        if hasattr(self, "hotword_rate_expected_var"):
+            self.hotword_rate_expected_var.set(str(len(files)))
+        if hasattr(self, "hotword_rate_played_var"):
+            self.hotword_rate_played_var.set("0")
+        if hasattr(self, "hotword_rate_count_var"):
+            self.hotword_rate_count_var.set("0")
+        if hasattr(self, "hotword_rate_pct_var"):
+            self.hotword_rate_pct_var.set("0.0%")
+        if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
+            self.hotword_wakeup100_start_btn.config(state="disabled")
+        if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
+            self.hotword_wakeup100_stop_btn.config(state="normal")
+        if hasattr(self, "status_var"):
+            self.status_var.set("100 条唤醒率测试：本地播放中，请保持蓝牙音响与设备就绪")
+        self._append_hotword_log(f"Reading list: {list_path}")
+        self._append_hotword_log(f"Total {len(files)} files, interval {interval_sec} sec")
+        self._append_hotword_log("Set default speaker to Bluetooth, then start monitoring. Playing...")
+        total_files = len(files)
+        def _play_wav_list():
+            stop = lambda: getattr(self, "_wakeup100_stop_requested", False)
+            interval = getattr(self, "_wakeup100_interval_sec", 3.0)
+            steps = max(1, int(interval * 10))
+            try:
+                for i, path in enumerate(files):
+                    if stop():
+                        break
+                    self._wakeup100_played_count = i + 1
+                    basename = os.path.basename(path)
+                    self._append_hotword_log(f"[{i + 1}/{total_files}] Playing: {basename}")
+                    try:
+                        if platform.system() == "Windows":
+                            import winsound
+                            winsound.PlaySound(path, winsound.SND_FILENAME)
+                        else:
+                            import subprocess as _sp
+                            _sp.run(["aplay", "-q", path], timeout=60, capture_output=True)
+                    except Exception:
+                        pass
+                    if i < len(files) - 1 and not stop():
+                        self._append_hotword_log(f"  Waiting {interval} sec...")
+                        for _ in range(steps):
+                            if stop():
+                                break
+                            time.sleep(0.1)
+            finally:
+                pass
+        self._wakeup100_play_thread = threading.Thread(target=_play_wav_list, daemon=True)
+        self._wakeup100_play_thread.start()
+        self._wakeup100_schedule_rate_update()
+
+    def _wakeup100_schedule_rate_update(self):
+        """定时刷新唤醒率（分母=已播放条数）；若播放线程已结束则恢复按钮并显示最终结果"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if not root or not root.winfo_exists():
+            return
+        th = getattr(self, "_wakeup100_play_thread", None)
+        expected = getattr(self, "_wakeup100_expected", 100)
+        played = getattr(self, "_wakeup100_played_count", 0)
+        count = getattr(self, "hotword_count", 0)
+        try:
+            count_val = float(count) if isinstance(count, (int, float)) else 0.0
+        except Exception:
+            count_val = 0.0
+        denominator = max(1, played)
+        pct = (count_val / denominator * 100) if denominator else 0.0
+        if hasattr(self, "hotword_rate_played_var"):
+            self.hotword_rate_played_var.set(str(played))
+        if hasattr(self, "hotword_rate_count_var"):
+            self.hotword_rate_count_var.set(str(int(round(count_val))))
+        if hasattr(self, "hotword_rate_pct_var"):
+            self.hotword_rate_pct_var.set(f"{pct:.1f}%")
+        if th is None or not th.is_alive():
+            if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
+                self.hotword_wakeup100_start_btn.config(state="normal")
+            if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
+                self.hotword_wakeup100_stop_btn.config(state="disabled")
+            if hasattr(self, "status_var"):
+                self.status_var.set(f"播放结束，最终唤醒率: {pct:.1f}%")
+            self._wakeup100_play_thread = None
+            self._wakeup100_update_after_id = None
+            return
+        self._wakeup100_update_after_id = root.after(1000, self._wakeup100_schedule_rate_update)
+
+    def _stop_wakeup100_test(self):
+        """停止 100 条播放（请求线程在下一首前退出），并一并停止唤醒监测"""
+        self._wakeup100_stop_requested = True
+        aid = getattr(self, "_wakeup100_update_after_id", None)
+        if aid and getattr(self, "root", None) and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+        self._wakeup100_update_after_id = None
+        if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
+            self.hotword_wakeup100_start_btn.config(state="normal")
+        if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
+            self.hotword_wakeup100_stop_btn.config(state="disabled")
+        # 本次唤醒计数结束，一并停止 logcat 监测
+        self.stop_hotword_monitor()
+        if hasattr(self, "status_var"):
+            self.status_var.set("已停止 100 条播放与唤醒监测")
+
+    def _save_wakeup100_result(self):
+        """将当前唤醒率测试结果保存到文件（时间戳、已播放条数、唤醒次数、唤醒率）"""
+        played = getattr(self, "_wakeup100_played_count", 0)
+        try:
+            count_val = float(getattr(self, "hotword_count", 0))
+        except (TypeError, ValueError):
+            count_val = 0.0
+        count_int = int(round(count_val))
+        denominator = max(1, played)
+        pct = (count_val / denominator * 100) if denominator else 0.0
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fname_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(OUTPUT_ROOT, "wakeup_rate")
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except OSError:
+            save_dir = OUTPUT_ROOT
+        path = os.path.join(save_dir, f"wakeup_rate_{fname_ts}.txt")
+        lines = [
+            "100 条唤醒率测试结果",
+            "=" * 40,
+            f"时间: {ts}",
+            f"预期播放: {getattr(self, '_wakeup100_expected', 100)} 条",
+            f"已播放: {played} 条",
+            f"唤醒次数: {count_int}",
+            f"唤醒率: {pct:.1f}%",
+            "",
+        ]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            if getattr(self, "status_var", None):
+                self.status_var.set(f"已保存: {path}")
+            # 弹窗：与之前好看版本一致（左侧蓝色圆形 i、文案单行），底部「打开所在文件夹」+「确定」
+            root_win = getattr(self, "root", None) or getattr(self, "parent", None)
+            dlg = tk.Toplevel(root_win)
+            dlg.title("保存成功")
+            dlg.transient(root_win)
+            dlg.grab_set()
+            dlg.resizable(False, False)
+            self._apply_window_icon(dlg)
+            # 主内容区：浅灰背景贴近系统对话框
+            content = tk.Frame(dlg, bg="#f0f0f0", padx=24, pady=20)
+            content.pack(fill="both", expand=True)
+            # 左侧：蓝色圆形信息图标（与之前好看版本一致）
+            icon_canvas = tk.Canvas(content, width=32, height=32, highlightthickness=0, bg="#f0f0f0")
+            icon_canvas.pack(side="left", padx=(0, 16))
+            icon_canvas.create_oval(2, 2, 30, 30, fill="#0078d4", outline="#0078d4")
+            icon_canvas.create_text(16, 16, text="i", fill="white", font=("Segoe UI", 14, "bold"))
+            # 右侧：两行文案
+            msg_frame = tk.Frame(content, bg="#f0f0f0")
+            msg_frame.pack(side="left", fill="both", expand=True)
+            tk.Label(msg_frame, text="唤醒率结果已保存至:", fg="black", bg="#f0f0f0", font=("Segoe UI", 10)).pack(anchor="w")
+            path_lbl = tk.Label(msg_frame, text=path, fg="black", bg="#f0f0f0", font=("Segoe UI", 9), justify=tk.LEFT)
+            path_lbl.pack(anchor="w", pady=(4, 0))
+            # 底部按钮行
+            btn_frame = tk.Frame(dlg, bg="#f0f0f0", pady=12)
+            btn_frame.pack(fill="x", padx=24)
+            def _open_folder():
+                try:
+                    if platform.system() == "Windows":
+                        os.startfile(save_dir)
+                    elif platform.system() == "Darwin":
+                        subprocess.run(["open", save_dir], check=False)
+                    else:
+                        subprocess.run(["xdg-open", save_dir], check=False)
+                except Exception:
+                    pass
+            ttk.Button(btn_frame, text="打开所在文件夹", command=_open_folder).pack(side="right", padx=(8, 0))
+            ttk.Button(btn_frame, text="确定", command=dlg.destroy).pack(side="right")
+            dlg.update_idletasks()
+            # 保证宽度足够，路径单行显示（与上面截图一致）
+            min_w = max(dlg.winfo_reqwidth(), 520)
+            dlg.minsize(min_w, 0)
+            h = dlg.winfo_reqheight()
+            x = (dlg.winfo_screenwidth() - min_w) // 2
+            y = (dlg.winfo_screenheight() - h) // 2
+            dlg.geometry(f"{min_w}x{h}+{x}+{y}")
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e))
 
     def _read_hotword_logcat(self):
         """B款: 仅监测 Detected hotword，每条计 1 次（时间窗去重）；A款: 仅监测 LIBAS_HOTWORD_DETECTION_RECEIVED，每条计 0.5（每唤醒 2 条，显示数量除以 2）"""
@@ -5367,7 +5646,12 @@ class UIComponents:
                 else:
                     # A款: 每条计 0.5（每次唤醒 2 条，显示数量除以 2）
                     self.hotword_count += 0.5
-                _ui_append(self.hotword_count, line.strip())
+                # 仅当“第 N 次”的 N 真正增加时追加一行，避免 A 款一次唤醒两条 log 打两行
+                current_n = int(round(self.hotword_count))
+                last_appended = getattr(self, "_hotword_last_appended_count", 0)
+                if current_n > last_appended:
+                    self._hotword_last_appended_count = current_n
+                    _ui_append(self.hotword_count, f"监测到唤醒，计数+1（当前：第 {current_n} 次）")
                 # 可选：唤醒后延迟 N 秒再关闭助手（force-stop katniss / 返回键 / Home 键）
                 key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
                 if not key_choice or key_choice.strip() in ("不关闭", "不发送") or not root or not root.winfo_exists():
