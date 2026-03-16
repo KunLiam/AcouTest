@@ -1,8 +1,10 @@
 {
-  "latest_version": "1.9.3",
+  "latest_version": "1.9.4",
   "publish_date": "2026-03-16",
   "notes": [
-    "唤醒监测：唤醒率测试改为本机扬声器与设备端 AudioPlayer.apk 同时播放，按音量区间(0-25)逐档测试，每档 100 条、按档位单独计算唤醒率，保存结果按系统音量隔离"
+    "唤醒监测：停止播放时一并停止监测并停止设备端 APK 播放",
+    "唤醒监测：系统音量设置优先 service call audio 12（部分设备 media_session --set 无效）",
+    "唤醒监测：每档播放条数可设(默认 100)；保存结果按档位隔离、每档单独唤醒率"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.3/AcouTest.v1.9.3.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.4/AcouTest.v1.9.4.exe"
 }
