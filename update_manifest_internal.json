@@ -1,8 +1,8 @@
 {
-  "latest_version": "1.9.2",
-  "publish_date": "2026-03-13",
+  "latest_version": "1.9.3",
+  "publish_date": "2026-03-16",
   "notes": [
-    "唤醒监测：添加100 条唤醒率自动化测试，唤醒率按已播放条数计算，支持可配置播放间隔、保存结果到文件；停止播放时一并停止监测"
+    "唤醒监测：唤醒率测试改为本机扬声器与设备端 AudioPlayer.apk 同时播放，按音量区间(0-25)逐档测试，每档 100 条、按档位单独计算唤醒率，保存结果按系统音量隔离"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.2/AcouTest.v1.9.2.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.3/AcouTest.v1.9.3.exe"
 }

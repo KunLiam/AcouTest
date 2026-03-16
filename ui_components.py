@@ -5166,8 +5166,8 @@ class UIComponents:
         delay_entry.pack(side="left")
         ttk.Label(back_frame, text="（推荐 force-stop：仅结束 katniss 弹窗）", style="Muted.TLabel").pack(side="left", padx=(4, 0))
         
-        # 100 条唤醒率测试：内置播，仅需 wakeup_count 内 art_100.txt + selected_100
-        rate_frame = ttk.LabelFrame(frame, text="100 条ok google唤醒率测试（内置播放 + 设备唤醒计数）")
+        # 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，设备唤醒计数
+        rate_frame = ttk.LabelFrame(frame, text="100 条唤醒率测试（本机+设备端同时播放，设备唤醒计数）")
         rate_frame.pack(fill="x", pady=(12, 5))
         rate_inner = ttk.Frame(rate_frame)
         rate_inner.pack(fill="x", padx=8, pady=6)
@@ -5185,7 +5185,13 @@ class UIComponents:
         ttk.Label(rate_inner, textvariable=self.hotword_rate_pct_var, font=("Arial", 12)).pack(side="left", padx=2)
         rate_opts = ttk.Frame(rate_frame)
         rate_opts.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(rate_opts, text="播放间隔(秒):").pack(side="left")
+        ttk.Label(rate_opts, text="系统音量区间(0-25，手动):").pack(side="left")
+        self.hotword_wakeup100_volume_from_var = tk.StringVar(value="5")
+        ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_volume_from_var, width=3).pack(side="left", padx=2)
+        ttk.Label(rate_opts, text="~").pack(side="left")
+        self.hotword_wakeup100_volume_to_var = tk.StringVar(value="10")
+        ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_volume_to_var, width=3).pack(side="left", padx=2)
+        ttk.Label(rate_opts, text="  播放间隔(秒):").pack(side="left", padx=(8, 0))
         self.hotword_wakeup100_interval_var = tk.StringVar(value="3")
         interval_entry = ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_interval_var, width=4)
         interval_entry.pack(side="left", padx=4)
@@ -5196,7 +5202,7 @@ class UIComponents:
         self.hotword_wakeup100_stop_btn = ttk.Button(rate_btn_frame, text="停止播放", command=self._stop_wakeup100_test, state="disabled")
         self.hotword_wakeup100_stop_btn.pack(side="left", padx=(0, 8))
         ttk.Button(rate_btn_frame, text="保存唤醒率结果", command=self._save_wakeup100_result).pack(side="left")
-        ttk.Label(rate_frame, text="先选设备并开始监测，再点「开始」；请将笔记本扬声器设为蓝牙音响，设备播噪音时可配合「关闭助手」使用。", style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
+        ttk.Label(rate_frame, text="本机+设备端同时播放；音量区间 0-25，按档位逐轮测试（每档 100 条）；开始前会打印当前系统音量并安装 APK。", style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
         self._wakeup100_play_process = None
         self._wakeup100_play_thread = None
         self._wakeup100_stop_requested = False
@@ -5310,13 +5316,13 @@ class UIComponents:
         if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
             self.hotword_stop_btn.config(state="disabled")
 
-    def reset_hotword_count(self):
-        """重置唤醒次数为 0"""
+    def reset_hotword_count(self, clear_log=True):
+        """重置唤醒次数为 0。clear_log=True 时清空最近唤醒日志，多轮测试时传 False 仅重置计数。"""
         self.hotword_count = 0
         self._hotword_last_appended_count = 0
         if hasattr(self, "hotword_count_var"):
             self.hotword_count_var.set("0")
-        if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+        if clear_log and hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
             self.hotword_log_text.config(state="normal")
             self.hotword_log_text.delete("1.0", "end")
             self.hotword_log_text.config(state="disabled")
@@ -5337,32 +5343,109 @@ class UIComponents:
                 self.hotword_log_text.config(state="disabled")
         root.after(0, _do)
 
+    def _get_device_volume(self, device_id):
+        """Android 11+ 使用 cmd media_session volume --stream 3 --get 读取 STREAM_MUSIC 当前音量；解析 "volume is 10 in range [0..25]" 得到档位，失败返回 None。"""
+        try:
+            r = subprocess.run(
+                ["adb", "-s", device_id, "shell", "cmd", "media_session", "volume", "--stream", "3", "--get"],
+                capture_output=True, text=True, timeout=10,
+            )
+            out = (r.stdout or "").strip()
+            # 输出示例: [V] volume is 10 in range [0..25]
+            import re as _re
+            m = _re.search(r"volume\s+is\s+(\d+)\s+in\s+range", out, _re.I)
+            if m:
+                return int(m.group(1))
+            m = _re.search(r"volume\s+is\s+(\d+)", out, _re.I)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+        return None
+
     def _start_wakeup100_test(self):
-        """开始 100 条唤醒率测试：若监测未运行则先启动，再在进程内按 art_100.txt 顺序播放 selected_100 内 wav（间隔 3 秒），无需外置 .py"""
+        """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试（每档 100 条）。"""
         if not self.check_device_selected():
+            return
+        device_id = (getattr(self, "selected_device", None) or "").strip() or (self.device_var.get() or "").strip()
+        if not device_id:
+            messagebox.showerror("错误", "请先选择设备。")
             return
         base_dir = self._get_runtime_base_dir()
         wakeup_dir = None
         for candidate in (base_dir, os.path.dirname(base_dir)):
             d = os.path.join(candidate, "wakeup_count")
-            list_file = os.path.join(d, "art_100.txt")
-            if os.path.isfile(list_file) and os.path.isdir(os.path.join(d, "selected_100")):
+            if os.path.isdir(d):
                 wakeup_dir = d
                 break
         if not wakeup_dir:
-            messagebox.showerror("错误", f"未找到 wakeup_count 数据目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}\n请将 wakeup_count 目录（含 art_100.txt 与 selected_100 文件夹）放在 exe 同目录或上一级目录，无需 .py 文件。")
+            messagebox.showerror("错误", f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}")
             return
+        list_file = os.path.join(wakeup_dir, "art_100.txt")
+        audio_dir = os.path.join(wakeup_dir, "selected_100")
+        apk_path = os.path.join(wakeup_dir, "AudioPlayer.apk")
+        if not os.path.isfile(list_file) or not os.path.isdir(audio_dir):
+            messagebox.showerror("错误", "需要 wakeup_count 下 art_100.txt 与 selected_100 文件夹（本机播放）。")
+            return
+        if not os.path.isfile(apk_path):
+            messagebox.showerror("错误", f"需要 wakeup_count 下 AudioPlayer.apk（设备端同时播放）。未找到:\n{apk_path}")
+            return
+        try:
+            v_from = max(0, min(25, int((getattr(self, "hotword_wakeup100_volume_from_var", None) or tk.StringVar(value="5")).get().strip() or "5")))
+            v_to = max(0, min(25, int((getattr(self, "hotword_wakeup100_volume_to_var", None) or tk.StringVar(value="10")).get().strip() or "10")))
+            if v_from > v_to:
+                v_from, v_to = v_to, v_from
+        except (ValueError, TypeError):
+            v_from = v_to = 5
+        self._wakeup100_last_volume = f"{v_from}-{v_to}"
+        self._wakeup100_last_playback_mode = "本机+设备端同时"
         if getattr(self, "_wakeup100_play_thread", None) and self._wakeup100_play_thread.is_alive():
             messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」再重新开始。")
             return
+        installed = False
+        try:
+            r = subprocess.run(
+                ["adb", "-s", device_id, "shell", "pm", "list", "packages", "com.player.demo"],
+                capture_output=True, text=True, timeout=10,
+            )
+            installed = r.returncode == 0 and "com.player.demo" in (r.stdout or "")
+        except Exception:
+            pass
+        if not installed:
+            self._append_hotword_log(f"安装 AudioPlayer.apk 到设备 {device_id}...")
+            if hasattr(self, "status_var"):
+                self.status_var.set("正在安装 AudioPlayer.apk...")
+            self.root.update_idletasks()
+            try:
+                r = subprocess.run(["adb", "-s", device_id, "install", "-r", apk_path], capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    messagebox.showerror("安装失败", f"adb install 失败:\n{err[:500]}")
+                    return
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("安装失败", "安装超时(120s)，请检查设备连接。")
+                return
+            except Exception as e:
+                messagebox.showerror("安装失败", str(e))
+                return
+            self._append_hotword_log("AudioPlayer.apk 安装完成。")
+        else:
+            self._append_hotword_log("设备已安装 AudioPlayer (com.player.demo)，跳过安装。")
+        current_vol = self._get_device_volume(device_id)
+        if current_vol is not None:
+            self._append_hotword_log(f"当前系统音量: {current_vol}（将按区间 {v_from}~{v_to} 逐档测试）。")
+        else:
+            self._append_hotword_log(f"无法读取当前系统音量，将按区间 {v_from}~{v_to} 逐档测试。")
         if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
             self.start_hotword_monitor()
             time.sleep(0.5)
             if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
                 return
         self._wakeup100_stop_requested = False
-        list_path = os.path.join(wakeup_dir, "art_100.txt")
-        audio_dir = os.path.join(wakeup_dir, "selected_100")
+        self._wakeup100_device_id = device_id
+        self._wakeup100_round_results = []
+        self._wakeup100_cumulative_wake = 0
+        list_path = list_file
         try:
             with open(list_path, "r", encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f if ln.strip()]
@@ -5378,7 +5461,8 @@ class UIComponents:
         if not files:
             messagebox.showerror("错误", f"art_100.txt 中无有效条目或 selected_100 内无对应 wav 文件。")
             return
-        self._wakeup100_expected = len(files)
+        num_rounds = v_to - v_from + 1
+        self._wakeup100_expected = len(files) * num_rounds
         self._wakeup100_played_count = 0
         try:
             raw_interval = (getattr(self, "hotword_wakeup100_interval_var", None) or tk.StringVar(value="3")).get()
@@ -5387,7 +5471,7 @@ class UIComponents:
             interval_sec = 3.0
         self._wakeup100_interval_sec = interval_sec
         if hasattr(self, "hotword_rate_expected_var"):
-            self.hotword_rate_expected_var.set(str(len(files)))
+            self.hotword_rate_expected_var.set(str(self._wakeup100_expected))
         if hasattr(self, "hotword_rate_played_var"):
             self.hotword_rate_played_var.set("0")
         if hasattr(self, "hotword_rate_count_var"):
@@ -5399,20 +5483,66 @@ class UIComponents:
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
             self.hotword_wakeup100_stop_btn.config(state="normal")
         if hasattr(self, "status_var"):
-            self.status_var.set("100 条唤醒率测试：本地播放中，请保持蓝牙音响与设备就绪")
+            self.status_var.set("100 条唤醒率测试：本机+设备端同时播放中，按音量档位逐轮测试")
         self._append_hotword_log(f"Reading list: {list_path}")
-        self._append_hotword_log(f"Total {len(files)} files, interval {interval_sec} sec")
+        self._append_hotword_log(f"Total {len(files)} files x {num_rounds} 轮(音量 {v_from}~{v_to}), interval {interval_sec} sec")
         self._append_hotword_log("Set default speaker to Bluetooth, then start monitoring. Playing...")
         total_files = len(files)
+        device_id_for_replay = getattr(self, "_wakeup100_device_id", None)
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        volume_levels = list(range(v_from, v_to + 1))
+
+        def _set_volume_on_device(vol):
+            """Android 11+ 使用 cmd media_session volume --stream 3 --set <index> 设置 STREAM_MUSIC 音量。"""
+            try:
+                subprocess.run(
+                    ["adb", "-s", device_id_for_replay, "shell", "cmd", "media_session", "volume", "--stream", "3", "--set", str(vol)],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
         def _play_wav_list():
             stop = lambda: getattr(self, "_wakeup100_stop_requested", False)
             interval = getattr(self, "_wakeup100_interval_sec", 3.0)
             steps = max(1, int(interval * 10))
-            try:
+            for round_index, vol in enumerate(volume_levels):
+                if stop():
+                    break
+                reset_done = threading.Event()
+                def _do_reset():
+                    self.reset_hotword_count(clear_log=False)
+                    reset_done.set()
+                if root and root.winfo_exists():
+                    root.after(0, _do_reset)
+                    reset_done.wait(timeout=2)
+                time.sleep(0.3)
+                if stop():
+                    break
+                if device_id_for_replay:
+                    _set_volume_on_device(vol)
+                    if round_index == 0:
+                        try:
+                            subprocess.run(
+                                ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.PLAY", "-n", "com.player.demo/.MainActivity"],
+                                capture_output=True, timeout=10,
+                            )
+                        except Exception:
+                            pass
+                        self._append_hotword_log("打开设备端 App 并播放: am start -a com.player.demo.PLAY ...")
+                    else:
+                        try:
+                            subprocess.run(
+                                ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.REPLAY", "-n", "com.player.demo/.MainActivity"],
+                                capture_output=True, timeout=10,
+                            )
+                        except Exception:
+                            pass
+                self._append_hotword_log(f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 100 条。")
                 for i, path in enumerate(files):
                     if stop():
                         break
-                    self._wakeup100_played_count = i + 1
+                    self._wakeup100_played_count = round_index * total_files + (i + 1)
                     basename = os.path.basename(path)
                     self._append_hotword_log(f"[{i + 1}/{total_files}] Playing: {basename}")
                     try:
@@ -5430,8 +5560,19 @@ class UIComponents:
                             if stop():
                                 break
                             time.sleep(0.1)
-            finally:
-                pass
+                if stop():
+                    break
+                try:
+                    count_val = float(getattr(self, "hotword_count", 0))
+                except (TypeError, ValueError):
+                    count_val = 0.0
+                round_count = int(round(count_val))
+                round_rate = (round_count / 100.0 * 100) if round_count is not None else 0.0
+                if not hasattr(self, "_wakeup100_round_results"):
+                    self._wakeup100_round_results = []
+                self._wakeup100_round_results.append((vol, round_count, round_rate))
+                self._wakeup100_cumulative_wake = getattr(self, "_wakeup100_cumulative_wake", 0) + round_count
+                self._append_hotword_log(f"音量 {vol} 完成，本轮唤醒 {round_count} 次，唤醒率 {round_rate:.1f}%（累计 {self._wakeup100_cumulative_wake} 次）。")
         self._wakeup100_play_thread = threading.Thread(target=_play_wav_list, daemon=True)
         self._wakeup100_play_thread.start()
         self._wakeup100_schedule_rate_update()
@@ -5444,11 +5585,12 @@ class UIComponents:
         th = getattr(self, "_wakeup100_play_thread", None)
         expected = getattr(self, "_wakeup100_expected", 100)
         played = getattr(self, "_wakeup100_played_count", 0)
-        count = getattr(self, "hotword_count", 0)
+        cumulative = getattr(self, "_wakeup100_cumulative_wake", 0) or 0
         try:
-            count_val = float(count) if isinstance(count, (int, float)) else 0.0
+            current_round = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
         except Exception:
-            count_val = 0.0
+            current_round = 0.0
+        count_val = cumulative + current_round
         denominator = max(1, played)
         pct = (count_val / denominator * 100) if denominator else 0.0
         if hasattr(self, "hotword_rate_played_var"):
@@ -5489,15 +5631,16 @@ class UIComponents:
             self.status_var.set("已停止 100 条播放与唤醒监测")
 
     def _save_wakeup100_result(self):
-        """将当前唤醒率测试结果保存到文件（时间戳、已播放条数、唤醒次数、唤醒率）"""
+        """将当前唤醒率测试结果保存到文件：按系统音量档位隔离，每档 100 条单独计算唤醒率，不合并。"""
         played = getattr(self, "_wakeup100_played_count", 0)
-        try:
-            count_val = float(getattr(self, "hotword_count", 0))
-        except (TypeError, ValueError):
-            count_val = 0.0
-        count_int = int(round(count_val))
-        denominator = max(1, played)
-        pct = (count_val / denominator * 100) if denominator else 0.0
+        round_results = getattr(self, "_wakeup100_round_results", [])
+        if round_results:
+            total_wake = sum(r[1] for r in round_results)
+        else:
+            try:
+                total_wake = int(round(float(getattr(self, "hotword_count", 0))))
+            except (TypeError, ValueError):
+                total_wake = 0
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fname_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         save_dir = os.path.join(OUTPUT_ROOT, "wakeup_rate")
@@ -5506,16 +5649,29 @@ class UIComponents:
         except OSError:
             save_dir = OUTPUT_ROOT
         path = os.path.join(save_dir, f"wakeup_rate_{fname_ts}.txt")
+        playback_mode = getattr(self, "_wakeup100_last_playback_mode", "") or "本机扬声器"
+        volume_level = getattr(self, "_wakeup100_last_volume", None)
         lines = [
             "100 条唤醒率测试结果",
             "=" * 40,
             f"时间: {ts}",
+            f"播放方式: {playback_mode}",
+            f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档播放 100 条，唤醒率按档位单独计算）",
             f"预期播放: {getattr(self, '_wakeup100_expected', 100)} 条",
             f"已播放: {played} 条",
-            f"唤醒次数: {count_int}",
-            f"唤醒率: {pct:.1f}%",
+            f"合计唤醒次数: {total_wake}",
             "",
         ]
+        if round_results:
+            lines.append("各档音量结果（每档 100 条对应一个唤醒率，按系统音量隔离）:")
+            for item in round_results:
+                if len(item) >= 3:
+                    vol, cnt, rate = item[0], item[1], item[2]
+                else:
+                    vol, cnt = item[0], item[1]
+                    rate = (cnt / 100.0 * 100) if cnt is not None else 0.0
+                lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+            lines.append("")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
