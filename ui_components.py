@@ -5174,10 +5174,10 @@ class UIComponents:
         ttk.Label(rate_inner, text="预期播放:").pack(side="left")
         self.hotword_rate_expected_var = tk.StringVar(value="100")
         ttk.Label(rate_inner, textvariable=self.hotword_rate_expected_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="条  |  当前音效:").pack(side="left", padx=(8, 2))
+        ttk.Label(rate_inner, text="条  |  音效:").pack(side="left", padx=(8, 2))
         self.hotword_rate_effx_var = tk.StringVar(value="-")
         ttk.Label(rate_inner, textvariable=self.hotword_rate_effx_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="  当前音量:").pack(side="left", padx=(6, 2))
+        ttk.Label(rate_inner, text="  音量:").pack(side="left", padx=(6, 2))
         self.hotword_rate_vol_var = tk.StringVar(value="-")
         ttk.Label(rate_inner, textvariable=self.hotword_rate_vol_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
         ttk.Label(rate_inner, text="  总次数:").pack(side="left", padx=(6, 2))
@@ -5212,15 +5212,20 @@ class UIComponents:
         ttk.Button(rate_opts2, text="查看音效说明", command=self._show_effx_mode_help).pack(side="left", padx=(4, 0))
         rate_btn_frame = ttk.Frame(rate_frame)
         rate_btn_frame.pack(fill="x", padx=8, pady=(0, 6))
-        self.hotword_wakeup100_start_btn = ttk.Button(rate_btn_frame, text="开始唤醒率测试", command=self._start_wakeup100_test)
+        self.hotword_wakeup100_start_btn = ttk.Button(rate_btn_frame, text="开始唤醒率测试", command=lambda: self._start_wakeup100_test(resume=False))
         self.hotword_wakeup100_start_btn.pack(side="left", padx=(0, 8))
         self.hotword_wakeup100_stop_btn = ttk.Button(rate_btn_frame, text="停止播放", command=self._stop_wakeup100_test, state="disabled")
         self.hotword_wakeup100_stop_btn.pack(side="left", padx=(0, 8))
+        self.hotword_wakeup100_pause_btn = ttk.Button(rate_btn_frame, text="暂停", command=self._pause_wakeup100_test, state="disabled")
+        self.hotword_wakeup100_pause_btn.pack(side="left", padx=(0, 8))
+        self.hotword_wakeup100_resume_btn = ttk.Button(rate_btn_frame, text="继续测试", command=lambda: self._start_wakeup100_test(resume=True), state="disabled")
+        self.hotword_wakeup100_resume_btn.pack(side="left", padx=(0, 8))
         ttk.Button(rate_btn_frame, text="保存唤醒率结果", command=self._save_wakeup100_result).pack(side="left")
         ttk.Label(rate_frame, text="本机+设备端同时播放；音量区间 0-25，按档位逐轮测试（每档条数可设，默认 100）；开始前会打印当前系统音量并安装 APK。", style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
         self._wakeup100_play_process = None
         self._wakeup100_play_thread = None
         self._wakeup100_stop_requested = False
+        self._wakeup100_paused = False  # 暂停后保留结果，可点「继续测试」接着测
         self._wakeup100_expected = 100
         self._wakeup100_played_count = 0  # 已播放条数，用于唤醒率分母
         self._wakeup100_update_after_id = None
@@ -5243,8 +5248,9 @@ class UIComponents:
         self._hotword_last_detected_time = 0.0  # 用于同一唤醒只计一次（去重时间窗）
         self._hotword_debounce_seconds = 1.5   # 此时间内只计 1 次
 
-    def start_hotword_monitor(self):
-        """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，只统计「Detected hotword」一次/唤醒"""
+    def start_hotword_monitor(self, keep_state=False):
+        """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，只统计「Detected hotword」一次/唤醒。
+        keep_state=True 时不清零唤醒次数、不清空日志（用于 100 条测试的「继续测试」）。"""
         if not self.check_device_selected():
             # 明确提示用户，避免“点了没反应”的困惑
             root = getattr(self, "root", None)
@@ -5261,16 +5267,17 @@ class UIComponents:
         self.hotword_monitor_stop = False
         self._hotword_ui_buffer = []
         self._hotword_ui_flush_scheduled = False
-        self.hotword_count = 0
-        self._hotword_last_appended_count = 0  # 仅当“第 N 次”的 N 增加时才追加日志，避免 A 款一次唤醒两条 log 打两行
+        if not keep_state:
+            self.hotword_count = 0
+            self._hotword_last_appended_count = 0  # 仅当“第 N 次”的 N 增加时才追加日志，避免 A 款一次唤醒两条 log 打两行
+            if hasattr(self, "hotword_count_var"):
+                self.hotword_count_var.set("0")
+            if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
+                self.hotword_log_text.config(state="normal")
+                self.hotword_log_text.delete("1.0", "end")
+                self.hotword_log_text.config(state="disabled")
         self._hotword_last_detected_time = 0.0
         self._hotword_monitor_start_time = time.time()  # 启动后前 1 秒内忽略，避免旧缓冲被计入
-        if hasattr(self, "hotword_count_var"):
-            self.hotword_count_var.set("0")
-        if hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
-            self.hotword_log_text.config(state="normal")
-            self.hotword_log_text.delete("1.0", "end")
-            self.hotword_log_text.config(state="disabled")
         try:
             clear_argv = ["adb", "-s", device_id, "logcat", "-c"]
             subprocess.run(clear_argv, shell=False, capture_output=True, timeout=5)
@@ -5414,8 +5421,8 @@ class UIComponents:
         y = (dlg.winfo_screenheight() - h) // 2
         dlg.geometry(f"{w}x{h}+{x}+{y}")
 
-    def _start_wakeup100_test(self):
-        """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试（每档 100 条）。"""
+    def _start_wakeup100_test(self, resume=False):
+        """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试。resume=True 时从上次暂停处接着测，保留已有结果。"""
         if not self.check_device_selected():
             return
         device_id = (getattr(self, "selected_device", None) or "").strip() or (self.device_var.get() or "").strip()
@@ -5451,7 +5458,10 @@ class UIComponents:
         self._wakeup100_last_volume = f"{v_from}-{v_to}"
         self._wakeup100_last_playback_mode = "本机+设备端同时"
         if getattr(self, "_wakeup100_play_thread", None) and self._wakeup100_play_thread.is_alive():
-            messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」再重新开始。")
+            messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」或「暂停」再操作。")
+            return
+        if resume and not getattr(self, "_wakeup100_paused", False):
+            messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续测试」）。")
             return
         installed = False
         try:
@@ -5488,15 +5498,17 @@ class UIComponents:
         else:
             self._append_hotword_log(f"无法读取当前系统音量，将按区间 {v_from}~{v_to} 逐档测试。")
         if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
-            self.start_hotword_monitor()
+            self.start_hotword_monitor(keep_state=resume)  # 继续测试时保留暂停前的唤醒次数与日志
             time.sleep(0.5)
             if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
                 return
         self._wakeup100_stop_requested = False
+        self._wakeup100_paused = False
         self._wakeup100_device_id = device_id
-        self._wakeup100_round_results = []
-        self._wakeup100_results_by_mode = {}
-        self._wakeup100_cumulative_wake = 0
+        if not resume:
+            self._wakeup100_round_results = []
+            self._wakeup100_results_by_mode = {}
+            self._wakeup100_cumulative_wake = 0
         self._wakeup100_current_round_played = 0
         self._wakeup100_current_effx_display = "-"
         self._wakeup100_current_vol = "-"
@@ -5538,7 +5550,59 @@ class UIComponents:
         num_effx = len(self._wakeup100_effx_modes) if self._wakeup100_effx_modes else 1
         self._wakeup100_expected = len(files) * num_rounds * num_effx
         self._wakeup100_per_volume_count = len(files)
-        self._wakeup100_played_count = 0
+        if not resume:
+            self._wakeup100_played_count = 0
+        if resume:
+            volume_levels_resume = list(range(v_from, v_to + 1))
+            effx_modes_list_resume = (self._wakeup100_effx_modes or [None]) if self._wakeup100_effx_modes else [None]
+            rbm = getattr(self, "_wakeup100_results_by_mode", {}) or {}
+            rres = getattr(self, "_wakeup100_round_results", []) or []
+            resume_file_index = 0  # 同一档内从第几首接着播（0=从首首开始）
+            if rbm:
+                mode_start, round_start = 0, 0
+                for mi, mode in enumerate(effx_modes_list_resume):
+                    lst = rbm.get(mode, [])
+                    n = len(lst)
+                    if n == 0:
+                        mode_start, round_start = mi, 0
+                        break
+                    if n < num_rounds:
+                        last = lst[-1]
+                        actual_played = last[3] if len(last) >= 4 else 0
+                        total_per_round = len(files)  # 每档条数
+                        if actual_played > 0 and actual_played < total_per_round:
+                            # 最后一档是未播完的局部结果，从该档接着播，从第 actual_played 首开始
+                            mode_start, round_start = mi, n - 1
+                            resume_file_index = actual_played
+                        else:
+                            mode_start, round_start = mi, n
+                        break
+                else:
+                    mode_start, round_start = 0, 0
+                self._wakeup100_resume_mode_start = mode_start
+                self._wakeup100_resume_round_start = round_start
+                self._wakeup100_resume_file_index = resume_file_index
+            else:
+                self._wakeup100_resume_mode_start = 0
+                self._wakeup100_resume_round_start = len(rres)
+                if rres:
+                    last = rres[-1]
+                    actual_played = last[3] if len(last) >= 4 else 0
+                    total_per_round = len(files)
+                    if actual_played > 0 and actual_played < total_per_round:
+                        self._wakeup100_resume_round_start = len(rres) - 1
+                        self._wakeup100_resume_file_index = actual_played
+                    else:
+                        self._wakeup100_resume_file_index = 0
+                else:
+                    self._wakeup100_resume_file_index = 0
+            self._append_hotword_log(f"继续测试：从第 {self._wakeup100_resume_mode_start + 1} 个音效、第 {self._wakeup100_resume_round_start + 1} 档音量接着测（本档从第 {self._wakeup100_resume_file_index + 1} 首播）。")
+            self._wakeup100_resume_from_pause = True  # 继续时先发 RESUME 让设备端从暂停处恢复
+        else:
+            self._wakeup100_resume_mode_start = 0
+            self._wakeup100_resume_round_start = 0
+            self._wakeup100_resume_file_index = 0
+            self._wakeup100_resume_from_pause = False
         try:
             raw_interval = (getattr(self, "hotword_wakeup100_interval_var", None) or tk.StringVar(value="3")).get()
             interval_sec = max(0.5, min(60.0, float(str(raw_interval).strip() or "3")))
@@ -5551,16 +5615,22 @@ class UIComponents:
             self.hotword_rate_effx_var.set("-")
         if hasattr(self, "hotword_rate_vol_var"):
             self.hotword_rate_vol_var.set("-")
-        if hasattr(self, "hotword_rate_total_var"):
-            self.hotword_rate_total_var.set("0")
-        if hasattr(self, "hotword_rate_count_var"):
-            self.hotword_rate_count_var.set("0")
-        if hasattr(self, "hotword_rate_pct_var"):
-            self.hotword_rate_pct_var.set("0.0%")
+        # 继续测试时不把总次数/已唤醒/唤醒率置 0，由定时刷新用保留的 hotword_count 更新
+        if not resume:
+            if hasattr(self, "hotword_rate_total_var"):
+                self.hotword_rate_total_var.set("0")
+            if hasattr(self, "hotword_rate_count_var"):
+                self.hotword_rate_count_var.set("0")
+            if hasattr(self, "hotword_rate_pct_var"):
+                self.hotword_rate_pct_var.set("0.0%")
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="disabled")
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
             self.hotword_wakeup100_stop_btn.config(state="normal")
+        if hasattr(self, "hotword_wakeup100_pause_btn") and self.hotword_wakeup100_pause_btn.winfo_exists():
+            self.hotword_wakeup100_pause_btn.config(state="normal")
+        if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
+            self.hotword_wakeup100_resume_btn.config(state="disabled")
         if hasattr(self, "status_var"):
             self.status_var.set("100 条唤醒率测试：本机+设备端同时播放中，按音量档位逐轮测试")
         self._append_hotword_log(f"Reading list: {list_path}")
@@ -5625,37 +5695,76 @@ class UIComponents:
             interval = getattr(self, "_wakeup100_interval_sec", 3.0)
             steps = max(1, int(interval * 10))
             modes_to_run = effx_modes_list if effx_modes_list else [None]
+            mode_start = getattr(self, "_wakeup100_resume_mode_start", 0)
+            round_start = getattr(self, "_wakeup100_resume_round_start", 0)
             for mode_idx, effx_mode in enumerate(modes_to_run):
+                if mode_idx < mode_start:
+                    continue
                 if stop():
                     break
                 if effx_mode is not None:
                     _set_effx_on_device(effx_mode)
                     if not hasattr(self, "_wakeup100_results_by_mode"):
                         self._wakeup100_results_by_mode = {}
-                    self._wakeup100_results_by_mode[effx_mode] = []
-                    self._append_hotword_log(f"音效 {effx_mode} ({effx_names.get(effx_mode, '')})，开始音量区间 {v_from}~{v_to} 测试。")
+                    # 继续测试时只要该音效已有结果就 never 清空，避免暂停后数据丢失
+                    # 从暂停恢复（_wakeup100_resume_from_pause）或从中间轮次恢复时都视为 resume
+                    is_resume = (mode_start > 0 or round_start > 0) or getattr(self, "_wakeup100_resume_from_pause", False)
+                    if not (is_resume and len(self._wakeup100_results_by_mode.get(effx_mode, [])) > 0):
+                        self._wakeup100_results_by_mode[effx_mode] = []
+                    if mode_idx > mode_start or round_start == 0:
+                        self._append_hotword_log(f"音效 {effx_mode} ({effx_names.get(effx_mode, '')})，开始音量区间 {v_from}~{v_to} 测试。")
+                    else:
+                        self._append_hotword_log(f"音效 {effx_mode} ({effx_names.get(effx_mode, '')})，从第 {round_start + 1} 档音量继续。")
                 for round_index, vol in enumerate(volume_levels):
+                    if mode_idx == mode_start and round_index < round_start:
+                        continue
                     if stop():
                         break
-                    self._wakeup100_current_round_played = 0
                     self._wakeup100_current_vol = str(vol)
                     if effx_mode is not None:
                         self._wakeup100_current_effx_display = f"{effx_mode} ({effx_names.get(effx_mode, '')})"
                     else:
                         self._wakeup100_current_effx_display = "-"
                     self._wakeup100_current_round_total = len(files)
-                    reset_done = threading.Event()
-                    def _do_reset():
-                        self.reset_hotword_count(clear_log=False)
-                        reset_done.set()
-                    if root and root.winfo_exists():
-                        root.after(0, _do_reset)
-                        reset_done.wait(timeout=2)
+                    # 从暂停恢复或从中间轮次恢复时都视为 resume，才能正确从 resume_file_index 续播
+                    is_resume = (mode_start > 0 or round_start > 0) or getattr(self, "_wakeup100_resume_from_pause", False)
+                    # 仅当「继续测试且本轮已有局部结果（暂停时写入）」时不重置，让唤醒计数接着累计
+                    has_partial_for_this_round = False
+                    if effx_mode is not None:
+                        n_results = len(self._wakeup100_results_by_mode.get(effx_mode, []))
+                        has_partial_for_this_round = is_resume and (mode_idx == mode_start and round_index == round_start) and n_results > round_start
+                    else:
+                        n_results = len(getattr(self, "_wakeup100_round_results", []))
+                        has_partial_for_this_round = is_resume and (mode_idx == mode_start and round_index == round_start) and n_results > round_start
+                    resume_file_index = getattr(self, "_wakeup100_resume_file_index", 0)
+                    self._wakeup100_current_round_played = resume_file_index if has_partial_for_this_round else 0
+                    self._wakeup100_round_was_resumed = has_partial_for_this_round  # 本轮结束时若为 True 则替换最后一条而非 append
+                    if not has_partial_for_this_round:
+                        reset_done = threading.Event()
+                        def _do_reset():
+                            self.reset_hotword_count(clear_log=False)
+                            reset_done.set()
+                        if root and root.winfo_exists():
+                            root.after(0, _do_reset)
+                            reset_done.wait(timeout=2)
                     time.sleep(0.3)
                     if stop():
                         break
                     if device_id_for_replay:
-                        if round_index == 0 and mode_idx == 0:
+                        is_first_round = (round_index == 0 and mode_idx == 0)
+                        resume_from_pause = getattr(self, "_wakeup100_resume_from_pause", False)
+                        if resume_from_pause:
+                            try:
+                                subprocess.run(
+                                    ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.RESUME", "-n", "com.player.demo/.MainActivity"],
+                                    capture_output=True, timeout=10,
+                                )
+                            except Exception:
+                                pass
+                            self._append_hotword_log("设备端从暂停恢复播放: am start -a com.player.demo.RESUME ...")
+                            self._wakeup100_resume_from_pause = False
+                            time.sleep(0.3)
+                        elif is_first_round and not is_resume:
                             try:
                                 subprocess.run(
                                     ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.PLAY", "-n", "com.player.demo/.MainActivity"],
@@ -5677,8 +5786,10 @@ class UIComponents:
                                 self._append_hotword_log("换音效，设备端重播: am start -a com.player.demo.REPLAY ...")
                             time.sleep(0.3)
                         _set_volume_on_device(vol)
-                    self._append_hotword_log(f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {len(files)} 条。")
+                    self._append_hotword_log(f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {len(files)} 条。" + (f"（从第 {resume_file_index + 1} 首接着播）" if has_partial_for_this_round and resume_file_index > 0 else ""))
                     for i, path in enumerate(files):
+                        if has_partial_for_this_round and i < resume_file_index:
+                            continue
                         if stop():
                             break
                         base_offset = mode_idx * (num_rounds * total_files) + round_index * total_files
@@ -5701,23 +5812,35 @@ class UIComponents:
                                 if stop():
                                     break
                                 time.sleep(0.1)
-                    if stop():
-                        break
+                    # 无论本轮播完还是中途停止，都按「当前档已播放条数」统计唤醒率并写入结果
+                    actual_played = getattr(self, "_wakeup100_current_round_played", 0)
                     try:
                         count_val = float(getattr(self, "hotword_count", 0))
                     except (TypeError, ValueError):
                         count_val = 0.0
                     round_count = int(round(count_val))
-                    denom = max(1, len(files))
+                    denom = max(1, actual_played)  # 按实际已播放条数计算唤醒率，支持中途停止
                     round_rate = (round_count / float(denom) * 100) if round_count is not None else 0.0
                     self._wakeup100_cumulative_wake = getattr(self, "_wakeup100_cumulative_wake", 0) + round_count
-                    if effx_mode is not None:
-                        self._wakeup100_results_by_mode[effx_mode].append((vol, round_count, round_rate))
-                    else:
-                        if not hasattr(self, "_wakeup100_round_results"):
-                            self._wakeup100_round_results = []
-                        self._wakeup100_round_results.append((vol, round_count, round_rate))
-                    self._append_hotword_log(f"音量 {vol} 完成，本轮唤醒 {round_count} 次，唤醒率 {round_rate:.1f}%（累计 {self._wakeup100_cumulative_wake} 次）。")
+                    if actual_played > 0:
+                        replace_resumed = getattr(self, "_wakeup100_round_was_resumed", False)
+                        if effx_mode is not None:
+                            if replace_resumed and self._wakeup100_results_by_mode.get(effx_mode):
+                                self._wakeup100_results_by_mode[effx_mode][-1] = (vol, round_count, round_rate, actual_played)
+                            else:
+                                self._wakeup100_results_by_mode[effx_mode].append((vol, round_count, round_rate, actual_played))
+                        else:
+                            if not hasattr(self, "_wakeup100_round_results"):
+                                self._wakeup100_round_results = []
+                            if replace_resumed and self._wakeup100_round_results:
+                                self._wakeup100_round_results[-1] = (vol, round_count, round_rate, actual_played)
+                            else:
+                                self._wakeup100_round_results.append((vol, round_count, round_rate, actual_played))
+                        if replace_resumed:
+                            self._wakeup100_resume_file_index = 0
+                        self._append_hotword_log(f"音量 {vol} 完成，本轮已播放 {actual_played} 条、唤醒 {round_count} 次，唤醒率 {round_rate:.1f}%（累计 {self._wakeup100_cumulative_wake} 次）。")
+                    if stop():
+                        break
         self._wakeup100_play_thread = threading.Thread(target=_play_wav_list, daemon=True)
         self._wakeup100_play_thread.start()
         self._wakeup100_schedule_rate_update()
@@ -5740,7 +5863,8 @@ class UIComponents:
         if hasattr(self, "hotword_rate_vol_var"):
             self.hotword_rate_vol_var.set(str(getattr(self, "_wakeup100_current_vol", "-")))
         if hasattr(self, "hotword_rate_total_var"):
-            self.hotword_rate_total_var.set(str(getattr(self, "_wakeup100_current_round_total", 0)))
+            # 总次数显示当前档实际已播放条数，与唤醒率分母一致（支持中途停止）
+            self.hotword_rate_total_var.set(str(current_round_played))
         if hasattr(self, "hotword_rate_count_var"):
             self.hotword_rate_count_var.set(str(int(round(current_round_wake))))
         if hasattr(self, "hotword_rate_pct_var"):
@@ -5750,6 +5874,11 @@ class UIComponents:
                 self.hotword_wakeup100_start_btn.config(state="normal")
             if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
                 self.hotword_wakeup100_stop_btn.config(state="disabled")
+            if hasattr(self, "hotword_wakeup100_pause_btn") and self.hotword_wakeup100_pause_btn.winfo_exists():
+                self.hotword_wakeup100_pause_btn.config(state="disabled")
+            is_paused = getattr(self, "_wakeup100_paused", False)
+            if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
+                self.hotword_wakeup100_resume_btn.config(state="normal" if is_paused else "disabled")
             self._wakeup100_play_thread = None
             self._wakeup100_update_after_id = None
             self.stop_hotword_monitor()
@@ -5760,17 +5889,59 @@ class UIComponents:
                         ["adb", "-s", device_id, "shell", "am", "force-stop", "com.player.demo"],
                         capture_output=True, timeout=10,
                     )
-                    self._append_hotword_log("播放结束，已停止唤醒监测与设备端 AudioPlayer 播放。")
+                    if not is_paused:
+                        self._append_hotword_log("播放结束，已停止唤醒监测与设备端 AudioPlayer 播放。")
                 except Exception:
                     pass
             if hasattr(self, "status_var"):
-                self.status_var.set(f"播放结束，最终唤醒率: {pct:.1f}%")
+                if is_paused:
+                    self.status_var.set("已暂停，可点击「继续测试」接着测或「保存唤醒率结果」保存当前结果")
+                else:
+                    self.status_var.set(f"播放结束，最终唤醒率: {pct:.1f}%")
             return
         self._wakeup100_update_after_id = root.after(1000, self._wakeup100_schedule_rate_update)
+
+    def _pause_wakeup100_test(self):
+        """暂停 100 条测试：立即停止播放与监测，保留当前结果，可稍后点「继续测试」接着测（不阻塞界面）"""
+        self._append_hotword_log("正在暂停…")
+        self._wakeup100_paused = True
+        self._wakeup100_stop_requested = True
+        aid = getattr(self, "_wakeup100_update_after_id", None)
+        if aid and getattr(self, "root", None) and self.root.winfo_exists():
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+        self._wakeup100_update_after_id = None
+        self._wakeup100_play_thread = None  # 不 join，避免界面卡顿；播放线程会在后台写完当前档后退出
+        if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
+            self.hotword_wakeup100_start_btn.config(state="normal")
+        if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
+            self.hotword_wakeup100_stop_btn.config(state="disabled")
+        if hasattr(self, "hotword_wakeup100_pause_btn") and self.hotword_wakeup100_pause_btn.winfo_exists():
+            self.hotword_wakeup100_pause_btn.config(state="disabled")
+        self.stop_hotword_monitor()
+        device_id = getattr(self, "_wakeup100_device_id", None)
+        if device_id:
+            try:
+                # 暂停：am start -a com.player.demo.PAUSE（不 force-stop），继续测试时发 RESUME 恢复
+                subprocess.run(
+                    ["adb", "-s", device_id, "shell", "am", "start", "-a", "com.player.demo.PAUSE", "-n", "com.player.demo/.MainActivity"],
+                    capture_output=True, timeout=10,
+                )
+                self._append_hotword_log("已通知设备端 AudioPlayer 暂停播放（应用未退出，继续测试时将发 RESUME 恢复）。")
+            except Exception:
+                self._append_hotword_log("发送 PAUSE 失败，设备端可能仍在前台播放。")
+        if hasattr(self, "status_var"):
+            self.status_var.set("已暂停，可点击「继续测试」接着测或「保存唤醒率结果」保存当前结果")
+        if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
+            self.hotword_wakeup100_resume_btn.config(state="normal")
+        self._append_hotword_log("已暂停，结果已保留；可点击「继续测试」接着播。")
 
     def _stop_wakeup100_test(self):
         """停止 100 条播放（请求线程在下一首前退出），并一并停止唤醒监测与设备端 APK 播放"""
         self._append_hotword_log("正在停止播放、唤醒监测与设备端播放…")
+        self._wakeup100_paused = False  # 停止不算暂停，不显示「继续测试」
         self._wakeup100_stop_requested = True
         aid = getattr(self, "_wakeup100_update_after_id", None)
         if aid and getattr(self, "root", None) and self.root.winfo_exists():
@@ -5828,34 +5999,42 @@ class UIComponents:
             "=" * 40,
             f"时间: {ts}",
             f"播放方式: {playback_mode}",
-            f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档播放 {per_vol} 条，唤醒率按档位单独计算）",
+            f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档预期 {per_vol} 条，唤醒率按该档实际已播放条数计算）",
             f"预期播放: {getattr(self, '_wakeup100_expected', 100)} 条",
             f"已播放: {played} 条",
             f"合计唤醒次数: {total_wake}",
             "",
         ]
         if results_by_mode:
-            lines.append(f"各音效+各档音量结果（每档 {per_vol} 条对应一个唤醒率）:")
+            lines.append("各音效+各档音量结果（唤醒率按该档实际已播放条数计算）:")
             for mode in sorted(results_by_mode.keys()):
                 name = effx_names.get(mode, str(mode))
                 lines.append(f"  音效 {mode} ({name}):")
                 for item in results_by_mode[mode]:
-                    if len(item) >= 3:
+                    if len(item) >= 4:
+                        vol, cnt, rate, played = item[0], item[1], item[2], item[3]
+                        lines.append(f"    音量 {vol}: 已播放 {played} 条, 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                    elif len(item) >= 3:
                         vol, cnt, rate = item[0], item[1], item[2]
+                        lines.append(f"    音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
                     else:
                         vol, cnt = item[0], item[1]
                         rate = (cnt / float(per_vol) * 100) if cnt is not None else 0.0
-                    lines.append(f"    音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                        lines.append(f"    音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
             lines.append("")
         elif round_results:
-            lines.append(f"各档音量结果（每档 {per_vol} 条对应一个唤醒率，按系统音量隔离）:")
+            lines.append("各档音量结果（唤醒率按该档实际已播放条数计算，按系统音量隔离）:")
             for item in round_results:
-                if len(item) >= 3:
+                if len(item) >= 4:
+                    vol, cnt, rate, played = item[0], item[1], item[2], item[3]
+                    lines.append(f"  音量 {vol}: 已播放 {played} 条, 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                elif len(item) >= 3:
                     vol, cnt, rate = item[0], item[1], item[2]
+                    lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
                 else:
                     vol, cnt = item[0], item[1]
                     rate = (cnt / float(per_vol) * 100) if cnt is not None else 0.0
-                lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                    lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
             lines.append("")
         try:
             with open(path, "w", encoding="utf-8") as f:
