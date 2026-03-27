@@ -298,11 +298,13 @@
 
 **给客户发版本时，只需打包「dist 目录」里的内容**（或把整个 dist 打成 zip 发给客户）。
 
-- **必须包含**：`声测大师(AcouTest) v<版本号>.exe`（如 `声测大师(AcouTest) v1.7.1.exe`，版本号来自 `feature_config.py` 的 `APP_VERSION`）、`logo/`、`启动测试工具.bat`；若客户需要烧大象 key，还需带上 `elevoc_ukey/`（含 `soft_encryption.dll` 等）。
-- **可选**：`README.md`、`audio/`（若希望客户自带扫频/测试音频，可把你在本机用的 audio 子目录一并拷贝到 dist 里再打包）。
-- **不需要给客户**：源码（.py）、build/、output/、.git 等。客户运行 exe 后，程序会在**客户自己的安装目录下**自动创建 `output/` 存放测试数据。
+运行 **`Packager.bat`** 成功后，`dist` 中会**自动**放入：`AcouTest.v<版本号>.exe`（版本号来自 `feature_config.py` 的 `APP_VERSION`，与发布页、更新清单命名一致）、`logo/`、`audio/`（整目录）、`output/` 及与 `output_paths.py` 一致的子目录与说明、`elevoc_ukey/`（若源码根目录存在）、`wakeup_count/`（若存在）、`启动测试工具.bat`（由 `pack_dist_client_files.py` 生成）。无需再手工拷贝上述资源。
 
-客户使用方式：解压你给的 zip，双击 `声测大师(AcouTest) v<版本号>.exe` 或 `启动测试工具.bat` 即可；测试产生的 logcat、截图、录音等会出现在**该解压目录下的 output/** 里。
+- **说明**：脚本使用 `!DIST_EXE!` 等形式，避免复杂文件名在 `if (...)` 块内被 CMD 误解析。**exe 每次都会重新 PyInstaller 生成**（与当前源码、`APP_VERSION` 一致）。**logo、audio、elevoc_ukey、wakeup_count** 默认用 `robocopy /XO` 增量同步：dist 里已有且**不比源文件旧**的同名文件会跳过拷贝，省时间、少写盘；你在工程里改新了源文件仍会覆盖 dist。若需对资源做一次「不按时间跳过」的全量同步，打包前在命令行先执行 `set PACKAGER_FULL_RESYNC=1` 再运行 `Packager.bat`。
+- **可选**：另附项目根目录的 `README.md` 给客户。
+- **不需要给客户**：源码（.py）、build/、项目根下的 `output/`（测试残留）、.git 等。客户运行 exe 后，测试数据会写入**与 exe 同目录**下的 `output/`（打包时已预建空子目录，便于识别）。
+
+客户使用方式：解压你给的 zip，双击 `AcouTest.v<版本号>.exe` 或 `启动测试工具.bat` 即可；测试产生的 logcat、截图、录音等会出现在**该解压目录下的 output/** 里。
 
 ### 功能开关：发布时隐藏部分功能
 
@@ -315,9 +317,9 @@
 
 ---
 
-## 测试数据目录（output）与「为什么 output 不在 dist 里」
+## 测试数据目录（output）与运行位置
 
-程序里用「当前工作目录（cwd）」+ `output` 作为测试数据根目录（见 `output_paths.py` 中的 `os.getcwd()`），所以 **output 永远出现在「你运行程序时所在的那个目录」下**，而不是固定在源码根或 dist 里：
+程序里用「当前工作目录（cwd）」+ `output` 作为测试数据根目录（见 `output_paths.py` 中的 `os.getcwd()`），所以 **output 永远出现在「你运行程序时所在的那个目录」下**：
 
 | 运行方式 | 当前工作目录（cwd） | output 实际位置 |
 |----------|---------------------|-----------------|
@@ -327,7 +329,7 @@
 
 因此：
 - **开发阶段**：你在项目根或 dist 里跑，看到的是项目根或 dist 下的 output，这是正常的。
-- **交付阶段**：不需要把 output 打进给客户的包；客户运行 exe 后，程序会在**客户自己的文件夹**下新建 output，所有测试数据都在那里，和 exe 同目录，方便客户查找。
+- **交付阶段**：`Packager.bat` 会在 **dist** 里预建空的 `output` 及各子目录（并附简短 `README.txt`），方便客户解压后一眼看到数据会写到哪里；客户首次运行 exe 时，程序仍会在**当前目录**下按需创建或沿用这些目录，测试数据与 exe 同目录，便于查找。
 
 把 output 设计成「跟着运行目录走」，是为了：无论从源码、从 dist 还是客户本机运行，测试数据都落在**当前运行目录**下，不会混在一起，也不需要为「是否在 dist 里」单独写两套路径。
 

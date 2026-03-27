@@ -6,9 +6,11 @@ __pycache__/
 .Python
 *.egg-info/
 
-# Build artifacts
+# Build / 打包产物（PyInstaller、发布脚本生成，不提交）
 build/
 dist/
+release/
+release_notes.txt
 *.spec
 
 # 测试生成数据统一目录（见 output_paths.py）

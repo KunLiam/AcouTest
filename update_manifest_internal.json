@@ -1,9 +1,9 @@
 {
-  "latest_version": "1.9.6",
-  "publish_date": "2026-03-18",
+  "latest_version": "1.9.7",
+  "publish_date": "2026-03-27",
   "notes": [
-    "唤醒率测试：新增「暂停」「继续测试」；暂停后继续时本机 WAV 与设备端从下一首接着播，不再从头播",
-    "唤醒率测试：继续测试时保留暂停前的唤醒次数与唤醒率，不再清零"
+    "唤醒率：支持暂停/继续，继续后接着播、计数保留",
+    "exe 命名 AcouTest.v版本；dist 打包带齐资源；资源增量同步省时间"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.6/AcouTest.v1.9.6.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.7/AcouTest.v1.9.7.exe"
 }

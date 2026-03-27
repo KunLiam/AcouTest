@@ -6,7 +6,17 @@ chcp 65001 > nul
 :: 始终切换到 bat 所在目录（项目根），保证 audio\sound、dist、logo 等相对路径正确
 cd /d "%~dp0"
 
+:: 资源同步：默认 robocopy 带 /XO（目标已存在且不比源旧则跳过该文件），减少大目录 audio 重复拷贝；源里更新过的文件仍会覆盖 dist。
+:: 需要强制按源目录全量刷新 dist 内资源时，可在运行前执行：set PACKAGER_FULL_RESYNC=1
+:: 打包耗时主要在 PyInstaller；/XO 主要省磁盘写入与大目录扫描时间。
+:: exe 仍每次删除旧文件后整包重编，保证与当前代码、APP_VERSION 一致。
+
 echo 正在创建独立可执行文件...
+
+:: robocopy 公共参数（静默 + 子目录）；默认加 /XO 做增量，PACKAGER_FULL_RESYNC=1 时不加 /XO
+set "ROBO_BASE=/E /NFL /NDL /NJH /NJS /nc /ns /np"
+set "ROBO_RES=!ROBO_BASE!"
+if /I not "%PACKAGER_FULL_RESYNC%"=="1" set "ROBO_RES=!ROBO_BASE! /XO"
 
 :: 检查Python是否已安装
 python --version > nul 2>&1
@@ -37,25 +47,31 @@ if %errorlevel% neq 0 (
     python -m pip install pillow
 )
 
-:: 从 feature_config 读取版本号，打包为 声测大师(AcouTest) v<APP_VERSION>.exe
+:: 从 feature_config 读取版本号，输出 exe 名为 AcouTest.v<版本>.exe（与 release 与更新清单命名一致）
 set "VER="
 for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
 if "%VER%"=="" set "VER=1.0"
-set "EXE_NAME=声测大师(AcouTest) v%VER%"
+set "EXE_NAME=AcouTest.v%VER%"
+:: 完整 exe 路径放入变量，配合延迟展开，避免复杂文件名在 if (...) 块内解析出错
+set "DIST_EXE=dist\%EXE_NAME%.exe"
+set "SPEC_FILE=%EXE_NAME%.spec"
 echo 当前版本: %VER% ，输出文件名: %EXE_NAME%.exe
 
 :: 先尝试关闭可能正在运行的应用程序
 echo 正在确保没有应用程序在运行...
 taskkill /F /IM "声测大师(AcouTest).exe" > nul 2>&1
+taskkill /F /IM "声测大师(AcouTest) v%VER%.exe" > nul 2>&1
 taskkill /F /IM "%EXE_NAME%.exe" > nul 2>&1
 
 :: 删除旧的输出文件和目录（含 Python 字节码缓存，确保打包用到的版本号等来自当前源码）
 echo 正在清理旧文件...
 if exist "dist\声测大师(AcouTest).exe" del /F /Q "dist\声测大师(AcouTest).exe" > nul 2>&1
-if exist "dist\%EXE_NAME%.exe" del /F /Q "dist\%EXE_NAME%.exe" > nul 2>&1
+del /F /Q "dist\声测大师*.exe" > nul 2>&1
+if exist "!DIST_EXE!" del /F /Q "!DIST_EXE!" > nul 2>&1
 if exist "build" rmdir /S /Q "build" > nul 2>&1
 if exist "声测大师(AcouTest).spec" del /F /Q "声测大师(AcouTest).spec" > nul 2>&1
-if exist "%EXE_NAME%.spec" del /F /Q "%EXE_NAME%.spec" > nul 2>&1
+if exist "声测大师(AcouTest) v%VER%.spec" del /F /Q "声测大师(AcouTest) v%VER%.spec" > nul 2>&1
+if exist "!SPEC_FILE!" del /F /Q "!SPEC_FILE!" > nul 2>&1
 for /d /r . %%d in (__pycache__) do @if exist "%%d" rmdir /S /Q "%%d" 2>nul
 del /S /Q *.pyc 2>nul
 
@@ -71,72 +87,82 @@ python convert_icon.py
 ::echo 修复源代码中的引号问题...
 ::python -c "import re; files = ['ui_components.py', 'audio_test_tool.py', 'main.py']; [open(f, 'w', encoding='utf-8').write(re.sub(r'([^\\])\"([^\"]+)\"', r'\1\"\2\"', open(f, 'r', encoding='utf-8').read())) for f in files if os.path.exists(f)]" 2>nul
 
-:: 创建独立可执行文件
-echo 正在打包应用程序...
+:: 创建独立可执行文件（本行仅用 ASCII，避免部分环境下 UTF-8 与 cmd 解析组合导致误拆命令）
+echo [Packager] Running PyInstaller...
 
 :: 创建dist目录（如果不存在）
 if not exist "dist" mkdir "dist"
 
-:: 确保所有Python模块文件添加到打包中（--name 带版本号，输出 声测大师(AcouTest) v<APP_VERSION>.exe）
+:: 确保所有 Python 模块加入打包（--name 带版本号）
 python -m PyInstaller --clean --noconsole --onefile --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^
     main.py
 
-:: 检查打包是否成功
-if exist "dist\%EXE_NAME%.exe" (
-    echo 打包成功！执行文件已保存到 dist\%EXE_NAME%.exe
+:: 检查打包是否成功（使用 !DIST_EXE!，避免将来若改名含括号时破坏 if 块解析）
+if exist "!DIST_EXE!" (
+    echo 打包成功！执行文件已保存到 !DIST_EXE!
     
-    :: 复制必要的文件和目录
-    echo 正在复制必要文件...
-    :: 音频资源不再随包内置（避免体积膨胀）。默认测试音频将由程序运行时生成/用户自选。
+    echo 正在同步交付资源到 dist（默认跳过已存在且未变旧的文件，见脚本头部说明）...
     
-    :: 复制logo目录
-    if not exist "dist\logo" mkdir "dist\logo"
-    xcopy /E /Y "logo" "dist\logo\" >nul 2>nul
-    
-    :: 复制震音测试等音频资源（打包后 exe 在 dist 下运行，需在 dist\audio\sound 下能找到 80-1KHz-20S(-3dB).wav）
-    if not exist "dist\audio" mkdir "dist\audio"
-    if not exist "dist\audio\sound" mkdir "dist\audio\sound"
-    if exist "audio\sound" (
-        echo 正在复制 audio\sound...
-        xcopy /E /Y "audio\sound\*.*" "dist\audio\sound\" >nul 2>nul
+    :: logo（与 exe 同级，供界面或文档引用）
+    if exist "logo\" (
+        echo 正在同步 logo...
+        robocopy "logo" "dist\logo" !ROBO_RES! >nul
+        if !errorlevel! GEQ 8 echo [警告] logo 同步可能不完整，请检查 robocopy 日志。
     )
-    :: 显式复制震音测试音频（文件名含括号，用变量避免 batch 解析错误）
-    set "JITTER_WAV=80-1KHz-20S(-3dB).wav"
-    set "JITTER_SRC=audio\sound\!JITTER_WAV!"
-    set "JITTER_DST=dist\audio\sound\!JITTER_WAV!"
-    if exist "!JITTER_SRC!" (
-        copy /Y "!JITTER_SRC!" "dist\audio\sound\" >nul 2>nul
-        if !errorlevel! equ 0 (
-            echo 已复制震音测试音频: !JITTER_WAV!
-        ) else (
-            echo [警告] copy 失败，尝试 xcopy...
-            xcopy /Y "!JITTER_SRC!" "dist\audio\sound\" >nul 2>nul
-        )
+    
+    :: 整棵 audio（扫频 elephant/custom、喇叭 speaker、震音 sound 等；不打进 onefile 以控制 exe 体积）
+    if exist "audio\" (
+        echo 正在同步 audio 目录...
+        robocopy "audio" "dist\audio" !ROBO_RES! >nul
+        if !errorlevel! GEQ 8 echo [警告] audio 同步可能不完整。
     ) else (
-        echo [提示] 未找到 audio\sound\!JITTER_WAV!，请将该文件放入 audio\sound 后重新运行打包。
+        echo [提示] 未找到 audio 目录，客户将无法使用默认扫频/喇叭等音频，请从源码目录保留 audio 后重新打包。
     )
     
-    :: Loopback/Ref 录音已保存到 dist\output\loopback\，不再创建 dist\test
+    :: 预建 output 子目录，便于客户一眼看到测试数据落盘位置（与 output_paths.py 一致）
+    echo 正在创建 dist\output 子目录...
+    mkdir "dist\output" 2>nul
+    :: 勿在 if 块内使用 for %%D in (a b c)，闭括号会提前结束外层 if（CMD 解析限制）
+    mkdir "dist\output\logcat" 2>nul
+    mkdir "dist\output\screenshots" 2>nul
+    mkdir "dist\output\mic_test" 2>nul
+    mkdir "dist\output\sweep_recordings" 2>nul
+    mkdir "dist\output\airtightness" 2>nul
+    mkdir "dist\output\loopback" 2>nul
+    mkdir "dist\output\hal_dump" 2>nul
+    mkdir "dist\output\hal_custom" 2>nul
+    python pack_dist_client_files.py 2>nul
+    if not exist "dist\output\README.txt" (
+        echo 声测大师^(AcouTest^) 测试数据目录> "dist\output\README.txt"
+        echo 程序运行后录音、日志、截图等默认保存在本目录各子文件夹中。>> "dist\output\README.txt"
+    )
 
-    :: 复制 elevoc_ukey（不内置到 exe，避免 onefile 体积膨胀；运行时与 exe 同级目录读取）
-    if exist "elevoc_ukey" (
-        echo 正在复制 elevoc_ukey...
-        if not exist "dist\elevoc_ukey" mkdir "dist\elevoc_ukey"
-        xcopy /E /Y "elevoc_ukey" "dist\elevoc_ukey\" >nul 2>nul
+    :: elevoc_ukey（烧大象 key，与 exe 同级；不内置到 onefile）
+    if exist "elevoc_ukey\" (
+        echo 正在同步 elevoc_ukey...
+        robocopy "elevoc_ukey" "dist\elevoc_ukey" !ROBO_RES! >nul
+        if !errorlevel! GEQ 8 echo [警告] elevoc_ukey 同步可能不完整。
+    ) else (
+        echo [提示] 未找到 elevoc_ukey 目录，烧大象 key 功能将无法使用（若需要请保留该目录后重新打包）。
+    )
+
+    :: wakeup_count（唤醒率 100 条测试：art_100.txt + selected_100 等）
+    if exist "wakeup_count\" (
+        echo 正在同步 wakeup_count...
+        robocopy "wakeup_count" "dist\wakeup_count" !ROBO_RES! >nul
+        if !errorlevel! GEQ 8 echo [警告] wakeup_count 同步可能不完整。
+    ) else (
+        echo [提示] 未找到 wakeup_count 目录，唤醒率 100 条测试将无内置语料（若需要请保留该目录后重新打包）。
     )
     
-    :: 创建启动脚本（启动带版本号的 exe）
-    echo @echo off > "dist\启动测试工具.bat"
-    echo chcp 65001 ^> nul >> "dist\启动测试工具.bat"
-    echo echo 正在启动声测大师(AcouTest)... >> "dist\启动测试工具.bat"
-    echo start "" "%EXE_NAME%.exe" >> "dist\启动测试工具.bat"
+    :: 启动脚本由 pack_dist_client_files.py 生成，避免 if 块内 echo / 括号解析错误
     
-    echo 完成！打包已成功，可以使用 dist 目录中的程序。
+    echo 完成！dist 目录已包含 exe、audio、output、elevoc_ukey（若有）、wakeup_count（若有）等，可直接打包 zip 发给客户。
 ) else (
-    echo 打包可能失败，未找到 dist\%EXE_NAME%.exe
+    echo 打包可能失败，未找到 !DIST_EXE!
 ) 
 
 pause

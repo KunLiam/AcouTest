@@ -663,8 +663,8 @@ class UIComponents:
             "请确认已把 elevoc_ukey 放在以下任一位置：\n"
             + "\n".join(f"- {p}" for p in candidates)
             + "\n\n"
-            "如果你运行的是 dist\\声测大师(AcouTest).exe：请用更新后的 Packager.bat 重新打包，"
-            "它会自动把 elevoc_ukey 复制到 dist\\elevoc_ukey。"
+            "如果你运行的是打包后的 exe：请用 Packager.bat 重新打包，"
+            "它会自动把 elevoc_ukey 复制到与 exe 同级的 dist\\elevoc_ukey。"
         )
 
     def _prepare_elevoc_workdir(self) -> str:
@@ -5786,6 +5786,11 @@ class UIComponents:
                                 self._append_hotword_log("换音效，设备端重播: am start -a com.player.demo.REPLAY ...")
                             time.sleep(0.3)
                         _set_volume_on_device(vol)
+                    # 记录本档开始时的唤醒次数，结束时用「当前总数 - 本档开始」得到本档增量，避免多档重复累计
+                    try:
+                        self._wakeup100_round_start_count = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
+                    except Exception:
+                        self._wakeup100_round_start_count = 0.0
                     self._append_hotword_log(f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {len(files)} 条。" + (f"（从第 {resume_file_index + 1} 首接着播）" if has_partial_for_this_round and resume_file_index > 0 else ""))
                     for i, path in enumerate(files):
                         if has_partial_for_this_round and i < resume_file_index:
@@ -5813,12 +5818,18 @@ class UIComponents:
                                     break
                                 time.sleep(0.1)
                     # 无论本轮播完还是中途停止，都按「当前档已播放条数」统计唤醒率并写入结果
+                    # 本档唤醒次数 = 当前总次数 - 本档开始时的总次数（避免把前面档的唤醒算进本档导致唤醒率>100%）
                     actual_played = getattr(self, "_wakeup100_current_round_played", 0)
                     try:
                         count_val = float(getattr(self, "hotword_count", 0))
                     except (TypeError, ValueError):
                         count_val = 0.0
-                    round_count = int(round(count_val))
+                    start_count = getattr(self, "_wakeup100_round_start_count", 0.0)
+                    try:
+                        start_count = float(start_count)
+                    except (TypeError, ValueError):
+                        start_count = 0.0
+                    round_count = max(0, int(round(count_val - start_count)))
                     denom = max(1, actual_played)  # 按实际已播放条数计算唤醒率，支持中途停止
                     round_rate = (round_count / float(denom) * 100) if round_count is not None else 0.0
                     self._wakeup100_cumulative_wake = getattr(self, "_wakeup100_cumulative_wake", 0) + round_count
