@@ -30,12 +30,12 @@
 - **气密性测试**
   - 功能用途：对比堵mic与不堵mic两种状态，评估声学密封效果。
   - 测试流程：开始后先选择“堵mic/不堵mic”，按提示完成双阶段测试；文件自动区分命名保存。
-  - 可配置项：录制时长、播放文件（可选，默认推荐 `sweep_speech_48k.wav`）、保存路径。
+  - 可配置项：**录制设置**（设备/卡号/通道/采样率/位深）、录制时长、**媒体音量档位**、保存路径。播放固定为 APK 内气密音轨（须 `USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER=True`），无 tinyplay/播放文件选择。
   - 对比分析：支持按通道频谱对比、按选段分析、平均 dB 对比；支持从波形窗口框选后自动回填选段。
   - 手动导入：支持手动指定堵mic与不堵mic录音文件，直接进行对比分析（无需先跑测试流程）。
 - **震音测试**
   - 功能用途：执行震音播放测试并记录听感结果，便于人工评估异常。
-  - 可配置项：播放控制与结果记录项。
+  - 可配置项：**媒体音量档位**（同上 adb 顺序）；默认等待时长见 `JITTER_APK_DURATION_FALLBACK_SEC`（无本机参考 WAV 时）。仅 APK 播放。
   - 结果输出：保留测试结果，便于后续复核。
 - **扫频测试**
   - 功能用途：执行扫频播放与录制，用于频响相关分析和回归测试。
@@ -300,7 +300,8 @@
 
 运行 **`Packager.bat`** 成功后，`dist` 中会**自动**放入：`AcouTest.v<版本号>.exe`（版本号来自 `feature_config.py` 的 `APP_VERSION`，与发布页、更新清单命名一致）、`logo/`、`audio/`（整目录）、`output/` 及与 `output_paths.py` 一致的子目录与说明、`elevoc_ukey/`（若源码根目录存在）、`wakeup_count/`（若存在）、`启动测试工具.bat`（由 `pack_dist_client_files.py` 生成）。无需再手工拷贝上述资源。
 
-- **说明**：脚本使用 `!DIST_EXE!` 等形式，避免复杂文件名在 `if (...)` 块内被 CMD 误解析。**exe 每次都会重新 PyInstaller 生成**（与当前源码、`APP_VERSION` 一致）。**logo、audio、elevoc_ukey、wakeup_count** 默认用 `robocopy /XO` 增量同步：dist 里已有且**不比源文件旧**的同名文件会跳过拷贝，省时间、少写盘；你在工程里改新了源文件仍会覆盖 dist。若需对资源做一次「不按时间跳过」的全量同步，打包前在命令行先执行 `set PACKAGER_FULL_RESYNC=1` 再运行 `Packager.bat`。
+- **说明**：脚本使用 `!DIST_EXE!` 等形式，避免复杂文件名在 `if (...)` 块内被 CMD 误解析。**exe 每次都会重新 PyInstaller 生成**（与当前源码、`APP_VERSION` 一致）。打包命令已带 **`--noupx`**（禁用 UPX），避免 onefile 解压 `libcrypto-3.dll` 等 OpenSSL 库时报 *Failed to extract libcrypto-3.dll*。**logo、audio、elevoc_ukey、wakeup_count** 默认用 `robocopy /XO` 增量同步：dist 里已有且**不比源文件旧**的同名文件会跳过拷贝，省时间、少写盘；你在工程里改新了源文件仍会覆盖 dist。若需对资源做一次「不按时间跳过」的全量同步，打包前在命令行先执行 `set PACKAGER_FULL_RESYNC=1` 再运行 `Packager.bat`。
+- **若客户机仍报解压 DLL 失败**：关闭 exe 后清空 `%TEMP%\_MEI*` 临时目录、将杀毒软件对 dist 目录设排除，或勿从网盘/只读盘直接运行 exe。
 - **可选**：另附项目根目录的 `README.md` 给客户。
 - **不需要给客户**：源码（.py）、build/、项目根下的 `output/`（测试残留）、.git 等。客户运行 exe 后，测试数据会写入**与 exe 同目录**下的 `output/`（打包时已预建空子目录，便于识别）。
 

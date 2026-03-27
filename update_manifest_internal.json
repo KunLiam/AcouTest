@@ -1,9 +1,9 @@
 {
-  "latest_version": "1.9.7",
+  "latest_version": "1.9.8",
   "publish_date": "2026-03-27",
   "notes": [
-    "唤醒率：支持暂停/继续，继续后接着播、计数保留",
-    "exe 命名 AcouTest.v版本；dist 打包带齐资源；资源增量同步省时间"
+    "气密：APK 播放；可改录制参数；时长与音量并排；先 tinycap 再播 APK",
+    "震音：APK 播放；媒体音量 0～25 档，默认 20（气密默认 18）"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.7/AcouTest.v1.9.7.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.8/AcouTest.v1.9.8.exe"
 }

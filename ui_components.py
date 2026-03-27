@@ -20,6 +20,7 @@ import ctypes
 from ctypes import c_int, c_char_p, c_void_p, POINTER, c_char
 import tempfile
 import textwrap
+from typing import Optional
 
 from output_paths import (
     OUTPUT_ROOT,
@@ -3468,34 +3469,35 @@ class UIComponents:
         messagebox.showinfo("多声道播放设备", detail)
     
     def setup_jitter_tab(self, parent):
-        """震音测试：播放指定音频（tinyplay），人工判断通过/不通过"""
+        """震音测试：Audio Player APK 播放，人工判断通过/不通过"""
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
-        
-        # 说明
+
         desc = ttk.Label(
             frame,
-            text="播放指定音频进行震音测试（tinyplay）。\n请根据听感人工判断测试是否通过。",
+            text="震音：设备侧 APK 播放内置震音测试音频。",
             justify=tk.LEFT,
         )
         desc.pack(anchor="w", pady=(0, 10))
-        
-        # 测试音频路径（默认 audio/sound/80-1KHz-20S(-3dB).wav）
+
         default_jitter_audio = os.path.join(
             self._get_runtime_base_dir(),
-            "audio", "sound", "80-1KHz-20S(-3dB).wav"
+            "audio", "sound", "80-1KHz-20S(-3dB).wav",
         )
-        path_frame = ttk.LabelFrame(frame, text="测试音频")
-        path_frame.pack(fill="x", pady=8)
         self.jitter_audio_path_var = tk.StringVar(value=default_jitter_audio)
-        path_entry = ttk.Entry(path_frame, textvariable=self.jitter_audio_path_var, width=60)
-        path_entry.pack(side="left", fill="x", expand=True, padx=8, pady=6)
-        ttk.Button(path_frame, text="浏览", command=self._browse_jitter_audio, width=6, style="Small.TButton").pack(side="left", padx=(0, 4), pady=6)
-        ttk.Button(
-            path_frame, text="打开位置",
-            command=lambda: self.open_containing_folder(self.jitter_audio_path_var.get()),
-            width=8, style="Small.TButton"
-        ).pack(side="left", padx=(0, 8), pady=6)
+
+        vol_row = ttk.Frame(frame)
+        vol_row.pack(fill="x", pady=(4, 2))
+        try:
+            import feature_config as _fc_jtab
+
+            _mv_max = int(getattr(_fc_jtab, "MEDIA_VOLUME_MAX_INDEX", 25))
+            _jdef = str(getattr(_fc_jtab, "DEFAULT_MEDIA_VOLUME_LEVEL_JITTER", 20))
+        except Exception:
+            _mv_max, _jdef = 25, "20"
+        ttk.Label(vol_row, text=f"媒体音量(0~{_mv_max}):").pack(side="left")
+        self.jitter_media_volume_var = tk.StringVar(value=_jdef)
+        ttk.Entry(vol_row, textvariable=self.jitter_media_volume_var, width=5).pack(side="left", padx=(6, 0))
         
         # 操作按钮
         btn_frame = ttk.Frame(frame)
@@ -3527,26 +3529,7 @@ class UIComponents:
         self.jitter_log_text.configure(yscrollcommand=jitter_log_scroll.set)
         self.jitter_log_text.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         jitter_log_scroll.pack(side="right", fill="y", padx=(0, 6), pady=6)
-        self._append_jitter_log("就绪，点击“开始震音测试”后将显示音量与播放日志。")
-    
-    def _browse_jitter_audio(self):
-        """浏览并选择震音测试音频文件（不依赖默认文件名或打包是否复制）"""
-        initial_dir = self.jitter_audio_path_var.get()
-        if initial_dir and os.path.isdir(os.path.dirname(initial_dir)):
-            initial_dir = os.path.dirname(initial_dir)
-        else:
-            initial_dir = os.path.join(self._get_runtime_base_dir(), "audio", "sound")
-        if not os.path.isdir(initial_dir):
-            initial_dir = self._get_runtime_base_dir()
-        path = filedialog.askopenfilename(
-            title="选择震音测试音频",
-            initialdir=initial_dir,
-            filetypes=[("WAV 文件", "*.wav"), ("所有文件", "*.*")],
-        )
-        if path:
-            self.jitter_audio_path_var.set(path)
-            self.jitter_status_var.set("已选择: " + os.path.basename(path))
-            self._append_jitter_log(f"已选择测试音频: {path}")
+        self._append_jitter_log("就绪，点击「开始震音测试」后显示播放日志。")
     
     def _append_jitter_log(self, message):
         """线程安全：在震音测试日志区域追加一行日志"""
@@ -3578,6 +3561,19 @@ class UIComponents:
         else:
             full = f"adb {cmd}"
         return subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
+
+    def _estimate_wav_duration_sec(self, path: str):
+        """读取 WAV 时长（秒），失败返回 None。"""
+        try:
+            import wave
+
+            with wave.open(path, "rb") as w:
+                r = w.getframerate()
+                if not r:
+                    return None
+                return w.getnframes() / float(r)
+        except Exception:
+            return None
 
     def _release_audioserver_for_tinyplay(self, device_id, max_rounds=6, wait_s=0.35):
         """
@@ -3613,17 +3609,25 @@ class UIComponents:
         messagebox.showinfo("震音测试", "已记录：不通过")
     
     def run_jitter_test(self):
-        """开始震音测试：推送并播放音频"""
+        """开始震音测试：APK 播放"""
         if not self.check_device_selected():
             return
-        path = (self.jitter_audio_path_var.get() or "").strip()
-        if not path or not os.path.isfile(path):
-            messagebox.showerror(
-                "错误",
-                f"测试音频文件不存在：\n{path}\n\n请点击「浏览」选择本机上的震音测试音频文件（如 80-1KHz-20S(-3dB).wav），或将该文件放到 audio/sound 目录后重试。"
-            )
+        try:
+            import audio_player_apk as _ja_chk
+
+            if not _ja_chk.use_apk_for_airtightness_and_jitter():
+                messagebox.showerror(
+                    "错误",
+                    "震音测试固定使用 Audio Player APK。\n请在 feature_config 中将 USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER 设为 True。",
+                )
+                return
+        except Exception as e:
+            messagebox.showerror("错误", f"震音测试需要 APK: {e}")
             return
+        ref = (self.jitter_audio_path_var.get() or "").strip()
+        path = ref if ref and os.path.isfile(ref) else ""
         device_id = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        self._jitter_device_id = device_id
         self.jitter_start_btn.config(state="disabled")
         self.jitter_stop_btn.config(state="normal")
         self.jitter_status_var.set("正在准备震音测试...")
@@ -3633,105 +3637,65 @@ class UIComponents:
             self.jitter_log_text.delete("1.0", "end")
             self.jitter_log_text.config(state="disabled")
         self._append_jitter_log(f"开始测试，设备: {device_id or '默认设备'}")
-        self._append_jitter_log(f"测试音频: {path}")
-        self._append_jitter_log("播放方式: tinyplay")
+        self._append_jitter_log(
+            f"时长参考 WAV: {path if path else '（无，使用默认等待时长）'}"
+        )
+        self._append_jitter_log("播放方式: Audio Player APK")
         threading.Thread(
             target=self._jitter_test_thread,
             args=(path, device_id),
             daemon=True,
         ).start()
-    
-    def _jitter_test_thread(self, path, device_id):
-        """震音测试后台：推送播放"""
+
+    def _jitter_test_thread_apk(self, path, device_id):
+        """震音测试：Audio Player APK 播放（系统音量）。"""
+        import audio_player_apk
+        import feature_config as fc
+
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        self._jitter_apk_stop = threading.Event()
+        self.jitter_play_process = None
         try:
-            root = getattr(self, "root", None) or getattr(self, "parent", None)
-            root.after(0, lambda: self.jitter_status_var.set("正在准备播放环境..."))
-
-            # 2. 推送到设备
-            remote_name = "jitter_test_audio.wav"
-            if device_id:
-                push_result = subprocess.run(
-                    f"adb -s {device_id} push \"{path}\" /sdcard/{remote_name}",
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-            else:
-                push_result = subprocess.run(
-                    f"adb push \"{path}\" /sdcard/{remote_name}",
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-            if push_result.returncode != 0:
-                raise RuntimeError(f"推送音频失败: {(push_result.stderr or push_result.stdout or '').strip()}")
-            self._append_jitter_log("音频推送成功，准备播放...")
-            
-            # 3. 与扫频测试保持一致：播放前清理占用并重启 audioserver
-            self._append_jitter_log("播放参数: 固定卡0 / 设备0")
-
-            if device_id:
-                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True, capture_output=True)
-                rounds, released = self._release_audioserver_for_tinyplay(device_id)
-                self._append_jitter_log(
-                    f"释放 audioserver 占用: 已尝试 {rounds} 次，状态={'已释放' if released else '未确认'}"
-                )
-                adb_prefix = f"adb -s {device_id} shell "
-            else:
-                subprocess.run("adb shell killall tinyplay", shell=True, capture_output=True)
-                rounds, released = self._release_audioserver_for_tinyplay(device_id)
-                self._append_jitter_log(
-                    f"释放 audioserver 占用: 已尝试 {rounds} 次，状态={'已释放' if released else '未确认'}"
-                )
-                adb_prefix = "adb shell "
-
-            # 用户要求固定播放参数：仅卡0/设备0
-            play_cmds = [
-                f"{adb_prefix}tinyplay /sdcard/{remote_name} -D 0 -d 0",
-            ]
-            
-            root.after(0, lambda: self.jitter_status_var.set("正在播放测试音频..."))
-
-            self._jitter_device_id = device_id
-            self.jitter_play_process = None
-
-            last_err = ""
-            for cmd in play_cmds:
-                # 在同一条 shell 中连续释放 audioserver 后立刻 tinyplay，贴近手工命令成功路径
-                inline_cmd = (
-                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"{cmd.replace(adb_prefix, '')}\""
-                )
-                self._append_jitter_log(f"尝试播放命令: {inline_cmd}")
-                proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                time.sleep(1.0)
-                if proc.poll() is None:
-                    self.jitter_play_process = proc
-                    self._append_jitter_log("tinyplay 已启动。")
+            root.after(0, lambda: self.jitter_status_var.set("正在通过 Audio Player APK 播放…"))
+            max_v = self._media_volume_max_index()
+            try:
+                vol_s = (getattr(self, "jitter_media_volume_var", None) and self.jitter_media_volume_var.get() or "").strip()
+                vol = int(float(vol_s))
+            except (ValueError, TypeError):
+                vol = int(getattr(fc, "DEFAULT_MEDIA_VOLUME_LEVEL_JITTER", 20))
+            vol = max(0, min(max_v, vol))
+            vmsg = self._set_device_stream_music_volume(device_id, vol)
+            self._append_jitter_log(vmsg)
+            time.sleep(0.25)
+            self._append_jitter_log(f"adb: PLAY + EXTRA_TRACK={fc.AUDIO_PLAYER_TRACK_VIBRATION}")
+            rr = audio_player_apk.run_play(device_id, fc.AUDIO_PLAYER_TRACK_VIBRATION)
+            if rr.returncode != 0:
+                raise RuntimeError((rr.stderr or rr.stdout or "am start 失败").strip()[:240])
+            dur = None
+            if path and os.path.isfile(path):
+                dur = self._estimate_wav_duration_sec(path)
+            if dur is None:
+                dur = float(getattr(fc, "JITTER_APK_DURATION_FALLBACK_SEC", 20))
+            self._append_jitter_log(f"等待约 {dur:.1f}s（可点停止提前结束）")
+            deadline = time.monotonic() + dur + 2.0
+            while time.monotonic() < deadline:
+                if getattr(self, "_jitter_apk_stop", None) and self._jitter_apk_stop.is_set():
                     break
-                try:
-                    out, err = proc.communicate(timeout=1)
-                except Exception:
-                    out, err = ("", "")
-                last_err = (err or out or "").strip()
-                if last_err:
-                    self._append_jitter_log(f"该命令启动失败: {last_err[:200]}")
-            if self.jitter_play_process is None:
-                raise RuntimeError(f"播放失败（tinyplay）: {last_err[:220]}")
-            root.after(0, lambda: self.jitter_status_var.set("正在播放震音测试音频，请根据听感判断。"))
-            self.jitter_play_process.wait()
-            self.jitter_play_process = None
-            
+                time.sleep(0.2)
+            audio_player_apk.run_pause(device_id)
             if root and root.winfo_exists():
                 root.after(0, self._jitter_test_finished)
         except Exception as e:
-            root = getattr(self, "root", None) or getattr(self, "parent", None)
+            try:
+                audio_player_apk.run_pause(device_id)
+            except Exception:
+                pass
             if root and root.winfo_exists():
                 root.after(0, lambda: self._jitter_test_error(str(e)))
+    
+    def _jitter_test_thread(self, path, device_id):
+        """震音测试后台：仅 APK 播放（见 run_jitter_test 前置校验）。"""
+        self._jitter_test_thread_apk(path, device_id)
     
     def _jitter_test_finished(self):
         """震音测试播放结束：恢复 UI，提示人工判断"""
@@ -3754,11 +3718,15 @@ class UIComponents:
     def stop_jitter_test(self):
         """停止震音测试播放并恢复音量"""
         device_id = getattr(self, "_jitter_device_id", "")
+        if getattr(self, "_jitter_apk_stop", None):
+            try:
+                self._jitter_apk_stop.set()
+            except Exception:
+                pass
         try:
-            if device_id:
-                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True, capture_output=True, timeout=5)
-            else:
-                subprocess.run("adb shell killall tinyplay", shell=True, capture_output=True, timeout=5)
+            import audio_player_apk as _ja
+
+            _ja.run_pause(device_id)
         except Exception:
             pass
         if getattr(self, "jitter_play_process", None):
@@ -5385,6 +5353,84 @@ class UIComponents:
             pass
         return None
 
+    def _media_volume_max_index(self):
+        try:
+            import feature_config as _fc_mv
+
+            m = int(getattr(_fc_mv, "MEDIA_VOLUME_MAX_INDEX", 25))
+            return max(1, m)
+        except Exception:
+            return 25
+
+    def _set_device_stream_music_volume(self, device_id, level, hotword_log=False):
+        """
+        与「100 条唤醒率测试」一致：STREAM_MUSIC = stream 3。
+        依次尝试 service call audio 12、13，再 cmd media_session volume --set。
+        level 为系统档位 0 .. MEDIA_VOLUME_MAX_INDEX。
+        """
+        max_idx = self._media_volume_max_index()
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            try:
+                import feature_config as _fc_d
+
+                level = int(getattr(_fc_d, "DEFAULT_MEDIA_VOLUME_LEVEL_JITTER", max_idx * 4 // 5))
+            except Exception:
+                level = max_idx * 4 // 5
+        level = max(0, min(max_idx, level))
+        sid = (device_id or "").strip()
+        adb_prefix = ["adb", "-s", sid] if sid else ["adb"]
+        did_set = False
+        for code in (12, 13):
+            try:
+                r = subprocess.run(
+                    adb_prefix
+                    + [
+                        "shell",
+                        "service",
+                        "call",
+                        "audio",
+                        str(code),
+                        "i32",
+                        "3",
+                        "i32",
+                        str(level),
+                        "i32",
+                        "0",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if r.returncode == 0 and "ffffff" not in (r.stdout or ""):
+                    did_set = True
+                    break
+            except Exception:
+                continue
+        if not did_set:
+            try:
+                r = subprocess.run(
+                    adb_prefix + ["shell", "cmd", "media_session", "volume", "--stream", "3", "--set", str(level)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                did_set = r.returncode == 0
+            except Exception:
+                pass
+        time.sleep(0.4)
+        read_back = self._get_device_volume(sid) if sid else None
+        if read_back is not None and read_back != level:
+            msg = f"已设置系统音量: {level}（读取仍为 {read_back}，若未生效请手动调节或检查设备）"
+        else:
+            msg = f"已设置系统音量: {level}"
+        if hotword_log:
+            self._append_hotword_log(msg)
+            return msg
+        tail = f"，回读 {read_back}" if read_back is not None else ""
+        return f"媒体音量档位 {level}/{max_idx}{tail}"
+
     def _show_effx_mode_help(self):
         """弹窗显示音效模式数值与名称对照表"""
         effx_list = [
@@ -5661,34 +5707,7 @@ class UIComponents:
             time.sleep(0.3)
 
         def _set_volume_on_device(vol):
-            """设置设备 STREAM_MUSIC(3) 音量：优先 service call audio 12（部分设备 media_session --set 无效），再试 13、media_session。"""
-            did_set = False
-            for code in (12, 13):
-                try:
-                    r = subprocess.run(
-                        ["adb", "-s", device_id_for_replay, "shell", "service", "call", "audio", str(code), "i32", "3", "i32", str(vol), "i32", "0"],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if r.returncode == 0 and "ffffff" not in (r.stdout or ""):
-                        did_set = True
-                        break
-                except Exception:
-                    continue
-            if not did_set:
-                try:
-                    r = subprocess.run(
-                        ["adb", "-s", device_id_for_replay, "shell", "cmd", "media_session", "volume", "--stream", "3", "--set", str(vol)],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    did_set = r.returncode == 0
-                except Exception:
-                    pass
-            time.sleep(0.4)
-            read_back = self._get_device_volume(device_id_for_replay)
-            if read_back is not None and read_back != vol:
-                self._append_hotword_log(f"已设置系统音量: {vol}（读取仍为 {read_back}，若未生效请手动调节或检查设备）")
-            else:
-                self._append_hotword_log(f"已设置系统音量: {vol}")
+            self._set_device_stream_music_volume(device_id_for_replay, vol, hotword_log=True)
 
         def _play_wav_list():
             stop = lambda: getattr(self, "_wakeup100_stop_requested", False)
@@ -7999,43 +8018,60 @@ class UIComponents:
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill="both", expand=True)
 
+        record_frame = ttk.LabelFrame(frame, text="录制设置")
+        record_frame.pack(fill="x", pady=5)
+        rec_line = ttk.Frame(record_frame)
+        rec_line.pack(fill="x", padx=10, pady=4)
+
+        ttk.Label(rec_line, text="设备:", font=("Arial", 8)).pack(side="left")
+        self.airtight_record_device_var = tk.StringVar(value="0")
+        ttk.Combobox(
+            rec_line, textvariable=self.airtight_record_device_var, values=["0", "1", "2", "3"], width=5
+        ).pack(side="left", padx=(5, 10))
+
+        ttk.Label(rec_line, text="卡号:", font=("Arial", 8)).pack(side="left")
+        self.airtight_record_card_var = tk.StringVar(value="3")
+        ttk.Combobox(
+            rec_line, textvariable=self.airtight_record_card_var, values=["0", "1", "2", "3"], width=5
+        ).pack(side="left", padx=(5, 10))
+
+        ttk.Label(rec_line, text="通道:", font=("Arial", 8)).pack(side="left")
+        self.airtight_record_channels_var = tk.StringVar(value="4")
+        ttk.Combobox(
+            rec_line, textvariable=self.airtight_record_channels_var, values=["1", "2", "4", "8"], width=5
+        ).pack(side="left", padx=(5, 10))
+
+        ttk.Label(rec_line, text="采样率:", font=("Arial", 8)).pack(side="left")
+        self.airtight_record_rate_var = tk.StringVar(value="16000")
+        ttk.Combobox(
+            rec_line, textvariable=self.airtight_record_rate_var, values=["8000", "16000", "44100", "48000"], width=8
+        ).pack(side="left", padx=5)
+
+        ttk.Label(rec_line, text="位深:", font=("Arial", 8)).pack(side="left")
+        self.airtight_record_bits_var = tk.StringVar(value="16")
+        ttk.Combobox(
+            rec_line, textvariable=self.airtight_record_bits_var, values=["16", "24", "32"], width=4
+        ).pack(side="left", padx=(5, 10))
+
         test_frame = ttk.LabelFrame(frame, text="测试设置（固定脚本）")
         test_frame.pack(fill="x", pady=5)
 
-        line1 = ttk.Frame(test_frame)
-        line1.pack(fill="x", padx=10, pady=4)
-        ttk.Label(line1, text="录制时长(秒):").pack(side="left")
-        self.airtight_duration_var = tk.StringVar(value="15")
-        ttk.Entry(line1, textvariable=self.airtight_duration_var, width=6).pack(side="left", padx=(6, 18))
-        ttk.Label(line1, text="固定录制参数: 设备0 / 卡3 / 通道4 / 采样率16000 / 位深16").pack(side="left")
+        try:
+            import feature_config as _fc_airtab
 
-        line2 = ttk.Frame(test_frame)
-        line2.pack(fill="x", padx=10, pady=4)
-        ttk.Label(line2, text="播放文件:").grid(row=0, column=0, sticky="w")
-        self.airtight_play_file_var = tk.StringVar(value="")
-        self.airtight_play_file_combo = ttk.Combobox(
-            line2,
-            textvariable=self.airtight_play_file_var,
-            width=34,
-            state="readonly",
-        )
-        self.airtight_play_file_combo.grid(row=0, column=1, sticky="ew", padx=(6, 6))
-        self.airtight_play_file_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_airtight_play_file_combo_selected())
-        ttk.Button(
-            line2,
-            text="刷新",
-            width=6,
-            style="Small.TButton",
-            command=self.refresh_airtight_play_files,
-        ).grid(row=0, column=2, padx=(0, 6))
-        ttk.Button(
-            line2,
-            text="浏览",
-            width=6,
-            style="Small.TButton",
-            command=self.browse_airtight_play_file,
-        ).grid(row=0, column=3)
-        line2.grid_columnconfigure(1, weight=1)
+            _mv_max = int(getattr(_fc_airtab, "MEDIA_VOLUME_MAX_INDEX", 25))
+            _def_air_vol = str(getattr(_fc_airtab, "DEFAULT_MEDIA_VOLUME_LEVEL_AIRTIGHT", 18))
+        except Exception:
+            _mv_max, _def_air_vol = 25, "18"
+
+        row_dur_vol = ttk.Frame(test_frame)
+        row_dur_vol.pack(fill="x", padx=10, pady=4)
+        ttk.Label(row_dur_vol, text="录制时长(秒):").pack(side="left")
+        self.airtight_duration_var = tk.StringVar(value="15")
+        ttk.Entry(row_dur_vol, textvariable=self.airtight_duration_var, width=6).pack(side="left", padx=(6, 28))
+        ttk.Label(row_dur_vol, text=f"媒体音量(0~{_mv_max}):").pack(side="left")
+        self.airtight_media_volume_var = tk.StringVar(value=_def_air_vol)
+        ttk.Entry(row_dur_vol, textvariable=self.airtight_media_volume_var, width=5).pack(side="left", padx=(6, 0))
 
         path_frame = ttk.Frame(frame)
         path_frame.pack(fill="x", pady=5)
@@ -8102,7 +8138,10 @@ class UIComponents:
         info_box.pack(fill="both", expand=True, pady=(6, 0))
         self.airtight_info_text = tk.Text(info_box, height=6, wrap="word")
         self.airtight_info_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.airtight_info_text.insert("end", "点击【开始测试】后会先让你选择堵mic/不堵mic。\n")
+        self.airtight_info_text.insert(
+            "end",
+            "点击【开始测试】选择堵 mic / 不堵 mic。APK 播放 + tinycap 录制；「录制设置」与时长/音量可按机型调整。\n",
+        )
         self.airtight_info_text.config(state="disabled")
 
         manual_box = ttk.LabelFrame(frame, text="手动对比文件（无需先测）")
@@ -8139,10 +8178,6 @@ class UIComponents:
         self._airtight_play_proc = None
         self.latest_airtight_du_path = ""
         self.latest_airtight_open_path = ""
-        self._airtight_play_file_map = {}
-        self._airtight_play_file_manual_path = ""
-        self.refresh_airtight_play_files()
-
     def _append_airtight_info(self, message):
         if not hasattr(self, "airtight_info_text"):
             return
@@ -8159,73 +8194,6 @@ class UIComponents:
         selected = filedialog.askdirectory(title="选择气密性测试保存目录", initialdir=base_dir)
         if selected:
             self.airtight_save_path_var.set(selected)
-
-    def refresh_airtight_play_files(self):
-        """刷新气密性测试可选播放文件列表（audio/elephant 与 audio/custom）。"""
-        file_map = {}
-        candidates = []
-        base_dir = self._get_runtime_base_dir()
-        for folder, tag in (("elephant", "大象"), ("custom", "自定义")):
-            for root in (
-                os.path.join(base_dir, "audio", folder),
-                os.path.join(os.getcwd(), "audio", folder),
-            ):
-                if not os.path.isdir(root):
-                    continue
-                for name in os.listdir(root):
-                    if not name.lower().endswith(".wav"):
-                        continue
-                    full = os.path.join(root, name)
-                    label = f"[{tag}] {name}"
-                    file_map[label] = full
-                    candidates.append(label)
-        candidates = sorted(set(candidates))
-        self._airtight_play_file_map = file_map
-        if hasattr(self, "airtight_play_file_combo"):
-            self.airtight_play_file_combo["values"] = candidates
-        # 若已手动选择文件，优先显示手动条目
-        if getattr(self, "_airtight_play_file_manual_path", ""):
-            manual = self._airtight_play_file_manual_path
-            self.airtight_play_file_var.set(f"[手动] {os.path.basename(manual)}")
-            return
-        # 默认选 sweep_speech_48k.wav
-        preferred = ""
-        for label in candidates:
-            if label.lower().endswith("sweep_speech_48k.wav"):
-                preferred = label
-                break
-        if preferred:
-            self.airtight_play_file_var.set(preferred)
-        elif candidates and not self.airtight_play_file_var.get().strip():
-            self.airtight_play_file_var.set(candidates[0])
-
-    def browse_airtight_play_file(self):
-        file_path = filedialog.askopenfilename(
-            title="选择气密性播放文件",
-            filetypes=[("WAV文件", "*.wav"), ("所有文件", "*.*")],
-        )
-        if not file_path:
-            return
-        self._airtight_play_file_manual_path = file_path
-        self.airtight_play_file_var.set(f"[手动] {os.path.basename(file_path)}")
-        self._append_airtight_info(f"已选择手动播放文件: {file_path}")
-
-    def _on_airtight_play_file_combo_selected(self):
-        """下拉选择后，取消手动文件覆盖。"""
-        self._airtight_play_file_manual_path = ""
-
-    def _resolve_airtight_play_source(self):
-        manual = getattr(self, "_airtight_play_file_manual_path", "")
-        if manual and os.path.isfile(manual):
-            return manual, os.path.basename(manual)
-        selected_label = (self.airtight_play_file_var.get() or "").strip()
-        mapped = (self._airtight_play_file_map or {}).get(selected_label)
-        if mapped and os.path.isfile(mapped):
-            return mapped, os.path.basename(mapped)
-        fallback = self._find_airtight_source_file()
-        if fallback:
-            return fallback, os.path.basename(fallback)
-        return "", ""
 
     def _refresh_airtight_compare_buttons(self):
         du_ok = bool(self.latest_airtight_du_path and os.path.exists(self.latest_airtight_du_path))
@@ -8314,10 +8282,22 @@ class UIComponents:
         os.makedirs(save_dir, exist_ok=True)
         self.airtight_save_path_var.set(save_dir)
 
-        source_file, source_name = self._resolve_airtight_play_source()
-        if not source_file:
-            messagebox.showerror("错误", "未找到可用播放文件，请先在“播放文件”选择或手动浏览 WAV 文件。")
+        try:
+            import audio_player_apk as _apk_air
+
+            if not _apk_air.use_apk_for_airtightness_and_jitter():
+                messagebox.showerror(
+                    "错误",
+                    "气密性测试固定使用 Audio Player APK。\n请在 feature_config 中将 USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER 设为 True。",
+                )
+                return
+        except Exception as e:
+            messagebox.showerror("错误", f"气密性测试需要 APK 播放模块: {e}")
             return
+
+        self._append_airtight_info("气密播放：APK 内固定音轨；录制为 tinycap。")
+        source_name = "sweep_speech_48k.wav"
+        source_file = self._find_airtight_source_file() or ""
 
         self._airtight_stop_requested = False
         self._airtight_test_running = True
@@ -8379,12 +8359,16 @@ class UIComponents:
         }
 
         try:
-            # 固定脚本参数：与扫频测试共用同一执行通道，避免两套逻辑不一致
-            self.record_device_var.set("0")
-            self.record_card_var.set("3")
-            self.record_channels_var.set("4")
-            self.record_rate_var.set("16000")
-            self.record_bits_var.set("16")
+            # 气密页录制参数写入扫频共用变量，执行完在 finally 恢复
+            self.record_device_var.set(
+                getattr(self, "airtight_record_device_var", self.record_device_var).get()
+            )
+            self.record_card_var.set(getattr(self, "airtight_record_card_var", self.record_card_var).get())
+            self.record_channels_var.set(
+                getattr(self, "airtight_record_channels_var", self.record_channels_var).get()
+            )
+            self.record_rate_var.set(getattr(self, "airtight_record_rate_var", self.record_rate_var).get())
+            self.record_bits_var.set(getattr(self, "airtight_record_bits_var", self.record_bits_var).get())
             self.sweep_duration_var.set(self.airtight_duration_var.get())
 
             if hasattr(self, "device_var"):
@@ -8392,18 +8376,44 @@ class UIComponents:
             if not device_id:
                 device_id = str(getattr(self, "selected_device", "") or "").strip()
 
-            sweep_file = (source_name or "sweep_speech_48k.wav").strip()
-            ui_log(f"模式: {mode_label}，开始调用扫频测试执行接口（固定文件 {sweep_file}）...")
             try:
-                ui_log(
-                    f"本次播放参数沿用扫频设置: 设备{self.play_device_var.get()} / 卡{self.play_card_var.get()}"
-                )
-            except Exception:
-                pass
-            # 与扫频入口完全一致的前置准备（清理 tiny 进程 + 重启 audioserver）
-            self._prepare_sweep_runtime_environment(device_id, log_fn=ui_log)
+                import audio_player_apk as _apk_air
 
-            ok = self._run_sweep_test(source_file, sweep_file, save_dir, device_id)
+                if not _apk_air.use_apk_for_airtightness_and_jitter():
+                    raise RuntimeError("未启用 USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"气密测试需要 APK: {e}") from e
+
+            sweep_file = "sweep_speech_48k.wav"
+            ui_log(f"模式: {mode_label}，扫频接口（{sweep_file}）")
+            ui_log(
+                f"录制参数: 设备{self.record_device_var.get()} / 卡{self.record_card_var.get()} / "
+                f"{self.record_channels_var.get()}通道 / {self.record_rate_var.get()}Hz / {self.record_bits_var.get()}bit"
+            )
+            ui_log("播放: Audio Player APK")
+            self._prepare_sweep_runtime_environment(device_id, log_fn=ui_log, restart_audioserver=False)
+
+            import feature_config as _fc_air
+
+            max_v = self._media_volume_max_index()
+            try:
+                vol_raw = (getattr(self, "airtight_media_volume_var", None) and self.airtight_media_volume_var.get() or "").strip()
+                target_vol = int(float(vol_raw))
+            except (ValueError, TypeError):
+                target_vol = int(getattr(_fc_air, "DEFAULT_MEDIA_VOLUME_LEVEL_AIRTIGHT", 18))
+            target_vol = max(0, min(max_v, target_vol))
+
+            ok = self._run_sweep_test(
+                source_file,
+                sweep_file,
+                save_dir,
+                device_id,
+                playback_mode="audio_player_apk",
+                apk_extra_track=_fc_air.AUDIO_PLAYER_TRACK_AIRTIGHT,
+                target_volume_level=target_vol,
+            )
             if not ok:
                 raise RuntimeError("扫频执行接口返回失败")
             if not bool(getattr(self, "_last_sweep_play_started", False)):
@@ -9324,8 +9334,8 @@ class UIComponents:
         else:
             self.update_sweep_info("没有成功添加任何文件")
 
-    def _prepare_sweep_runtime_environment(self, device_id="", log_fn=None):
-        """统一的播放/录制前环境准备：清理残留 tiny 进程并重启 audioserver。"""
+    def _prepare_sweep_runtime_environment(self, device_id="", log_fn=None, restart_audioserver=True):
+        """清理残留 tiny 进程；可选重启 audioserver（APK 播放时不要重启，避免与播放不同步）。"""
         import time
         import subprocess
 
@@ -9345,6 +9355,8 @@ class UIComponents:
             subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
 
         time.sleep(0.5)
+        if not restart_audioserver:
+            return
         _log("准备测试环境：重启 audioserver ...")
         for _ in range(3):
             if device_id:
@@ -9426,9 +9438,43 @@ class UIComponents:
             self.start_sweep_button.config(state="normal")
             self.stop_sweep_button.config(state="disabled")
 
-    def _run_sweep_test(self, source_path, sweep_file, save_dir, device_id):
-        """执行单个扫频测试"""
+    def _run_sweep_test(
+        self,
+        source_path,
+        sweep_file,
+        save_dir,
+        device_id,
+        playback_mode="tinyplay",
+        apk_extra_track=None,
+        target_volume_level: Optional[int] = None,
+    ):
+        """执行单个扫频测试。playback_mode=audio_player_apk 时用设备侧 APK PLAY，跳过推送与 tinyplay。"""
         self._last_sweep_play_started = False
+        self._sweep_used_audio_player_apk = False
+        self._sweep_apk_extra_track = None
+        playback_mode = (playback_mode or "tinyplay").strip().lower()
+        etrack = (apk_extra_track or "").strip()
+        use_apk = playback_mode == "audio_player_apk" and bool(etrack)
+        apk_to_cap = 0.35
+        if use_apk:
+            try:
+                import feature_config as _fc_ptc
+
+                apk_to_cap = float(getattr(_fc_ptc, "APK_PLAY_TO_TINYCAP_DELAY_SEC", 0.35))
+            except Exception:
+                apk_to_cap = 0.35
+            apk_to_cap = max(0.05, min(3.0, apk_to_cap))
+
+        def _sweep_pause_apk():
+            if getattr(self, "_sweep_used_audio_player_apk", False):
+                try:
+                    import audio_player_apk
+
+                    audio_player_apk.run_pause(device_id)
+                except Exception:
+                    pass
+                self._sweep_used_audio_player_apk = False
+
         try:
             # 获取录制参数（录制时长为数值，用于后续比较与等待）
             try:
@@ -9465,38 +9511,39 @@ class UIComponents:
                 mkdir_cmd = "adb shell mkdir -p /sdcard"
             subprocess.run(mkdir_cmd, shell=True)
             
-            # 推送音频文件到设备（本地文件必须存在）
-            if not os.path.isfile(source_path):
-                raise Exception(f"本地音频文件不存在: {source_path}")
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在推送音频文件: {sweep_file}"))
-            # 设备路径统一加引号，避免 shell 解析问题；本地路径已用双引号包裹
             device_audio_path_quoted = f'"{device_audio_path}"'
-            if device_id:
-                push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path_quoted}"
+            if not use_apk:
+                if not os.path.isfile(source_path):
+                    raise Exception(f"本地音频文件不存在: {source_path}")
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"正在推送音频文件: {sweep_file}"))
+                if device_id:
+                    push_cmd = f"adb -s {device_id} push \"{source_path}\" {device_audio_path_quoted}"
+                else:
+                    push_cmd = f"adb push \"{source_path}\" {device_audio_path_quoted}"
+                push_result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
+                if push_result.returncode != 0:
+                    err_msg = (push_result.stderr or push_result.stdout or "未知错误").strip()
+                    raise Exception(f"推送音频文件失败: {err_msg}")
+                push_out = (push_result.stdout or "") + (push_result.stderr or "")
+                if re.search(r"0\s+files?\s+pushed", push_out):
+                    raise Exception(f"推送可能未成功（adb 显示 0 file(s) pushed），请检查设备存储与权限。输出: {push_out.strip()}")
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("验证设备上的文件..."))
+                if device_id:
+                    ls_cmd = f"adb -s {device_id} shell ls -l \"{device_audio_path}\""
+                else:
+                    ls_cmd = f"adb shell ls -l \"{device_audio_path}\""
+                ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
+                if ls_result.returncode != 0:
+                    raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}，请检查 adb 连接与存储权限后再试。")
+                ls_out = (ls_result.stdout or "").strip()
+                if "No such file" in ls_out or not ls_out:
+                    raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}。ls 输出: {ls_out or '(空)'}")
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("sdcard 下文件已就绪，继续后续步骤。"))
             else:
-                push_cmd = f"adb push \"{source_path}\" {device_audio_path_quoted}"
-            push_result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
-            if push_result.returncode != 0:
-                err_msg = (push_result.stderr or push_result.stdout or "未知错误").strip()
-                raise Exception(f"推送音频文件失败: {err_msg}")
-            # 部分环境 adb 返回 0 但实际未推送成功，用输出二次判断（如 "0 files pushed"）
-            push_out = (push_result.stdout or "") + (push_result.stderr or "")
-            if re.search(r"0\s+files?\s+pushed", push_out):
-                raise Exception(f"推送可能未成功（adb 显示 0 file(s) pushed），请检查设备存储与权限。输出: {push_out.strip()}")
-            
-            # 推送后验证：用 ls -l 确认文件存在且可读，并显示大小
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("验证设备上的文件..."))
-            if device_id:
-                ls_cmd = f"adb -s {device_id} shell ls -l \"{device_audio_path}\""
-            else:
-                ls_cmd = f"adb shell ls -l \"{device_audio_path}\""
-            ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True)
-            if ls_result.returncode != 0:
-                raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}，请检查 adb 连接与存储权限后再试。")
-            ls_out = (ls_result.stdout or "").strip()
-            if "No such file" in ls_out or not ls_out:
-                raise Exception(f"推送后验证失败：设备上未找到 {device_audio_path}。ls 输出: {ls_out or '(空)'}")
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("sdcard 下文件已就绪，继续后续步骤。"))
+                getattr(self, "root", self.parent).after(
+                    0,
+                    lambda: self.update_sweep_info(f"使用 Audio Player APK 播放（EXTRA_TRACK={etrack}），跳过 push tinyplay 音源。"),
+                )
             
             # 开始录制
             getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"开始录制音频，时长: {recording_duration}秒"))
@@ -9519,108 +9566,140 @@ class UIComponents:
                 root_cmd = "adb root"
                 pkill_play = "adb shell pkill tinyplay"
                 pkill_cap = "adb shell pkill tinycap"
-            # 先结束上次可能残留的播放/录制进程，再 root 和重启 audioserver，避免第二次无声音
             subprocess.run(pkill_play, shell=True, capture_output=True)
             subprocess.run(pkill_cap, shell=True, capture_output=True)
             time.sleep(0.5)
-            # 获取 root 并重启 audioserver，以便 tinyplay/tinycap 能打开设备
-            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("获取 root 并重启 audioserver..."))
-            subprocess.run(root_cmd, shell=True, capture_output=True, text=True)
-            time.sleep(2)
-            subprocess.run(killall_cmd, shell=True)
-            time.sleep(3)
+            if not use_apk:
+                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("获取 root 并重启 audioserver..."))
+                subprocess.run(root_cmd, shell=True, capture_output=True, text=True)
+                time.sleep(2)
+                subprocess.run(killall_cmd, shell=True)
+                time.sleep(3)
             
             play_process = None
             adb_prefix = f"adb -s {device_id} shell " if device_id else "adb shell "
             play_used_desc = f"设备{play_device} 卡{play_card}"
             active_play_cmd = f"{adb_prefix}tinyplay {device_audio_path_quoted} -D {play_device} -d {play_card}"
 
-            def _is_tinyplay_running_on_device():
-                try:
-                    if device_id:
-                        pid_cmd = f"adb -s {device_id} shell pidof tinyplay"
-                    else:
-                        pid_cmd = "adb shell pidof tinyplay"
-                    rr = subprocess.run(pid_cmd, shell=True, capture_output=True, text=True, timeout=5)
-                    pid_txt = ((rr.stdout or "") + (rr.stderr or "")).strip()
-                    return rr.returncode == 0 and bool(pid_txt)
-                except Exception:
-                    return False
+            if use_apk:
+                import audio_player_apk
 
-            def _restart_playback_after_audio_restart(base_play_cmd, desc):
-                """audioserver 重启后，按原播放参数重新拉起 tinyplay。"""
-                if not base_play_cmd:
-                    return None, "无可用播放命令"
-                inner = base_play_cmd.replace(adb_prefix, "", 1)
-                inline = (
-                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"{inner}\""
+                if target_volume_level is not None:
+                    try:
+                        mv = self._media_volume_max_index()
+                        v = max(0, min(mv, int(target_volume_level)))
+                        vmsg = self._set_device_stream_music_volume(device_id, v)
+                        getattr(self, "root", self.parent).after(0, lambda m=vmsg: self.update_sweep_info(m))
+                        time.sleep(0.35)
+                    except Exception as _ve:
+                        getattr(self, "root", self.parent).after(
+                            0, lambda e=str(_ve): self.update_sweep_info(f"设置媒体音量异常: {e}"),
+                        )
+
+                try:
+                    import feature_config as _fc_apk_dly
+
+                    arm_sec = float(getattr(_fc_apk_dly, "APK_PLAY_TO_TINYCAP_DELAY_SEC", 0.35))
+                except Exception:
+                    arm_sec = 0.35
+                arm_sec = max(0.0, min(1.5, arm_sec))
+                # APK 路径改为先起 tinycap 再下发 PLAY，避免漏录开头几秒
+                getattr(self, "root", self.parent).after(
+                    0,
+                    lambda d=arm_sec: self.update_sweep_info(
+                        f"先启动 tinycap，再延时 {d:.2f}s 下发 APK 播放（减少开头丢失）"
+                    ),
                 )
-                proc = subprocess.Popen(inline, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                time.sleep(0.8)
-                if proc.poll() is None:
-                    # 额外校验：设备侧 tinyplay 进程必须真实存在，避免“主机侧进程存活但设备未播放”的假成功
-                    if _is_tinyplay_running_on_device():
-                        return proc, ""
+                self._sweep_used_audio_player_apk = True
+                self._sweep_apk_extra_track = etrack
+                play_used_desc = f"APK({etrack})"
+                active_play_cmd = None
+            else:
+
+                def _is_tinyplay_running_on_device():
+                    try:
+                        if device_id:
+                            pid_cmd = f"adb -s {device_id} shell pidof tinyplay"
+                        else:
+                            pid_cmd = "adb shell pidof tinyplay"
+                        rr = subprocess.run(pid_cmd, shell=True, capture_output=True, text=True, timeout=5)
+                        pid_txt = ((rr.stdout or "") + (rr.stderr or "")).strip()
+                        return rr.returncode == 0 and bool(pid_txt)
+                    except Exception:
+                        return False
+
+                def _restart_playback_after_audio_restart(base_play_cmd, desc):
+                    """audioserver 重启后，按原播放参数重新拉起 tinyplay。"""
+                    if not base_play_cmd:
+                        return None, "无可用播放命令"
+                    inner = base_play_cmd.replace(adb_prefix, "", 1)
+                    inline = (
+                        f"{adb_prefix}\"killall audioserver; sleep 0.35; "
+                        f"killall audioserver; sleep 0.35; "
+                        f"killall audioserver; sleep 0.35; "
+                        f"{inner}\""
+                    )
+                    proc = subprocess.Popen(inline, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    time.sleep(0.8)
+                    if proc.poll() is None:
+                        if _is_tinyplay_running_on_device():
+                            return proc, ""
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        return None, f"播放重启失败（{desc}）: 设备侧未检测到 tinyplay 进程"
+                    try:
+                        _, stderr = proc.communicate(timeout=1)
+                        err = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip()
+                    except Exception:
+                        err = "进程已退出"
+                    return None, f"播放重启失败（{desc}）: {err or '未知错误'}"
+
+                last_play_err = ""
+                for i in range(3):
+                    attempt = i + 1
+                    getattr(self, "root", self.parent).after(
+                        0,
+                        lambda a=attempt, d=play_used_desc: self.update_sweep_info(f"启动播放: {sweep_file}（{d}，第{a}次）"),
+                    )
+                    inner_cmd = active_play_cmd.replace(adb_prefix, "", 1)
+                    inline_cmd = (
+                        f"{adb_prefix}\"killall audioserver; sleep 0.35; "
+                        f"killall audioserver; sleep 0.35; "
+                        f"killall audioserver; sleep 0.35; "
+                        f"{inner_cmd}\""
+                    )
+                    proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    time.sleep(1.2)
+                    if proc.poll() is None and _is_tinyplay_running_on_device():
+                        play_process = proc
+                        self._last_sweep_play_started = True
+                        getattr(self, "root", self.parent).after(0, lambda d=play_used_desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
+                        break
+                    try:
+                        _, stderr = proc.communicate(timeout=1)
+                        err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() or "进程已退出"
+                    except Exception:
+                        err_text = "进程已退出"
+                    if proc.poll() is None and not _is_tinyplay_running_on_device():
+                        err_text = "设备侧未检测到 tinyplay 进程（疑似被系统抢占）"
+                    last_play_err = err_text
+                    getattr(self, "root", self.parent).after(
+                        0,
+                        lambda msg=err_text, d=play_used_desc: self.update_sweep_info(f"播放尝试失败（{d}）: {msg}"),
+                    )
                     try:
                         proc.terminate()
                     except Exception:
                         pass
-                    return None, f"播放重启失败（{desc}）: 设备侧未检测到 tinyplay 进程"
-                try:
-                    _, stderr = proc.communicate(timeout=1)
-                    err = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip()
-                except Exception:
-                    err = "进程已退出"
-                return None, f"播放重启失败（{desc}）: {err or '未知错误'}"
-            # 固定参数下最多重试 3 次（处理偶发 PCM 占用）
-            last_play_err = ""
-            for i in range(3):
-                attempt = i + 1
-                getattr(self, "root", self.parent).after(
-                    0,
-                    lambda a=attempt, d=play_used_desc: self.update_sweep_info(f"启动播放: {sweep_file}（{d}，第{a}次）"),
-                )
-                inner_cmd = active_play_cmd.replace(adb_prefix, "", 1)
-                inline_cmd = (
-                    f"{adb_prefix}\"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"killall audioserver; sleep 0.35; "
-                    f"{inner_cmd}\""
-                )
-                proc = subprocess.Popen(inline_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                time.sleep(1.2)
-                if proc.poll() is None and _is_tinyplay_running_on_device():
-                    play_process = proc
-                    self._last_sweep_play_started = True
-                    getattr(self, "root", self.parent).after(0, lambda d=play_used_desc: self.update_sweep_info(f"播放已启动（{d}），正在启动录制..."))
-                    break
-                try:
-                    _, stderr = proc.communicate(timeout=1)
-                    err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() or "进程已退出"
-                except Exception:
-                    err_text = "进程已退出"
-                if proc.poll() is None and not _is_tinyplay_running_on_device():
-                    err_text = "设备侧未检测到 tinyplay 进程（疑似被系统抢占）"
-                last_play_err = err_text
-                getattr(self, "root", self.parent).after(
-                    0,
-                    lambda msg=err_text, d=play_used_desc: self.update_sweep_info(f"播放尝试失败（{d}）: {msg}"),
-                )
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                time.sleep(0.3)
-            if play_process is None:
-                raise Exception(f"播放失败：固定参数（设备{play_device} 卡{play_card}）启动失败。{last_play_err}")
-            
-            # 播放已启动时多等一会再开录制，减少「Device or resource busy」
-            if play_process is not None:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放已稳定，1.2 秒后启动录制..."))
-                time.sleep(1.2)
+                    time.sleep(0.3)
+                if play_process is None:
+                    raise Exception(f"播放失败：固定参数（设备{play_device} 卡{play_card}）启动失败。{last_play_err}")
+
+                if play_process is not None:
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("播放已稳定，1.2 秒后启动录制..."))
+                    time.sleep(1.2)
             
             # 使用界面设置的录制参数单次启动；失败时重启 audioserver 再重试
             record_started_ok = False
@@ -9632,25 +9711,28 @@ class UIComponents:
                 if record_process.poll() is not None:
                     stdout, stderr = record_process.communicate()
                     err_text = (stderr.decode() if stderr and isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
-                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver(第1次)..."))
-                    subprocess.run(killall_cmd, shell=True)
-                    time.sleep(2)
-                    if play_process is not None and active_play_cmd:
-                        restarted_proc, restart_err = _restart_playback_after_audio_restart(active_play_cmd, play_used_desc or "原参数")
-                        if restarted_proc is not None:
-                            play_process = restarted_proc
-                            getattr(self, "root", self.parent).after(0, lambda d=(play_used_desc or "原参数"): self.update_sweep_info(f"audioserver 重启后已恢复播放（{d}）"))
-                        elif restart_err:
-                            getattr(self, "root", self.parent).after(0, lambda m=restart_err: self.update_sweep_info(m))
-                    record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    time.sleep(0.5)
-                if record_process.poll() is not None:
-                    stdout, stderr = record_process.communicate()
-                    err_text = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
-                    if "Permission denied" in err_text or "Unable to open PCM" in err_text:
-                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("仍失败，正在重启audioserver(第2、3次)..."))
-                        subprocess.run(killall_cmd, shell=True)
-                        time.sleep(1)
+                    if use_apk and etrack:
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，重试：重新下发 APK 播放（不重启 audioserver）..."))
+                        import audio_player_apk
+
+                        if target_volume_level is not None:
+                            try:
+                                mv = self._media_volume_max_index()
+                                v = max(0, min(mv, int(target_volume_level)))
+                                vmsg = self._set_device_stream_music_volume(device_id, v)
+                                getattr(self, "root", self.parent).after(0, lambda m=vmsg: self.update_sweep_info(m))
+                                time.sleep(0.35)
+                            except Exception:
+                                pass
+                        rr = audio_player_apk.run_play(device_id, etrack)
+                        if rr.returncode == 0:
+                            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已重新下发"))
+                        else:
+                            msg = (rr.stderr or rr.stdout or "").strip() or "am start 失败"
+                            getattr(self, "root", self.parent).after(0, lambda m=msg: self.update_sweep_info(f"APK 重播失败: {m}"))
+                        time.sleep(apk_to_cap)
+                    else:
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制失败，正在重启audioserver(第1次)..."))
                         subprocess.run(killall_cmd, shell=True)
                         time.sleep(2)
                         if play_process is not None and active_play_cmd:
@@ -9660,6 +9742,45 @@ class UIComponents:
                                 getattr(self, "root", self.parent).after(0, lambda d=(play_used_desc or "原参数"): self.update_sweep_info(f"audioserver 重启后已恢复播放（{d}）"))
                             elif restart_err:
                                 getattr(self, "root", self.parent).after(0, lambda m=restart_err: self.update_sweep_info(m))
+                    record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(0.5)
+                if record_process.poll() is not None:
+                    stdout, stderr = record_process.communicate()
+                    err_text = (stderr.decode() if isinstance(stderr, bytes) else (stderr or "")).strip() if stderr else ""
+                    if "Permission denied" in err_text or "Unable to open PCM" in err_text:
+                        if use_apk and etrack:
+                            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("仍失败，再次重试 APK 播放（不重启 audioserver）..."))
+                            import audio_player_apk
+
+                            if target_volume_level is not None:
+                                try:
+                                    mv = self._media_volume_max_index()
+                                    v = max(0, min(mv, int(target_volume_level)))
+                                    vmsg = self._set_device_stream_music_volume(device_id, v)
+                                    getattr(self, "root", self.parent).after(0, lambda m=vmsg: self.update_sweep_info(m))
+                                    time.sleep(0.35)
+                                except Exception:
+                                    pass
+                            rr = audio_player_apk.run_play(device_id, etrack)
+                            if rr.returncode == 0:
+                                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已再次下发"))
+                            else:
+                                msg = (rr.stderr or rr.stdout or "").strip() or "am start 失败"
+                                getattr(self, "root", self.parent).after(0, lambda m=msg: self.update_sweep_info(f"APK 重播失败: {m}"))
+                            time.sleep(apk_to_cap)
+                        else:
+                            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("仍失败，正在重启audioserver(第2、3次)..."))
+                            subprocess.run(killall_cmd, shell=True)
+                            time.sleep(1)
+                            subprocess.run(killall_cmd, shell=True)
+                            time.sleep(2)
+                            if play_process is not None and active_play_cmd:
+                                restarted_proc, restart_err = _restart_playback_after_audio_restart(active_play_cmd, play_used_desc or "原参数")
+                                if restarted_proc is not None:
+                                    play_process = restarted_proc
+                                    getattr(self, "root", self.parent).after(0, lambda d=(play_used_desc or "原参数"): self.update_sweep_info(f"audioserver 重启后已恢复播放（{d}）"))
+                                elif restart_err:
+                                    getattr(self, "root", self.parent).after(0, lambda m=restart_err: self.update_sweep_info(m))
                         record_process = subprocess.Popen(record_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         time.sleep(0.5)
                     if record_process.poll() is not None:
@@ -9678,10 +9799,40 @@ class UIComponents:
                 record_process = None
             
             if record_started_ok and record_process is not None:
-                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制已启动，与播放同时进行中..."))
+                if use_apk:
+                    import audio_player_apk
+
+                    try:
+                        import feature_config as _fc_apk_dly
+
+                        arm_sec = float(getattr(_fc_apk_dly, "APK_PLAY_TO_TINYCAP_DELAY_SEC", 0.35))
+                    except Exception:
+                        arm_sec = 0.35
+                    arm_sec = max(0.0, min(1.5, arm_sec))
+                    if arm_sec > 0:
+                        time.sleep(arm_sec)
+                    try:
+                        audio_player_apk.run_pause(device_id)
+                        time.sleep(0.10)
+                    except Exception:
+                        pass
+                    rr = audio_player_apk.run_play(device_id, etrack)
+                    apk_err = (rr.stderr or rr.stdout or "").strip()
+                    if rr.returncode != 0:
+                        raise Exception(f"APK 播放启动失败: {apk_err or 'am start 返回非 0'}")
+                    self._last_sweep_play_started = True
+                    getattr(self, "root", self.parent).after(
+                        0,
+                        lambda t=etrack: self.update_sweep_info(f"APK 播放已下发（EXTRA_TRACK={t}），录制进行中..."),
+                    )
+                else:
+                    getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("录制已启动，与播放同时进行中..."))
                 # 等待录制完成（recording_duration 已转为 float）
                 remaining_time = float(recording_duration)
                 while remaining_time > 0 and record_process.poll() is None:
+                    if getattr(self, "_airtight_stop_requested", False) or getattr(self, "stop_requested", False):
+                        getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("收到停止指令，结束当前录制..."))
+                        break
                     getattr(self, "root", self.parent).after(0, lambda t=remaining_time: self.update_sweep_info(f"等待录制完成，剩余: {t:.1f} 秒"))
                     time.sleep(0.5)
                     remaining_time -= 0.5
@@ -9694,7 +9845,10 @@ class UIComponents:
                         record_process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         record_process.kill()
-                
+                # APK 路径：尽快暂停播放，避免拉取文件的几秒内喇叭仍在响、听感上像「多播了几秒」
+                if use_apk:
+                    _sweep_pause_apk()
+
                 # 检查录制结果并拉取
                 getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("检查录制文件..."))
                 local_file_path = os.path.join(save_dir, recording_filename)
@@ -9723,14 +9877,21 @@ class UIComponents:
                 else:
                     raise Exception("本地录制文件不存在")
                 
-                # 清理设备上的临时文件
-                if device_id:
+                # 清理设备上的临时文件（APK 播放未 push 音源时只删录音）
+                if use_apk:
+                    if device_id:
+                        cleanup_cmd = f"adb -s {device_id} shell rm -f \"{device_recording_path}\""
+                    else:
+                        cleanup_cmd = f"adb shell rm -f \"{device_recording_path}\""
+                elif device_id:
                     cleanup_cmd = f"adb -s {device_id} shell rm {device_recording_path} {device_audio_path}"
                 else:
                     cleanup_cmd = f"adb shell rm {device_recording_path} {device_audio_path}"
                 subprocess.run(cleanup_cmd, shell=True)
             else:
                 # 录制未成功，但播放已执行；结束设备上的 tinyplay/tinycap，避免占用导致下次无声音
+                if use_apk:
+                    _sweep_pause_apk()
                 if device_id:
                     subprocess.run(f"adb -s {device_id} shell pkill tinyplay", shell=True, capture_output=True)
                     subprocess.run(f"adb -s {device_id} shell pkill tinycap", shell=True, capture_output=True)
@@ -9739,11 +9900,12 @@ class UIComponents:
                     subprocess.run("adb shell pkill tinycap", shell=True, capture_output=True)
                 getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info(f"录制未成功，无录音文件；播放已完成。{record_failed_msg}"))
                 getattr(self, "root", self.parent).after(0, lambda: self.sweep_status_var.set("播放完成(录制未成功)"))
-                if device_id:
-                    cleanup_cmd = f"adb -s {device_id} shell rm -f {device_audio_path_quoted}"
-                else:
-                    cleanup_cmd = f"adb shell rm -f {device_audio_path_quoted}"
-                subprocess.run(cleanup_cmd, shell=True)
+                if not use_apk:
+                    if device_id:
+                        cleanup_cmd = f"adb -s {device_id} shell rm -f {device_audio_path_quoted}"
+                    else:
+                        cleanup_cmd = f"adb shell rm -f {device_audio_path_quoted}"
+                    subprocess.run(cleanup_cmd, shell=True)
             
             # 恢复按钮状态
             getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
@@ -9757,17 +9919,30 @@ class UIComponents:
             getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
             getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
             return False
+        finally:
+            _sweep_pause_apk()
 
     def stop_sweep_test(self, handler=None):
         """停止扫频测试"""
         try:
+            if hasattr(self, "stop_requested"):
+                self.stop_requested = True
             # 停止批量测试
             if hasattr(self, 'batch_testing') and self.batch_testing:
                 self.batch_testing = False
                 self.update_sweep_info("正在停止批量测试...")
             
-            # 停止当前播放
             device_id = self.device_var.get() if hasattr(self, "device_var") else ""
+            try:
+                import audio_player_apk
+
+                if getattr(self, "_sweep_used_audio_player_apk", False):
+                    audio_player_apk.run_pause(device_id)
+                    self._sweep_used_audio_player_apk = False
+            except Exception:
+                pass
+
+            # 停止当前播放
             if device_id:
                 stop_cmd = f"adb -s {device_id} shell am force-stop com.android.music"
             else:
@@ -10919,46 +11094,6 @@ class UIComponents:
             # 恢复按钮状态
             getattr(self, "root", self.parent).after(0, lambda: self.start_sweep_button.config(state="normal"))
             getattr(self, "root", self.parent).after(0, lambda: self.stop_sweep_button.config(state="disabled"))
-
-    def stop_sweep_test(self, handler=None):
-        """停止扫频测试"""
-        try:
-            self.update_sweep_info("正在停止测试...")
-            
-            # 设置停止标志，用于批量测试
-            self.stop_requested = True
-            
-            # 直接构建adb命令，避免递归调用
-            device_id = self.device_var.get() if hasattr(self, 'device_var') else ""
-            
-            # 停止播放进程
-            if device_id:
-                subprocess.run(f"adb -s {device_id} shell killall tinyplay", shell=True)
-            else:
-                subprocess.run("adb shell killall tinyplay", shell=True)
-                
-            # 停止录制进程
-            if device_id:
-                subprocess.run(f"adb -s {device_id} shell killall tinycap", shell=True)
-            else:
-                subprocess.run("adb shell killall tinycap", shell=True)
-            
-            # 恢复按钮状态
-            self.start_sweep_button.config(state="normal")
-            self.stop_sweep_button.config(state="disabled")
-            
-            # 更新状态
-            self.sweep_status_var.set("测试已停止")
-            self.update_sweep_info("扫频测试已手动停止")
-            
-        except Exception as e:
-            self.sweep_status_var.set(f"停止测试出错: {str(e)}")
-            self.update_sweep_info(f"停止测试出错: {str(e)}")
-            messagebox.showerror("错误", f"停止扫频测试时出错:\n{str(e)}")
-            
-            # 恢复按钮状态
-            self.start_sweep_button.config(state="normal")
-            self.stop_sweep_button.config(state="disabled")
 
     def open_sweep_folder(self):
         """打开扫频测试保存文件夹"""

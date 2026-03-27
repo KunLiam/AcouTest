@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "1.9.7"
+APP_VERSION = "1.9.8"
 
 # ========== 自动更新配置（双通道：外部 / 内部） ==========
 # RELEASE_CHANNEL：当前构建属于哪条更新通道。
@@ -41,6 +41,26 @@ UPDATE_MANIFEST_URLS = [
     "https://cdn.jsdelivr.net/gh/KunLiam/AcouTest@master/update_manifest.json",
 ]
 UPDATE_AUTO_CHECK = True
+
+# ========== Audio Player APK（气密性 / 震音：用 APK 播放以走系统音量；录制仍 tinycap）==========
+# True：气密性、震音仅通过 adb 调 com.player.demo 的 PLAY/PAUSE（须为 True，否则两页会提示无法开始）
+USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER = True
+AUDIO_PLAYER_COMPONENT = "com.player.demo/.MainActivity"
+AUDIO_PLAYER_ACTION_PLAY = "com.player.demo.PLAY"
+AUDIO_PLAYER_ACTION_PAUSE = "com.player.demo.PAUSE"
+AUDIO_PLAYER_EXTRA_TRACK = "com.player.demo.EXTRA_TRACK"
+# 与 APK 文档一致：airtight=sweep_speech_48k.wav，vibration=80-1KHz-20S(-3dB).wav
+AUDIO_PLAYER_TRACK_AIRTIGHT = "airtight"
+AUDIO_PLAYER_TRACK_VIBRATION = "vibration"
+# 系统媒体音量最大索引（含 0）；与设备「音量条格数−1」一致。常见 AOSP 为 15；本机 0–25 共 26 档则填 25。
+MEDIA_VOLUME_MAX_INDEX = 25
+# 气密 / 震音界面默认档位（0 .. MEDIA_VOLUME_MAX_INDEX），与唤醒监测「系统音量区间」一致
+DEFAULT_MEDIA_VOLUME_LEVEL_JITTER = 20
+DEFAULT_MEDIA_VOLUME_LEVEL_AIRTIGHT = 18
+# 震音 APK 模式且本机无 WAV 时的等待秒数
+JITTER_APK_DURATION_FALLBACK_SEC = 20
+# 气密/APK 路径：tinycap 启动后，延时多少秒再下发 PLAY（秒）。用于对齐声路起播，推荐 0.15～0.45
+APK_PLAY_TO_TINYCAP_DELAY_SEC = 0.35
 
 # ========== 主标签页（五大类） ==========
 # 设为 False 时，整个大类不会出现在界面上

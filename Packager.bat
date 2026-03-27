@@ -94,7 +94,8 @@ echo [Packager] Running PyInstaller...
 if not exist "dist" mkdir "dist"
 
 :: 确保所有 Python 模块加入打包（--name 带版本号）
-python -m PyInstaller --clean --noconsole --onefile --icon="logo\AcouTest.ico" ^
+:: --noupx：UPX 压缩 OpenSSL 的 libcrypto-3.dll 等易导致 onefile 解压失败（Failed to extract libcrypto-3.dll）
+python -m PyInstaller --clean --noconsole --onefile --noupx --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^
