@@ -442,8 +442,15 @@
 - 使用项目根目录的 `update_manifest.json` 作为更新清单模板，按同样字段维护线上 JSON 文件。
 - 必填字段：
   - `latest_version`：最新版本号（例如 `1.8.2`）
-  - `download_url`：新版本安装包地址（支持 zip 或 exe）
+  - `download_url`：新版本 **exe** 的 **HTTPS 直链**（见下文「用户无需 Git」）
   - `notes`：更新说明（字符串或字符串数组）
+- 可选字段：
+  - `wakeup_count_apk_url`：与本次版本配套的 **AudioPlayer.apk** 直链。若存在，用户点击「立即更新」时除下载 exe 外，还会下载该文件并保存为安装目录下的 `wakeup_count/AudioPlayer.apk`（目录不存在会自动创建）。若本次发布未改 APK，可从清单中去掉该字段或运行 `sync_version_manifest.py` 前将 `feature_config.py` 里 `WAKEUP_COUNT_APK_DOWNLOAD_URL_*` 留空。
+- **APK 放在哪里**：与 exe 一样，上传到任意可通过 **HTTPS** 直接下载的位置即可，例如 **GitHub Releases** 的 Assets（与 `AcouTest.vx.x.x.exe` 同一次 Release 里再上传 `AudioPlayer.apk`），或阿里云 OSS / 腾讯云 COS / 自有 Nginx 静态目录等。把文件的可下载 URL 填进清单的 `wakeup_count_apk_url`（内部/外部分别维护时，可配合 `feature_config.py` 的 `WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL` / `WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC`，由 `sync_version_manifest.py` 自动生成两条清单中的字段）。
+
+#### 用户是否需要安装 Git？
+
+**不需要。** 自动更新只会用系统自带的 HTTPS 请求去拉取「清单 JSON」和「exe / apk 文件」，与用户电脑上是否安装 Git 无关。若部分网络环境访问 `github.com` 不稳定，可将清单与安装包放到境内可访问的 HTTPS 地址（或继续用仓库里的 jsDelivr 镜像拉 **清单**，exe/apk 则放到你可控的 CDN / 对象存储，并把 `download_url` / `wakeup_count_apk_url` 写成那里的直链）。
 
 #### 2) 配置清单地址（任选其一）
 
@@ -468,8 +475,8 @@
 - 顶部工具栏支持“检查更新”按钮，用户可随时手动检查，不用重启程序。
 - 发现新版本会弹窗显示版本号与更新说明。
 - 用户点击“立即更新”后：
-  - 自动下载更新包
-  - 将新版本文件保存到当前安装目录
+  - 自动下载 exe（及清单中可选的 `wakeup_count_apk_url` 指向的 APK）
+  - 将新版本 exe 保存到当前安装目录；若下载了 APK，则写入 `wakeup_count/AudioPlayer.apk`
   - 提示用户关闭当前程序后，手动启动新的 exe 生效
 
 ## 联系与支持

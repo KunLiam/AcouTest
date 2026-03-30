@@ -5,6 +5,7 @@
 - RELEASE_CHANNEL="internal" 时仅写入 update_manifest_internal.json
 - RELEASE_CHANNEL="public" 时仅写入 update_manifest_public.json（并同步 update_manifest.json 兼容旧链接）
 notes 从 release_notes.txt 读取。
+若配置了 WAKEUP_COUNT_APK_DOWNLOAD_URL_*（非空且为 http(s)），会写入清单字段 wakeup_count_apk_url，供客户端随 exe 一并更新 wakeup_count/AudioPlayer.apk。
 """
 import json
 import os
@@ -66,6 +67,8 @@ def main() -> int:
         cfg_path, "DOWNLOAD_URL_INTERNAL",
         "https://github.com/KunLiam/AcouTest/releases/download/v{version}/AcouTest.v{version}.exe",
     )
+    apk_public_tpl = read_config_string(cfg_path, "WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC", "")
+    apk_internal_tpl = read_config_string(cfg_path, "WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL", "")
     notes = read_notes(root)
     import time
     publish_date = time.strftime("%Y-%m-%d")
@@ -77,6 +80,12 @@ def main() -> int:
     }
     manifest_public = {**base, "download_url": url_public_tpl.replace("{version}", app_version)}
     manifest_internal = {**base, "download_url": url_internal_tpl.replace("{version}", app_version)}
+    apk_pub = apk_public_tpl.replace("{version}", app_version).strip()
+    apk_int = apk_internal_tpl.replace("{version}", app_version).strip()
+    if apk_pub.lower().startswith(("http://", "https://")):
+        manifest_public["wakeup_count_apk_url"] = apk_pub
+    if apk_int.lower().startswith(("http://", "https://")):
+        manifest_internal["wakeup_count_apk_url"] = apk_int
 
     # 仅同步当前 RELEASE_CHANNEL 对应的清单
     if channel == "internal":

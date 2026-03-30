@@ -1,9 +1,11 @@
 {
-  "latest_version": "1.9.8",
-  "publish_date": "2026-03-27",
+  "latest_version": "1.9.9",
+  "publish_date": "2026-03-30",
   "notes": [
-    "气密：APK 播放；可改录制参数；时长与音量并排；先 tinycap 再播 APK",
-    "震音：APK 播放；媒体音量 0～25 档，默认 20（气密默认 18）"
+    "自动更新：清单可配置 wakeup_count_apk_url，与 exe 一并下载后写入安装目录 wakeup_count/AudioPlayer.apk",
+    "自动更新：下载完成后的落盘与弹窗改在主线程执行，减少界面异常",
+    "说明：用户侧无需安装 Git，仅需能 HTTPS 访问清单与安装包直链；APK 可与 AcouTest 不同仓库"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.8/AcouTest.v1.9.8.exe"
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.9/AcouTest.v1.9.9.exe",
+  "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
 }

@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "1.9.8"
+APP_VERSION = "1.9.9"
 
 # ========== 自动更新配置（双通道：外部 / 内部） ==========
 # RELEASE_CHANNEL：当前构建属于哪条更新通道。
@@ -34,6 +34,12 @@ UPDATE_MANIFEST_URLS_INTERNAL = [
 # {version} 会被替换为 APP_VERSION。内外都用同一文件名 AcouTest.v{version}.exe；内部用 tag v{version}，外部用 tag v{version}-public。
 DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/AcouTest/releases/download/v{version}-public/AcouTest.v{version}.exe"
 DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/AcouTest/releases/download/v{version}/AcouTest.v{version}.exe"
+
+# 可选：与 exe 同版本一并发布的 AudioPlayer.apk 直链（{version} 会被替换为 APP_VERSION）。
+# sync_version_manifest.py 会写入清单字段 wakeup_count_apk_url；自动更新时会下载到安装目录 wakeup_count/AudioPlayer.apk。
+#   https://github.com/<用户>/<仓库>/releases/download/v{version}/AudioPlayer.apk
+WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
+WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
 
 # 以下为兼容旧逻辑：未配置通道专用 URL 时回退使用
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest.json"

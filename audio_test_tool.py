@@ -365,13 +365,19 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         download_url = str((manifest or {}).get("download_url") or "").strip()
         if not download_url:
             return None
-        return {
+        apk_url = str((manifest or {}).get("wakeup_count_apk_url") or "").strip()
+        if apk_url and not apk_url.lower().startswith(("http://", "https://")):
+            apk_url = ""
+        out = {
             "current_version": current,
             "latest_version": latest,
             "publish_date": str((manifest or {}).get("publish_date") or "").strip(),
             "notes": notes_text,
             "download_url": download_url,
         }
+        if apk_url:
+            out["wakeup_count_apk_url"] = apk_url
+        return out
 
     def _check_update_async(self, manual=False):
         def _worker():
@@ -489,11 +495,36 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         finally:
             self._update_dialog = None
 
+    def _updater_normalize_request_url(self, download_url):
+        parsed = urllib.parse.urlparse(download_url)
+        safe_path = urllib.parse.quote(parsed.path, safe="/-_.~()%")
+        return urllib.parse.urlunparse(
+            (parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment)
+        )
+
+    def _updater_download_file(self, download_url, dest_path, timeout=120, progress_cb=None):
+        """HTTP(S) 下载到本地文件；progress_cb(done_bytes, total_bytes_or_0) 可选。"""
+        normalized_url = self._updater_normalize_request_url(download_url)
+        req = urllib.request.Request(normalized_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest_path, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if progress_cb:
+                    progress_cb(done, total)
+
     def _download_and_apply_update(self, info, dialog):
         download_url = str((info or {}).get("download_url") or "").strip()
         if not download_url:
             messagebox.showerror("更新失败", "缺少下载地址 download_url")
             return
+
+        apk_url = str((info or {}).get("wakeup_count_apk_url") or "").strip()
 
         prog = tk.Toplevel(self.root)
         prog.title("正在下载更新")
@@ -510,41 +541,57 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
         def _worker():
             tmp_dir = tempfile.mkdtemp(prefix="acoutest_update_")
+            apk_tmp = None
+            apk_warn = None
             try:
                 parsed = urllib.parse.urlparse(download_url)
                 name = os.path.basename(parsed.path) or f"acoutest_update_{int(time.time())}.exe"
                 pkg_path = os.path.join(tmp_dir, name)
 
-                # 对 URL path 做编码，避免中文/空格路径导致请求失败
-                safe_path = urllib.parse.quote(parsed.path, safe="/-_.~()%")
-                normalized_url = urllib.parse.urlunparse(
-                    (parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment)
-                )
-                req = urllib.request.Request(normalized_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
-                with urllib.request.urlopen(req, timeout=25) as resp, open(pkg_path, "wb") as out:
-                    total = int(resp.headers.get("Content-Length") or 0)
-                    done = 0
-                    while True:
-                        chunk = resp.read(1024 * 256)
-                        if not chunk:
-                            break
-                        out.write(chunk)
-                        done += len(chunk)
-                        if total > 0:
-                            pct = max(0.0, min(100.0, (done * 100.0) / total))
-                            self.root.after(0, lambda p=pct: (bar_var.set(p), tip_var.set(f"{p:.1f}%")))
+                def _prog_exe(done, total):
+                    if total > 0:
+                        pct = max(0.0, min(85.0, (done * 85.0) / total))
+                    else:
+                        pct = 42.5
+                    p = pct
+                    self.root.after(0, lambda p=p: (bar_var.set(p), tip_var.set(f"主程序 {p:.0f}%")))
 
-                self.root.after(0, lambda: (bar_var.set(100.0), tip_var.set("下载完成，准备保存到安装目录...")))
-                self._save_downloaded_update_file(pkg_path, dialog, prog)
+                self._updater_download_file(download_url, pkg_path, timeout=120, progress_cb=_prog_exe)
+
+                if apk_url:
+                    apk_tmp = os.path.join(tmp_dir, "AudioPlayer.apk")
+
+                    def _prog_apk(done, total):
+                        if total > 0:
+                            pct = 85.0 + min(15.0, (done * 15.0) / total)
+                        else:
+                            pct = 92.5
+                        p = pct
+                        self.root.after(0, lambda p=p: (bar_var.set(p), tip_var.set(f"AudioPlayer.apk {p:.0f}%")))
+
+                    try:
+                        self._updater_download_file(apk_url, apk_tmp, timeout=120, progress_cb=_prog_apk)
+                    except Exception as e:
+                        apk_tmp = None
+                        apk_warn = str(e)
+
+                def _finish_download_ui():
+                    bar_var.set(100.0)
+                    tip_var.set("下载完成，准备保存到安装目录...")
+                    self._save_downloaded_update_file(
+                        pkg_path, dialog, prog, apk_tmp_path=apk_tmp, apk_download_warning=apk_warn
+                    )
+
+                self.root.after(0, _finish_download_ui)
             except urllib.error.HTTPError as e:
                 def _on_http_error():
                     msg = (
                         f"下载失败：HTTP {e.code}\n\n"
                         f"下载地址：{download_url}\n\n"
                         "请检查：\n"
-                        "1) GitHub Release 的 tag 是否与版本一致（如 v1.8.4）\n"
-                        "2) Asset 文件名是否与链接完全一致（区分大小写）\n"
-                        "3) Release 是否已发布（不是 Draft/私有）"
+                        "1) 发布页直链是否可访问（无需安装 Git，普通浏览器能打开即可）\n"
+                        "2) 文件名与链接是否完全一致（区分大小写）\n"
+                        "3) 文件是否已发布、非草稿/非私有"
                     )
                     messagebox.showerror("更新失败", msg)
                 self.root.after(0, _on_http_error)
@@ -554,8 +601,8 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 self.root.after(0, prog.destroy)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _save_downloaded_update_file(self, pkg_path, dialog, prog_win):
-        """将下载包保存到安装目录，提示用户重启生效（不强制自动替换）。"""
+    def _save_downloaded_update_file(self, pkg_path, dialog, prog_win, apk_tmp_path=None, apk_download_warning=None):
+        """将下载包保存到安装目录；可选把 AudioPlayer.apk 写入 wakeup_count。提示用户重启生效。"""
         try:
             install_dir = self._get_runtime_base_dir()
             is_frozen = bool(getattr(sys, "frozen", False))
@@ -575,6 +622,14 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
             shutil.copy2(pkg_path, target_path)
 
+            apk_dest_line = ""
+            if apk_tmp_path and os.path.isfile(apk_tmp_path):
+                wc_dir = os.path.join(install_dir, "wakeup_count")
+                os.makedirs(wc_dir, exist_ok=True)
+                apk_dest = os.path.join(wc_dir, "AudioPlayer.apk")
+                shutil.copy2(apk_tmp_path, apk_dest)
+                apk_dest_line = f"\nwakeup_count\\AudioPlayer.apk 已更新：\n{apk_dest}\n"
+
             self._close_update_dialog(dialog)
             try:
                 prog_win.destroy()
@@ -583,9 +638,15 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
 
             message = (
                 "新版本已下载完成。\n\n"
-                f"保存路径：{target_path}\n\n"
+                f"保存路径：{target_path}\n"
+                f"{apk_dest_line}\n"
                 "请关闭当前程序后，双击新的 exe 启动即可生效。"
             )
+            if apk_download_warning:
+                message += (
+                    "\n\n注意：清单中配置了设备端 APK 更新，但本次下载失败，已保留旧版或缺失：\n"
+                    + apk_download_warning
+                )
             if messagebox.askyesno("更新下载完成", message + "\n\n是否现在打开所在文件夹？"):
                 try:
                     if platform.system() == "Windows":
