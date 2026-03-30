@@ -478,6 +478,7 @@
   - 自动下载 exe（及清单中可选的 `wakeup_count_apk_url` 指向的 APK）
   - 将新版本 exe 保存到当前安装目录；若下载了 APK，则写入 `wakeup_count/AudioPlayer.apk`
   - 提示用户关闭当前程序后，手动启动新的 exe 生效
+- **为何 exe 已更新但 APK 没有**：① 当时用来点「立即更新」的 **旧版 exe 尚未包含「顺带下载 APK」逻辑**，只会下 exe；② 线上 `update_manifest_*.json` 当时还 **没有** `wakeup_count_apk_url` 字段（未 push 或未跑 `sync_version_manifest.py`）。**处理**：用新版 exe 启动后，再点一次 **「检查更新」**——若已是最新版但清单里仍有 APK 地址，会询问是否 **仅下载 AudioPlayer.apk** 到 `wakeup_count`。
 
 ## 联系与支持
 

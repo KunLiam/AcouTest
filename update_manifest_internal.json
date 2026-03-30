@@ -1,11 +1,10 @@
 {
-  "latest_version": "1.9.9",
+  "latest_version": "2.0.0",
   "publish_date": "2026-03-30",
   "notes": [
-    "自动更新：清单可配置 wakeup_count_apk_url，与 exe 一并下载后写入安装目录 wakeup_count/AudioPlayer.apk",
-    "自动更新：下载完成后的落盘与弹窗改在主线程执行，减少界面异常",
-    "说明：用户侧无需安装 Git，仅需能 HTTPS 访问清单与安装包直链；APK 可与 AcouTest 不同仓库"
+    "自动更新可同时拉取 exe 与清单中的 AudioPlayer.apk 至 wakeup_count",
+    "已是最新版时「检查更新」可单独补下/覆盖 APK"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v1.9.9/AcouTest.v1.9.9.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.0/AcouTest.v2.0.0.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
 }

@@ -422,7 +422,11 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 info = self._normalize_update_info(manifest)
                 if not info:
                     if manual:
-                        self.root.after(0, lambda: messagebox.showinfo("检查更新", f"当前已是最新版本（v{APP_VERSION}）。"))
+                        apk_u = str((manifest or {}).get("wakeup_count_apk_url") or "").strip()
+                        if apk_u and apk_u.lower().startswith(("http://", "https://")):
+                            self.root.after(0, lambda u=apk_u: self._offer_sync_wakeup_apk_when_up_to_date(u))
+                        else:
+                            self.root.after(0, lambda: messagebox.showinfo("检查更新", f"当前已是最新版本（v{APP_VERSION}）。"))
                     return
                 self.root.after(0, lambda i=info: self._show_update_dialog(i))
             except Exception as e:
@@ -494,6 +498,86 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             pass
         finally:
             self._update_dialog = None
+
+    def _offer_sync_wakeup_apk_when_up_to_date(self, apk_url):
+        """
+        已是最新版本时仍允许从清单里的 wakeup_count_apk_url 单独拉取 APK。
+        典型场景：曾用不含 APK 同步逻辑的旧 exe 完成升级；或线上清单晚于首次升级才补上 apk 地址。
+        """
+        if not messagebox.askyesno(
+            "检查更新",
+            f"当前已是最新版本（v{APP_VERSION}）。\n\n"
+            "在线清单提供了 AudioPlayer.apk 下载地址，是否下载到安装目录下的 wakeup_count 文件夹？\n\n"
+            "若您刚升级 exe 后发现 APK 未更新，或需重新覆盖 APK，请选「是」。",
+        ):
+            return
+        self._download_wakeup_count_apk_only(apk_url)
+
+    def _download_wakeup_count_apk_only(self, apk_url):
+        """仅下载清单中的设备端 APK 到 wakeup_count/AudioPlayer.apk（不升级 exe）。"""
+        url = str(apk_url or "").strip()
+        if not url:
+            return
+        prog = tk.Toplevel(self.root)
+        prog.title("正在下载 AudioPlayer.apk")
+        prog.geometry("420x120")
+        prog.resizable(False, False)
+        prog.transient(self.root)
+        self._apply_window_icon(prog)
+        tk.Label(prog, text="正在下载 AudioPlayer.apk，请稍候...", anchor="w").pack(fill="x", padx=14, pady=(14, 6))
+        bar_var = tk.DoubleVar(value=0.0)
+        ttk.Progressbar(prog, maximum=100, variable=bar_var).pack(fill="x", padx=14, pady=(0, 6))
+        tip_var = tk.StringVar(value="0%")
+        tk.Label(prog, textvariable=tip_var, anchor="w", fg="#666").pack(fill="x", padx=14)
+
+        def _worker():
+            tmp_dir = tempfile.mkdtemp(prefix="acoutest_apk_")
+            apk_tmp = os.path.join(tmp_dir, "AudioPlayer.apk")
+            try:
+
+                def _prog(done, total):
+                    if total > 0:
+                        pct = max(0.0, min(100.0, (done * 100.0) / total))
+                    else:
+                        pct = 50.0
+                    p = pct
+                    self.root.after(0, lambda p=p: (bar_var.set(p), tip_var.set(f"{p:.0f}%")))
+
+                self._updater_download_file(url, apk_tmp, timeout=120, progress_cb=_prog)
+
+                def _finish():
+                    try:
+                        prog.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        if not os.path.isfile(apk_tmp):
+                            messagebox.showerror("下载失败", "临时文件无效，请检查网络与下载地址。")
+                            return
+                        install_dir = self._get_runtime_base_dir()
+                        wc_dir = os.path.join(install_dir, "wakeup_count")
+                        os.makedirs(wc_dir, exist_ok=True)
+                        apk_dest = os.path.join(wc_dir, "AudioPlayer.apk")
+                        shutil.copy2(apk_tmp, apk_dest)
+                        messagebox.showinfo("AudioPlayer.apk", f"已保存：\n{apk_dest}")
+                    except Exception as e:
+                        messagebox.showerror("保存失败", str(e))
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+                self.root.after(0, _finish)
+            except Exception as e:
+                def _err():
+                    try:
+                        prog.destroy()
+                    except Exception:
+                        pass
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    messagebox.showerror("下载失败", f"{e}\n\n地址：{url}")
+
+                self.root.after(0, _err)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _updater_normalize_request_url(self, download_url):
         parsed = urllib.parse.urlparse(download_url)
