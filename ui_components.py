@@ -8,6 +8,7 @@ import wave
 from array import array
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import platform
 import re
@@ -2405,7 +2406,698 @@ class UIComponents:
                     idx += channels
                 per_channel[ch][x] = (local_min, local_max)
         return per_channel, points
-    
+
+    def _compute_wave_segment_stats(self, samples, channels, frame_start, frame_end, full_scale, sample_rate=0):
+        """
+        对 PCM 交错样本在 [frame_start, frame_end) 帧范围内按声道统计峰值、RMS、DC 等。
+        frame_end 为开区间；与波形查看器时间轴一致。
+        sample_rate：用于约 10 ms 分窗的最大/最小/平均 RMS；为 0 时用整段作为单窗。
+        """
+        channels = max(1, int(channels))
+        total_pairs = len(samples) // channels
+        frame_start = max(0, min(total_pairs, int(frame_start)))
+        frame_end = max(frame_start + 1, min(total_pairs, int(frame_end)))
+        n_frames = frame_end - frame_start
+        fs = float(max(1, int(full_scale)))
+        sr = float(max(1, int(sample_rate))) if sample_rate else 0.0
+        win_sz = max(64, int(sr * 0.01)) if sr > 0 else n_frames
+        win_sz = max(1, min(win_sz, n_frames)) if n_frames > 0 else 1
+        per_ch = []
+        for ch in range(channels):
+            peak_abs = 0
+            ssum = 0.0
+            sqsum = 0.0
+            vmin = None
+            vmax = None
+            for fi in range(frame_start, frame_end):
+                v = int(samples[fi * channels + ch])
+                av = abs(v)
+                if av > peak_abs:
+                    peak_abs = av
+                ssum += v
+                sqsum += float(v) * float(v)
+                vmin = v if vmin is None else min(vmin, v)
+                vmax = v if vmax is None else max(vmax, v)
+            mean = ssum / n_frames
+            rms = math.sqrt(sqsum / n_frames) if n_frames > 0 else 0.0
+            peak_db = 20.0 * math.log10(peak_abs / fs) if peak_abs > 0 else float("-inf")
+            rms_db = 20.0 * math.log10(rms / fs) if rms > 0 else float("-inf")
+            dc_pct = (mean / fs) * 100.0
+            if math.isfinite(peak_db) and math.isfinite(rms_db):
+                dyn_db = peak_db - rms_db
+            else:
+                dyn_db = float("nan")
+            # 分窗 RMS：与常见 DAW「最大/最小/平均 RMS」一致，在短时窗内算 RMS 再统计
+            rms_win_linear = []
+            ws = max(1, win_sz)
+            for w0 in range(frame_start, frame_end, ws):
+                w1 = min(w0 + ws, frame_end)
+                if w1 <= w0:
+                    break
+                n_w = w1 - w0
+                sq_w = 0.0
+                for fi in range(w0, w1):
+                    v = float(int(samples[fi * channels + ch]))
+                    sq_w += v * v
+                rms_win_linear.append(math.sqrt(sq_w / n_w))
+            if not rms_win_linear:
+                rms_win_linear = [rms]
+            mxw = max(rms_win_linear)
+            mnw = min(rms_win_linear)
+            avgw = sum(rms_win_linear) / len(rms_win_linear)
+            rms_max_db = 20.0 * math.log10(mxw / fs) if mxw > 0 else float("-inf")
+            rms_min_db = 20.0 * math.log10(mnw / fs) if mnw > 0 else float("-inf")
+            rms_avg_db = 20.0 * math.log10(avgw / fs) if avgw > 0 else float("-inf")
+            per_ch.append({
+                "peak_abs": peak_abs,
+                "peak_dbfs": peak_db,
+                "min_sample": vmin if vmin is not None else 0,
+                "max_sample": vmax if vmax is not None else 0,
+                "rms": rms,
+                "rms_dbfs": rms_db,
+                "rms_max_dbfs": rms_max_db,
+                "rms_min_dbfs": rms_min_db,
+                "rms_avg_dbfs": rms_avg_db,
+                "rms_window_frames": ws,
+                "rms_window_count": len(rms_win_linear),
+                "mean": mean,
+                "dc_percent": dc_pct,
+                "dynamic_range_db": dyn_db,
+                "n_frames": n_frames,
+            })
+        return per_ch
+
+    def _format_dbfs_cell(self, dbv):
+        if dbv is None:
+            return "—"
+        if not math.isfinite(dbv):
+            return "-inf" if dbv < 0 else "—"
+        return f"{dbv:.2f}"
+
+    def _show_waveform_amplitude_stats_dialog(self, parent, per_ch, channels, bits, t_start, t_end, sample_rate, used_full_file):
+        """选段/整段振幅统计表格弹窗。"""
+        dlg = tk.Toplevel(parent)
+        dlg.title("振幅统计")
+        dlg.geometry("780x520")
+        dlg.transient(parent)
+        dur = max(0.0, t_end - t_start)
+        head = (
+            f"统计范围: {t_start:.4f} s – {t_end:.4f} s（时长 {dur:.4f} s）"
+            + ("  ·  整段波形" if used_full_file else "  ·  当前选区")
+            + f"    |    {channels} ch, {bits} bit, {sample_rate} Hz"
+        )
+        ttk.Label(dlg, text=head, wraplength=740, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(10, 6))
+
+        metric_rows = [
+            ("位深度 (bit)", lambda _c: str(int(bits))),
+            ("峰值振幅 (dBFS)", lambda c: self._format_dbfs_cell(c["peak_dbfs"])),
+            ("最大采样值", lambda c: str(int(c["max_sample"]))),
+            ("最小采样值", lambda c: str(int(c["min_sample"]))),
+            ("总体 RMS (dBFS)", lambda c: self._format_dbfs_cell(c["rms_dbfs"])),
+            ("最大 RMS (dBFS)", lambda c: self._format_dbfs_cell(c["rms_max_dbfs"])),
+            ("最小 RMS (dBFS)", lambda c: self._format_dbfs_cell(c["rms_min_dbfs"])),
+            ("平均 RMS (dBFS)", lambda c: self._format_dbfs_cell(c["rms_avg_dbfs"])),
+            ("平均电平 (样本均值)", lambda c: f"{c['mean']:.2f}"),
+            ("DC 偏移 (%)", lambda c: f"{c['dc_percent']:.3f}"),
+            ("峰 - RMS (dB)", lambda c: (
+                f"{c['dynamic_range_db']:.2f}" if math.isfinite(c["dynamic_range_db"]) else "—"
+            )),
+            ("RMS 分窗(帧)", lambda c: str(int(c.get("rms_window_frames", 0)))),
+            ("RMS 窗个数", lambda c: str(int(c.get("rms_window_count", 0)))),
+            ("本声道样本数", lambda c: str(int(c["n_frames"]))),
+        ]
+
+        fr = ttk.Frame(dlg)
+        fr.pack(fill="both", expand=True, padx=10, pady=6)
+        tree = ttk.Treeview(fr, columns=tuple(f"CH{i + 1}" for i in range(channels)), show="tree headings", height=18)
+        tree.heading("#0", text="指标")
+        tree.column("#0", width=220, anchor="w")
+        for i in range(channels):
+            cn = f"CH{i + 1}"
+            tree.heading(cn, text=cn)
+            tree.column(cn, width=100, anchor="e")
+
+        for label, getter in metric_rows:
+            vals = tuple(getter(per_ch[i]) for i in range(channels))
+            tree.insert("", tk.END, text=label, values=vals)
+
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        foot = ttk.Frame(dlg)
+        foot.pack(fill="x", padx=10, pady=(0, 10))
+
+        def copy_tsv():
+            lines = ["指标\t" + "\t".join(f"CH{i + 1}" for i in range(channels))]
+            for label, getter in metric_rows:
+                lines.append(label + "\t" + "\t".join(getter(per_ch[i]) for i in range(channels)))
+            text = "\n".join(lines)
+            try:
+                dlg.clipboard_clear()
+                dlg.clipboard_append(text)
+                dlg.update()
+            except Exception:
+                messagebox.showerror("复制失败", "无法写入剪贴板。", parent=dlg)
+                return
+
+        ttk.Label(
+            foot,
+            text="说明：dBFS 以满幅为 0 dB。总体 RMS 为整段均方根；最大/最小/平均 RMS 为约 10 ms 分窗统计。",
+            foreground="#666",
+            font=("Microsoft YaHei UI", 8),
+            wraplength=700,
+            justify=tk.LEFT,
+        ).pack(anchor="w", fill="x", pady=(0, 6))
+        btn_row = ttk.Frame(foot)
+        btn_row.pack(anchor="e", fill="x")
+        ttk.Button(btn_row, text="复制表格", command=copy_tsv).pack(side="right", padx=(0, 8))
+        ttk.Button(btn_row, text="关闭", command=dlg.destroy).pack(side="right")
+
+    def _draw_single_spectrum_on_canvas(self, canvas, spec, curve_color, subtitle="", db_min=None, db_max=None):
+        """在 Canvas 上绘制单条 dBFS~频率 频谱曲线（与气密频谱对比使用同一套 _compute_channel_spectrum 数据）。"""
+        canvas.delete("all")
+        w = max(400, canvas.winfo_width())
+        h = max(220, canvas.winfo_height())
+        left, right = 58, 20
+        top, bottom = 18, 36
+        pw = max(200, w - left - right)
+        ph = max(120, h - top - bottom)
+        if db_min is None:
+            db_min = -125.0
+        if db_max is None:
+            db_max = 0.0
+        db_min = float(db_min)
+        db_max = float(db_max)
+        if db_min >= db_max - 1e-6:
+            db_min = db_max - 10.0
+        db_min = max(-400.0, db_min)
+        db_max = min(6.0, max(db_min + 5.0, db_max))
+        span_db = max(1e-6, db_max - db_min)
+        sr = float(spec.get("sample_rate") or 1.0)
+        freq_max = max(1000.0, sr / 2.0)
+
+        major_hz = 500 if freq_max <= 10000 else 1000
+        minor_hz = max(100, major_hz // 2)
+        hz = 0
+        while hz <= int(freq_max):
+            x = left + (hz / freq_max) * pw
+            is_major = hz % major_hz == 0
+            canvas.create_line(x, top, x, top + ph, fill="#263626" if is_major else "#1b271b")
+            if is_major:
+                label = f"{int(hz)}" if hz < 1000 else f"{hz / 1000:.1f}k"
+                canvas.create_text(x, top + ph + 14, text=label, fill="#aeb8c2", font=("Arial", 8))
+            hz += minor_hz
+
+        step = 5
+        if span_db > 120:
+            step = 10
+        if span_db > 240:
+            step = 20
+        major_every = 20 if step >= 10 else 10
+        db_line = db_max
+        nlines = 0
+        while db_line >= db_min - step * 0.25 and nlines < 80:
+            y = top + ((db_max - db_line) / span_db) * ph
+            imaj = abs(int(round(db_line))) % major_every == 0
+            canvas.create_line(left, y, left + pw, y, fill="#263626" if imaj else "#1b271b")
+            canvas.create_text(left - 6, y, text=f"{int(round(db_line))}", fill="#aeb8c2", font=("Arial", 8), anchor="e")
+            db_line -= step
+            nlines += 1
+
+        canvas.create_rectangle(left, top, left + pw, top + ph, outline="#3a3a3a")
+        if subtitle:
+            canvas.create_text(left + 2, top - 4, text=subtitle, fill="#d8dde5", anchor="sw", font=("Arial", 10, "bold"))
+        canvas.create_text(left + pw - 2, top - 4, text="dBFS", fill="#d8dde5", anchor="se", font=("Arial", 9))
+        canvas.create_text(
+            left + 2, top + 10,
+            text=f"纵轴 {int(round(db_min))} ~ {int(round(db_max))} dBFS",
+            fill="#7a8490",
+            anchor="nw",
+            font=("Arial", 8),
+        )
+
+        pts = []
+        for f, d in zip(spec.get("freqs") or [], spec.get("dbs") or []):
+            if f <= 0 or f > freq_max:
+                continue
+            x = left + (f / freq_max) * pw
+            y = top + ((db_max - float(d)) / span_db) * ph
+            pts.extend((x, y))
+        if len(pts) >= 4:
+            canvas.create_line(*pts, fill=curve_color, width=1, smooth=False)
+
+        avg_db = self._compute_average_spectrum_db(spec, 0.0, freq_max)
+        if avg_db is not None:
+            canvas.create_text(
+                left + pw - 4, top + 12,
+                text=f"选段平均(全频): {avg_db:.2f} dB",
+                fill="#ffd166", anchor="ne", font=("Arial", 9, "bold"),
+            )
+
+    def _draw_multi_spectrum_on_canvas(self, canvas, series, db_min=None, db_max=None, title="全部通道叠加"):
+        """
+        series: [{"spec": spec_dict, "color": "#hex", "label": "CH1"}, ...]
+        多曲线同坐标叠加；为性能关闭 smooth。
+        """
+        canvas.delete("all")
+        w = max(400, canvas.winfo_width())
+        h = max(220, canvas.winfo_height())
+        left, right = 58, 20
+        top, bottom = 18, 36
+        pw = max(200, w - left - right)
+        ph = max(120, h - top - bottom)
+        if db_min is None:
+            db_min = -125.0
+        if db_max is None:
+            db_max = 0.0
+        db_min = float(db_min)
+        db_max = float(db_max)
+        if db_min >= db_max - 1e-6:
+            db_min = db_max - 10.0
+        db_min = max(-400.0, db_min)
+        db_max = min(6.0, max(db_min + 5.0, db_max))
+        span_db = max(1e-6, db_max - db_min)
+        sr = 1.0
+        for it in series:
+            s = it.get("spec") or {}
+            r = float(s.get("sample_rate") or 0)
+            if r > 0:
+                sr = max(sr, r)
+        freq_max = max(1000.0, sr / 2.0)
+
+        major_hz = 500 if freq_max <= 10000 else 1000
+        minor_hz = max(100, major_hz // 2)
+        hz = 0
+        while hz <= int(freq_max):
+            x = left + (hz / freq_max) * pw
+            is_major = hz % major_hz == 0
+            canvas.create_line(x, top, x, top + ph, fill="#263626" if is_major else "#1b271b")
+            if is_major:
+                label = f"{int(hz)}" if hz < 1000 else f"{hz / 1000:.1f}k"
+                canvas.create_text(x, top + ph + 14, text=label, fill="#aeb8c2", font=("Arial", 8))
+            hz += minor_hz
+
+        step = 5
+        if span_db > 120:
+            step = 10
+        if span_db > 240:
+            step = 20
+        major_every = 20 if step >= 10 else 10
+        db_line = db_max
+        nlines = 0
+        while db_line >= db_min - step * 0.25 and nlines < 80:
+            y = top + ((db_max - db_line) / span_db) * ph
+            imaj = abs(int(round(db_line))) % major_every == 0
+            canvas.create_line(left, y, left + pw, y, fill="#263626" if imaj else "#1b271b")
+            canvas.create_text(left - 6, y, text=f"{int(round(db_line))}", fill="#aeb8c2", font=("Arial", 8), anchor="e")
+            db_line -= step
+            nlines += 1
+
+        canvas.create_rectangle(left, top, left + pw, top + ph, outline="#3a3a3a")
+        if title:
+            canvas.create_text(left + 2, top - 4, text=title, fill="#d8dde5", anchor="sw", font=("Arial", 10, "bold"))
+        canvas.create_text(left + pw - 2, top - 4, text="dBFS", fill="#d8dde5", anchor="se", font=("Arial", 9))
+        canvas.create_text(
+            left + 2, top + 10,
+            text=f"纵轴 {int(round(db_min))} ~ {int(round(db_max))} dBFS",
+            fill="#7a8490",
+            anchor="nw",
+            font=("Arial", 8),
+        )
+
+        for it in series:
+            spec = it.get("spec") or {}
+            color = it.get("color") or "#3ECF8E"
+            pts = []
+            for f, d in zip(spec.get("freqs") or [], spec.get("dbs") or []):
+                if f <= 0 or f > freq_max:
+                    continue
+                x = left + (f / freq_max) * pw
+                y = top + ((db_max - float(d)) / span_db) * ph
+                pts.extend((x, y))
+            if len(pts) >= 4:
+                canvas.create_line(*pts, fill=color, width=1, smooth=False)
+
+        ly = top + ph - 6 - 14 * len(series)
+        for i, it in enumerate(series):
+            lab = it.get("label") or f"CH{i + 1}"
+            col = it.get("color") or "#ccc"
+            canvas.create_text(left + 6, ly + i * 14, text=lab, fill=col, anchor="w", font=("Arial", 9, "bold"))
+
+    def _clamp_spectrum_db_window(self, db_max, db_min, span_min=25.0, span_max=380.0):
+        """纵轴可视窗口：db_max 为上沿（较大）、db_min 为下沿（更负）。"""
+        sp = float(db_max) - float(db_min)
+        if sp < span_min:
+            sp = span_min
+            db_min = float(db_max) - sp
+        if sp > span_max:
+            sp = span_max
+            db_min = float(db_max) - sp
+        db_max = float(db_max)
+        db_min = float(db_min)
+        if db_max > 6.0:
+            sh = db_max - 6.0
+            db_max -= sh
+            db_min -= sh
+        if db_min < -400.0:
+            sh = -400.0 - db_min
+            db_max += sh
+            db_min += sh
+            if db_max > 6.0:
+                db_max = 6.0
+                db_min = db_max - sp
+        return db_max, db_min
+
+    def _bind_spectrum_db_axis_pan_zoom(self, canvas, view_state, redraw_cb, axis_x_max=72):
+        """
+        左侧 dB 刻度区：拖动平移纵轴可视范围；滚轮缩放；双击恢复 0～-125 dB。
+        刻度区显示手型光标；重绘用 after_idle 合并，拖动更跟手。
+        """
+        drag = {"on": False, "y0": 0.0, "db_max0": 0.0, "db_min0": -125.0}
+        pending = {"idle": False}
+        last_cursor = {"name": ""}
+
+        def is_axis(ex):
+            try:
+                return ex is not None and float(ex) < float(axis_x_max)
+            except Exception:
+                return False
+
+        def set_cursor(name):
+            if last_cursor["name"] == name:
+                return
+            last_cursor["name"] = name
+            try:
+                canvas.config(cursor=name)
+            except Exception:
+                pass
+
+        def flush_redraw():
+            pending["idle"] = False
+            redraw_cb()
+
+        def schedule_redraw():
+            if pending["idle"]:
+                return
+            pending["idle"] = True
+            canvas.after_idle(flush_redraw)
+
+        def on_motion_cursor(e):
+            if drag["on"]:
+                set_cursor("hand2")
+                return
+            set_cursor("hand2" if is_axis(e.x) else "")
+
+        def on_leave(_e):
+            if not drag["on"]:
+                set_cursor("")
+
+        def press(e):
+            if not is_axis(e.x):
+                drag["on"] = False
+                return
+            drag["on"] = True
+            set_cursor("hand2")
+            drag["y0"] = float(e.y)
+            drag["db_max0"] = float(view_state["db_max"])
+            drag["db_min0"] = float(view_state["db_min"])
+
+        def motion(e):
+            if not drag["on"]:
+                return
+            hh = max(220, canvas.winfo_height())
+            ph = max(120, hh - 18 - 36)
+            if ph < 1.0:
+                ph = 1.0
+            sp = drag["db_max0"] - drag["db_min0"]
+            if sp < 5.0:
+                sp = 125.0
+            dy = float(e.y) - drag["y0"]
+            delta_db = -dy * (sp / ph)
+            nmax = drag["db_max0"] + delta_db
+            nmin = drag["db_min0"] + delta_db
+            view_state["db_max"], view_state["db_min"] = self._clamp_spectrum_db_window(nmax, nmin)
+            schedule_redraw()
+
+        def release(e):
+            drag["on"] = False
+            try:
+                set_cursor("hand2" if is_axis(e.x) else "")
+            except Exception:
+                set_cursor("")
+
+        def dbl(e):
+            if is_axis(e.x):
+                drag["on"] = False
+                view_state["db_min"] = -125.0
+                view_state["db_max"] = 0.0
+                pending["idle"] = False
+                set_cursor("hand2" if is_axis(e.x) else "")
+                redraw_cb()
+
+        def wheel(e):
+            if not is_axis(e.x):
+                return
+            d = getattr(e, "delta", 0) or 0
+            cx = (float(view_state["db_max"]) + float(view_state["db_min"])) / 2.0
+            sp = max(1e-6, float(view_state["db_max"]) - float(view_state["db_min"]))
+            if d > 0:
+                nsp = sp * 0.9
+            else:
+                nsp = sp * 1.1
+            nsp = max(25.0, min(380.0, nsp))
+            nmax = cx + nsp / 2.0
+            nmin = cx - nsp / 2.0
+            view_state["db_max"], view_state["db_min"] = self._clamp_spectrum_db_window(nmax, nmin)
+            schedule_redraw()
+
+        canvas.bind("<Motion>", on_motion_cursor)
+        canvas.bind("<Leave>", on_leave)
+        canvas.bind("<Button-1>", press)
+        canvas.bind("<B1-Motion>", motion)
+        canvas.bind("<ButtonRelease-1>", release)
+        canvas.bind("<Double-Button-1>", dbl)
+        canvas.bind("<MouseWheel>", wheel)
+
+    def _show_waveform_frequency_analysis_dialog(
+        self, parent, wav_path, t0, t1, channels, sample_rate, used_full_file, base_name
+    ):
+        """波形查看器：对选区或整段做多声道频谱曲线（分通道标签页）；可与振幅统计等非独占弹窗同时打开。"""
+        dlg = tk.Toplevel(parent)
+        dlg.title(f"频率分析 — {base_name}")
+        dlg.geometry("920x680")
+        dlg.minsize(720, 520)
+        dlg.transient(parent)
+        try:
+            self._apply_window_icon(dlg)
+        except Exception:
+            pass
+
+        dur = max(0.0, t1 - t0)
+        head = (
+            f"分析范围: {t0:.4f} s – {t1:.4f} s（时长 {dur:.4f} s）"
+            + ("  ·  整段波形" if used_full_file else "  ·  当前选区")
+            + f"    |    {channels} ch, {int(sample_rate)} Hz    |    文件: {wav_path}"
+        )
+        ttk.Label(dlg, text=head, wraplength=880, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(10, 4))
+        ttk.Label(
+            dlg,
+            text="Welch + Hann、50% 重叠；纵轴 dBFS。左侧刻度区为手型时可拖动平移，滚轮缩放，双击刻度恢复 0～-125 dB。",
+            foreground="#666",
+            font=("Microsoft YaHei UI", 8),
+            wraplength=880,
+            justify=tk.LEFT,
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        loading_fr = ttk.Frame(body)
+        loading_fr.pack(fill="both", expand=True)
+        ttk.Label(loading_fr, text="正在并行计算各通道频谱，请稍候…", font=("Microsoft YaHei UI", 10)).pack(
+            expand=True, pady=40
+        )
+
+        foot = ttk.Frame(dlg)
+        foot.pack(fill="x", padx=10, pady=(0, 10))
+        foot_err = ttk.Frame(foot)
+        foot_err.pack(side="left", fill="x", expand=True)
+        colors = ("#3ECF8E", "#56B6F7", "#E5C07B", "#C678DD", "#E06C75", "#61AFEF")
+        alive = {"ok": True}
+
+        def _close_freq_dlg():
+            alive["ok"] = False
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _close_freq_dlg)
+        ttk.Button(foot, text="关闭", command=_close_freq_dlg).pack(side="right")
+
+        def _make_configure_handler(canvas_ref, redraw_fn):
+            cfg_id = {"id": None}
+
+            def on_cfg(_e):
+                if cfg_id["id"] is not None:
+                    try:
+                        canvas_ref.after_cancel(cfg_id["id"])
+                    except Exception:
+                        pass
+
+                def _fire():
+                    cfg_id["id"] = None
+                    redraw_fn()
+
+                cfg_id["id"] = canvas_ref.after(50, _fire)
+
+            return on_cfg
+
+        def build_notebook(specs, spec_errors):
+            if not alive["ok"]:
+                return
+            try:
+                loading_fr.destroy()
+            except Exception:
+                pass
+            for w in foot_err.winfo_children():
+                w.destroy()
+            err_line = "  |  ".join(
+                f"CH{i + 1}: {spec_errors[i]}" for i in range(channels) if spec_errors[i]
+            )
+            if err_line:
+                ttk.Label(foot_err, text=err_line, foreground="#a66", wraplength=860).pack(anchor="w")
+
+            nb = ttk.Notebook(body)
+            nb.pack(fill="both", expand=True)
+            tab_refreshers = []
+
+            tab_all = ttk.Frame(nb)
+            nb.add(tab_all, text="全部通道")
+            series_list = [
+                {"spec": specs[i], "color": colors[i % len(colors)], "label": f"CH{i + 1}"}
+                for i in range(channels)
+                if specs[i] is not None
+            ]
+            if not series_list:
+                ttk.Label(
+                    tab_all,
+                    text=err_line or "无可用频谱。",
+                    foreground="#c44",
+                    wraplength=800,
+                    justify=tk.LEFT,
+                ).pack(expand=True, padx=12, pady=12)
+                tab_refreshers.append(None)
+            else:
+                cv_all = tk.Canvas(tab_all, bg="#101216", highlightthickness=0)
+                cv_all.pack(fill="both", expand=True, padx=4, pady=4)
+                vs_all = {"db_min": -125.0, "db_max": 0.0}
+
+                def rerender_all(_evt=None):
+                    self._draw_multi_spectrum_on_canvas(
+                        cv_all, series_list, db_min=vs_all["db_min"], db_max=vs_all["db_max"], title="全部通道叠加"
+                    )
+
+                cv_all.bind("<Configure>", _make_configure_handler(cv_all, rerender_all))
+                self._bind_spectrum_db_axis_pan_zoom(cv_all, vs_all, rerender_all)
+                tab_refreshers.append(rerender_all)
+                dlg.after(100, rerender_all)
+
+            for ch in range(channels):
+                tab = ttk.Frame(nb)
+                nb.add(tab, text=f"CH{ch + 1}")
+                spec = specs[ch]
+                if spec is None:
+                    ttk.Label(
+                        tab,
+                        text=spec_errors[ch] or "频谱分析失败",
+                        foreground="#c44",
+                        wraplength=800,
+                        justify=tk.LEFT,
+                    ).pack(expand=True, padx=12, pady=12)
+                    tab_refreshers.append(None)
+                    continue
+                cv = tk.Canvas(tab, bg="#101216", highlightthickness=0)
+                cv.pack(fill="both", expand=True, padx=4, pady=4)
+                col = colors[ch % len(colors)]
+                lbl = f"CH{ch + 1} 频谱"
+                view_state = {"db_min": -125.0, "db_max": 0.0}
+
+                def make_render(canvas_ref, sp, lab, col_ref, vs):
+                    def _rerender(_evt=None):
+                        self._draw_single_spectrum_on_canvas(
+                            canvas_ref,
+                            sp,
+                            col_ref,
+                            subtitle=lab,
+                            db_min=vs["db_min"],
+                            db_max=vs["db_max"],
+                        )
+
+                    return _rerender
+
+                rerender = make_render(cv, spec, lbl, col, view_state)
+                cv.bind("<Configure>", _make_configure_handler(cv, rerender))
+                self._bind_spectrum_db_axis_pan_zoom(cv, view_state, lambda r=rerender: r())
+                tab_refreshers.append(rerender)
+                dlg.after(120 + ch * 30, rerender)
+
+            def on_nb_tab_changed(_evt=None):
+                try:
+                    idx = nb.index(nb.select())
+                except Exception:
+                    return
+                if not (0 <= idx < len(tab_refreshers)) or tab_refreshers[idx] is None:
+                    return
+
+                def redraw_visible():
+                    dlg.update_idletasks()
+                    tab_refreshers[idx]()
+
+                dlg.after(16, redraw_visible)
+
+            nb.bind("<<NotebookTabChanged>>", on_nb_tab_changed)
+
+        def _compute_one_ch(ch):
+            try:
+                return ch, self._compute_channel_spectrum(wav_path, ch, t0, t1), None
+            except Exception as e:
+                return ch, None, str(e)
+
+        def worker():
+            try:
+                nw = min(8, max(1, int(channels)))
+                with ThreadPoolExecutor(max_workers=nw) as ex:
+                    ordered = list(ex.map(_compute_one_ch, range(int(channels))))
+                if not alive["ok"]:
+                    return
+
+                def apply_ui():
+                    if not alive["ok"]:
+                        return
+                    specs = [None] * channels
+                    errs = [None] * channels
+                    for ch, sp, er in ordered:
+                        specs[ch] = sp
+                        errs[ch] = er
+                    build_notebook(specs, errs)
+
+                dlg.after(0, apply_ui)
+            except Exception as e:
+                if not alive["ok"]:
+                    return
+
+                def fail_ui():
+                    if not alive["ok"]:
+                        return
+                    try:
+                        loading_fr.destroy()
+                    except Exception:
+                        pass
+                    ttk.Label(body, text=f"频谱计算失败：{e}", foreground="#c44").pack(pady=24)
+
+                dlg.after(0, fail_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _guess_wave_params(self, file_path):
         """从文件名/界面参数推断通道数、采样率、位宽（用于损坏头修复）。"""
         channels = 4
@@ -2565,7 +3257,10 @@ class UIComponents:
             info += f"\n{playback_note}"
         ttk.Label(win, text=info, justify=tk.LEFT).pack(anchor="w", padx=10, pady=(8, 4))
         
-        hint_var = tk.StringVar(value="操作：鼠标左键拖动选择区间；单击设光标；右键清除选区；Ctrl + 滚轮缩放时间轴")
+        hint_var = tk.StringVar(
+            value="操作：左键拖动选择区间；单击设光标；右键清除选区；Ctrl+滚轮缩放；"
+            "「振幅统计」「频率分析」针对选区（无选区则用整段）"
+        )
         ttk.Label(win, textvariable=hint_var, foreground="#666").pack(anchor="w", padx=10, pady=(0, 4))
         
         # 操作条：缩放 / dB增益 / 播放控制（类似 Adobe 的常用操作）
@@ -2591,6 +3286,10 @@ class UIComponents:
         wave_pause_btn.pack(side="left", padx=2)
         wave_stop_btn = ttk.Button(toolbar, text="停止", width=6)
         wave_stop_btn.pack(side="left", padx=2)
+        wave_amp_stats_btn = ttk.Button(toolbar, text="振幅统计", width=9)
+        wave_amp_stats_btn.pack(side="left", padx=(12, 2))
+        wave_freq_btn = ttk.Button(toolbar, text="频率分析", width=9)
+        wave_freq_btn.pack(side="left", padx=2)
         
         canvas_wrap = ttk.Frame(win)
         canvas_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -2891,6 +3590,7 @@ class UIComponents:
             hint_var.set(
                 f"操作：左键拖动选区/单击设光标/右键清选区；Ctrl+滚轮缩放（当前 {state['zoom']:.2f}x）"
                 f"；振幅 {state['amp_scale']:.2f}x({state['amp_db']:+.1f}dB)；增益 {state['gain_db']:+.1f} dB"
+                f"；「振幅统计」「频率分析」按选区或整段"
             )
         
         def request_render(delay=1):
@@ -3372,6 +4072,71 @@ class UIComponents:
         wave_play_btn.config(command=play_audio)
         wave_pause_btn.config(command=pause_resume_audio)
         wave_stop_btn.config(command=stop_audio)
+
+        def show_amp_stats():
+            sel_s = state.get("sel_start_t")
+            sel_e = state.get("sel_end_t")
+            active = state.get("selection_active")
+            used_full = False
+            if (
+                active
+                and sel_s is not None
+                and sel_e is not None
+                and abs(sel_e - sel_s) >= 0.01
+            ):
+                t0, t1 = min(sel_s, sel_e), max(sel_s, sel_e)
+            else:
+                t0, t1 = 0.0, total_duration
+                used_full = True
+            f0 = max(0, int(math.floor(t0 * sample_rate)))
+            f1 = min(total_frames, int(math.ceil(t1 * sample_rate)))
+            if f1 <= f0:
+                f1 = min(total_frames, f0 + 1)
+            per_ch = self._compute_wave_segment_stats(
+                samples, channels, f0, f1, full_scale, sample_rate=sample_rate
+            )
+            if not per_ch:
+                messagebox.showwarning("振幅统计", "无法计算（无有效样本）。", parent=win)
+                return
+            self._show_waveform_amplitude_stats_dialog(
+                win, per_ch, channels, bits, t0, t1, sample_rate, used_full
+            )
+
+        wave_amp_stats_btn.config(command=show_amp_stats)
+
+        def show_freq_analysis():
+            sel_s = state.get("sel_start_t")
+            sel_e = state.get("sel_end_t")
+            active = state.get("selection_active")
+            used_full = False
+            if (
+                active
+                and sel_s is not None
+                and sel_e is not None
+                and abs(sel_e - sel_s) >= 0.01
+            ):
+                t0, t1 = min(sel_s, sel_e), max(sel_s, sel_e)
+            else:
+                t0, t1 = 0.0, total_duration
+                used_full = True
+            if not display_path or not os.path.isfile(display_path):
+                messagebox.showwarning("频率分析", "无法读取波形文件路径。", parent=win)
+                return
+            try:
+                self._show_waveform_frequency_analysis_dialog(
+                    win,
+                    display_path,
+                    t0,
+                    t1,
+                    channels,
+                    sample_rate,
+                    used_full,
+                    os.path.basename(file_path),
+                )
+            except Exception as e:
+                messagebox.showerror("频率分析", f"打开分析窗口失败：\n{e}", parent=win)
+
+        wave_freq_btn.config(command=show_freq_analysis)
         
         def _on_wave_win_close():
             stop_audio()
@@ -8918,17 +9683,28 @@ class UIComponents:
                 draw.text((x - 12, top + ph + 14), label, fill="#aeb8c2", font=font_axis)
             hz += minor_hz
 
-        db = int(db_max)
-        while db >= int(db_min):
-            y = top + ((db_max - db) / (db_max - db_min)) * ph
-            is_major = (db % 10 == 0)
-            draw.line((left, y, left + pw, y), fill="#263626" if is_major else "#1b271b", width=1)
-            draw.text((left - 34, y - 7), f"{db}", fill="#aeb8c2", font=font_axis)
-            db -= 5
+        span_db = max(1e-6, float(db_max) - float(db_min))
+        step = 5
+        if span_db > 120:
+            step = 10
+        if span_db > 240:
+            step = 20
+        major_every = 20 if step >= 10 else 10
+        db_line = float(db_max)
+        nlines = 0
+        while db_line >= float(db_min) - step * 0.25 and nlines < 80:
+            y = top + ((float(db_max) - db_line) / span_db) * ph
+            imaj = abs(int(round(db_line))) % major_every == 0
+            draw.line((left, y, left + pw, y), fill="#263626" if imaj else "#1b271b", width=1)
+            draw.text((left - 34, y - 7), f"{int(round(db_line))}", fill="#aeb8c2", font=font_axis)
+            db_line -= step
+            nlines += 1
 
         draw.rectangle((left, top, left + pw, top + ph), outline="#3a3a3a", width=1)
         draw.text((left + 2, top - 22), f"{ch_text} 频谱对比", fill="#d8dde5", font=font_title)
         draw.text((left + pw - 60, top - 22), "dBFS", fill="#d8dde5", font=font_axis)
+
+        span_png = span_db
 
         def _curve_points(spec):
             points = []
@@ -8936,7 +9712,7 @@ class UIComponents:
                 if f <= 0 or f > freq_max:
                     continue
                 x = left + (f / freq_max) * pw
-                y = top + ((db_max - max(db_min, min(db_max, d))) / (db_max - db_min)) * ph
+                y = top + ((float(db_max) - float(d)) / span_png) * ph
                 points.append((x, y))
             return points
 
@@ -9011,18 +9787,19 @@ class UIComponents:
         ttk.Label(win, textvariable=avg_db_var, anchor="w", foreground="#ffd166", font=("Arial", 10, "bold")).pack(fill="x", padx=10, pady=(0, 8))
 
         cache = {}
+        spec_view = {"db_min": -125.0, "db_max": 0.0}
 
         def _draw_curve(spec, color, left, top, width, height, freq_max, db_min, db_max):
+            span = max(1e-6, float(db_max) - float(db_min))
             pts = []
             for f, d in zip(spec["freqs"], spec["dbs"]):
                 if f <= 0 or f > freq_max:
                     continue
                 x = left + (f / freq_max) * width
-                y = top + ((db_max - max(db_min, min(db_max, d))) / (db_max - db_min)) * height
+                y = top + ((float(db_max) - float(d)) / span) * height
                 pts.extend((x, y))
             if len(pts) >= 4:
-                # 细线+轻微平滑插值，视觉更接近 Adobe
-                canvas.create_line(*pts, fill=color, width=1, smooth=True, splinesteps=8)
+                canvas.create_line(*pts, fill=color, width=1, smooth=False)
 
         def _parse_range(start_var, end_var, total_dur, name):
             try:
@@ -9056,10 +9833,22 @@ class UIComponents:
 
             key1 = (du_path, ch_idx, du_range[0], du_range[1])
             key2 = (open_path, ch_idx, open_range[0], open_range[1])
-            if key1 not in cache:
-                cache[key1] = self._compute_channel_spectrum(du_path, ch_idx, du_range[0], du_range[1])
-            if key2 not in cache:
-                cache[key2] = self._compute_channel_spectrum(open_path, ch_idx, open_range[0], open_range[1])
+            if key1 not in cache or key2 not in cache:
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    f1 = (
+                        ex.submit(self._compute_channel_spectrum, du_path, ch_idx, du_range[0], du_range[1])
+                        if key1 not in cache
+                        else None
+                    )
+                    f2 = (
+                        ex.submit(self._compute_channel_spectrum, open_path, ch_idx, open_range[0], open_range[1])
+                        if key2 not in cache
+                        else None
+                    )
+                    if f1 is not None:
+                        cache[key1] = f1.result()
+                    if f2 is not None:
+                        cache[key2] = f2.result()
             spec1 = cache[key1]
             spec2 = cache[key2]
             return ch_text, du_range, open_range, spec1, spec2
@@ -9078,7 +9867,13 @@ class UIComponents:
             top, bottom = 20, 42
             pw = max(200, w - left - right)
             ph = max(120, h - top - bottom)
-            db_min, db_max = -125.0, 0.0
+            db_min = float(spec_view["db_min"])
+            db_max = float(spec_view["db_max"])
+            db_min = max(-400.0, db_min)
+            db_max = min(6.0, max(db_min + 5.0, db_max))
+            spec_view["db_min"] = db_min
+            spec_view["db_max"] = db_max
+            span_db = max(1e-6, db_max - db_min)
             freq_max = min(spec1["sample_rate"], spec2["sample_rate"]) / 2.0
             freq_max = max(1000.0, freq_max)
 
@@ -9095,17 +9890,32 @@ class UIComponents:
                     canvas.create_text(x, top + ph + 16, text=label, fill="#aeb8c2", font=("Arial", 9))
                 hz += minor_hz
 
-            db = int(db_max)
-            while db >= int(db_min):
-                y = top + ((db_max - db) / (db_max - db_min)) * ph
-                is_major = (db % 10 == 0)
-                canvas.create_line(left, y, left + pw, y, fill="#263626" if is_major else "#1b271b")
-                canvas.create_text(left - 8, y, text=f"{db}", fill="#aeb8c2", font=("Arial", 9), anchor="e")
-                db -= 5
+            step = 5
+            if span_db > 120:
+                step = 10
+            if span_db > 240:
+                step = 20
+            major_every = 20 if step >= 10 else 10
+            db_line = db_max
+            nlines = 0
+            while db_line >= db_min - step * 0.25 and nlines < 80:
+                y = top + ((db_max - db_line) / span_db) * ph
+                imaj = abs(int(round(db_line))) % major_every == 0
+                canvas.create_line(left, y, left + pw, y, fill="#263626" if imaj else "#1b271b")
+                canvas.create_text(left - 8, y, text=f"{int(round(db_line))}", fill="#aeb8c2", font=("Arial", 9), anchor="e")
+                db_line -= step
+                nlines += 1
 
             canvas.create_rectangle(left, top, left + pw, top + ph, outline="#3a3a3a")
             canvas.create_text(left + 2, top - 6, text=f"{ch_text} 频谱对比", fill="#d8dde5", anchor="sw", font=("Arial", 10, "bold"))
             canvas.create_text(left + pw - 2, top - 6, text="dBFS", fill="#d8dde5", anchor="se", font=("Arial", 9))
+            canvas.create_text(
+                left + 2, top + 10,
+                text=f"纵轴 {int(round(db_min))} ~ {int(round(db_max))} dBFS · 左侧刻度拖动平移、滚轮缩放、双击恢复",
+                fill="#7a8490",
+                anchor="nw",
+                font=("Arial", 8),
+            )
 
             _draw_curve(spec1, "#ff4040", left, top, pw, ph, freq_max, db_min, db_max)
             _draw_curve(spec2, "#4aa3ff", left, top, pw, ph, freq_max, db_min, db_max)
@@ -9158,7 +9968,7 @@ class UIComponents:
                 ch_text, du_range, open_range, spec1, spec2 = _get_current_specs()
                 freq_max = min(spec1["sample_rate"], spec2["sample_rate"]) / 2.0
                 freq_max = max(1000.0, freq_max)
-                db_min, db_max = -125.0, 0.0
+                db_min, db_max = float(spec_view["db_min"]), float(spec_view["db_max"])
                 du_avg_db = self._compute_average_spectrum_db(spec1, 0.0, freq_max)
                 open_avg_db = self._compute_average_spectrum_db(spec2, 0.0, freq_max)
                 if du_avg_db is None or open_avg_db is None:
@@ -9195,8 +10005,24 @@ class UIComponents:
                 open_end_var.set(f"{s1:.2f}")
             render()
 
+        cfg_air = {"id": None}
+
+        def on_cfg_air(_e):
+            if cfg_air["id"] is not None:
+                try:
+                    canvas.after_cancel(cfg_air["id"])
+                except Exception:
+                    pass
+
+            def _fire():
+                cfg_air["id"] = None
+                render()
+
+            cfg_air["id"] = canvas.after(80, _fire)
+
         channel_combo.bind("<<ComboboxSelected>>", lambda _e: render())
-        canvas.bind("<Configure>", lambda _e: render())
+        canvas.bind("<Configure>", on_cfg_air)
+        self._bind_spectrum_db_axis_pan_zoom(canvas, spec_view, render, axis_x_max=78)
         ttk.Button(range_frame, text="应用选段", command=render).pack(side="left", padx=(6, 0))
         def _set_full_range():
             du_start_var.set("0.00")

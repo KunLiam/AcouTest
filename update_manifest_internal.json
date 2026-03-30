@@ -1,10 +1,10 @@
 {
-  "latest_version": "2.0.0",
+  "latest_version": "2.0.1",
   "publish_date": "2026-03-30",
   "notes": [
-    "自动更新可同时拉取 exe 与清单中的 AudioPlayer.apk 至 wakeup_count",
-    "已是最新版时「检查更新」可单独补下/覆盖 APK"
+    "波形：频率分析（全通道叠加 + 单 CH）、纵轴手型拖动/滚轮缩放；振幅统计增分窗 RMS，可与频率分析同开。",
+    "气密频谱对比：并行计算、纵轴与频率分析一致；导出随当前纵轴。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.0/AcouTest.v2.0.0.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.1/AcouTest.v2.0.1.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
 }
