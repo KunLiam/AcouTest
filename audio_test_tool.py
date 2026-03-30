@@ -130,6 +130,15 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         # 检查ADB设备
         self.refresh_devices()
 
+        # 定时后台刷新设备列表（换插 USB 后自动更新下拉框）；ACOUTEST_ADB_POLL_MS=0 可关闭
+        self._adb_device_poll_stop = False
+        try:
+            self._adb_device_poll_ms = int(os.environ.get("ACOUTEST_ADB_POLL_MS", "2500"))
+        except Exception:
+            self._adb_device_poll_ms = 2500
+        if self._adb_device_poll_ms > 0:
+            self._schedule_adb_device_autopoll()
+
         # 键盘挂载：当应用获得焦点时，用电脑键盘通过 ADB 给设备输入
         self._setup_keyboard_adb_input()
 
@@ -237,8 +246,32 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             who = ip or "unknown"
             self.control_api_conn_var.set(f"OpenClaw: 未连接 (最近 {who}, {int(delta)}s前, #{cnt})")
 
+    def _schedule_adb_device_autopoll(self):
+        """定时在后台执行 adb devices，主线程更新下拉框，避免阻塞 UI。"""
+        def tick():
+            if getattr(self, "_adb_device_poll_stop", False):
+                return
+            ms = getattr(self, "_adb_device_poll_ms", 0) or 0
+            if ms <= 0:
+                return
+            try:
+                self.refresh_devices_async()
+            except Exception:
+                pass
+            try:
+                self.root.after(ms, tick)
+            except Exception:
+                pass
+
+        ms = getattr(self, "_adb_device_poll_ms", 2500)
+        try:
+            self.root.after(ms, tick)
+        except Exception:
+            pass
+
     def _on_app_close(self):
         """应用关闭清理。"""
+        self._adb_device_poll_stop = True
         try:
             if getattr(self, "control_api", None):
                 self.control_api.stop()

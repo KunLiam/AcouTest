@@ -1,10 +1,9 @@
 {
-  "latest_version": "2.0.1",
+  "latest_version": "2.0.2",
   "publish_date": "2026-03-30",
   "notes": [
-    "波形：频率分析（全通道叠加 + 单 CH）、纵轴手型拖动/滚轮缩放；振幅统计增分窗 RMS，可与频率分析同开。",
-    "气密频谱对比：并行计算、纵轴与频率分析一致；导出随当前纵轴。"
+    "设备：主界面设备下拉默认定时后台刷新 adb 列表（换插 USB 约数秒内自动更新）；环境变量 ACOUTEST_ADB_POLL_MS=0 可关闭，默认 2500ms。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.1/AcouTest.v2.0.1.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.2/AcouTest.v2.0.2.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
 }

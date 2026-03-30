@@ -8,70 +8,129 @@ from tkinter import ttk, messagebox
 class DeviceOperations:
     def __init__(self, parent):
         self.parent = parent
-    
-    def refresh_devices(self):
-        """刷新设备列表"""
-        try:
-            result = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
-            
-            if result.returncode != 0:
-                self.device_combobox['values'] = []
-                self.device_var.set("")
-                self.selected_device = None
-                self.update_device_status_color("red")
-                self.root.after(0, lambda: self.device_status_var.set("ADB命令失败或无设备"))
-                return
-            
-            lines = result.stdout.strip().split('\n')
-            devices = []
-            online_devices = []
-            
-            for line in lines[1:]:
-                if line.strip() and '\t' in line:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        device_id = parts[0]
-                        status = parts[1]
-                        devices.append(device_id)
-                        if status == 'device':  # 只有状态为'device'的才是真正在线的设备
-                            online_devices.append(device_id)
-            
-            self.device_combobox['values'] = devices
-            
-            if online_devices:
-                # 如果有在线设备，优先保持当前选择（如果仍在线），否则选择第一个在线设备
-                current_selection = self.device_var.get()
-                if current_selection in online_devices:
-                    self.device_var.set(current_selection)
-                    self.selected_device = current_selection
-                else:
-                    self.device_var.set(online_devices[0])
-                    self.selected_device = online_devices[0]
-                
-                self.update_device_status_color("green")
-                self.root.after(0, lambda: self.device_status_var.set(f"已连接: {self.selected_device}"))
-            elif devices:
-                # 有设备但都不在线
-                self.device_var.set(devices[0])
-                self.selected_device = None
-                self.update_device_status_color("orange")
-                self.root.after(0, lambda: self.device_status_var.set(f"设备 {devices[0]} 离线/未授权"))
+        self._adb_devices_poll_lock = False
+
+    def _run_adb_devices(self):
+        """执行 adb devices（Windows 下无控制台闪窗）。"""
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            create_no_window = 0x08000000
+            return subprocess.run(
+                ["adb", "devices"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=create_no_window,
+                startupinfo=startupinfo,
+            )
+        return subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+
+    @staticmethod
+    def _parse_adb_devices_stdout(stdout):
+        devices = []
+        online_devices = []
+        lines = (stdout or "").strip().split("\n")
+        for line in lines[1:]:
+            if line.strip() and "\t" in line:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2:
+                    device_id = parts[0]
+                    status = parts[1]
+                    devices.append(device_id)
+                    if status == "device":
+                        online_devices.append(device_id)
+        return devices, online_devices
+
+    def _apply_parsed_device_list(self, devices, online_devices):
+        """在主线程根据解析结果更新下拉框与状态。"""
+        self.device_combobox["values"] = devices
+        if online_devices:
+            current_selection = self.device_var.get()
+            if current_selection in online_devices:
+                self.device_var.set(current_selection)
+                self.selected_device = current_selection
             else:
-                # 没有设备
-                self.device_var.set("")
-                self.selected_device = None
-                self.update_device_status_color("red")
-                self.root.after(0, lambda: self.device_status_var.set("未检测到设备"))
-            
-            print(f"刷新设备完成 - 在线设备: {online_devices}, 选中设备: {self.selected_device}")
-            
-        except Exception as e:
-            self.device_combobox['values'] = []
+                self.device_var.set(online_devices[0])
+                self.selected_device = online_devices[0]
+            self.update_device_status_color("green")
+            self.root.after(0, lambda: self.device_status_var.set(f"已连接: {self.selected_device}"))
+        elif devices:
+            self.device_var.set(devices[0])
+            self.selected_device = None
+            self.update_device_status_color("orange")
+            self.root.after(0, lambda d=devices[0]: self.device_status_var.set(f"设备 {d} 离线/未授权"))
+        else:
             self.device_var.set("")
             self.selected_device = None
             self.update_device_status_color("red")
-            self.root.after(0, lambda: self.device_status_var.set(f"刷新出错: {str(e)}"))
+            self.root.after(0, lambda: self.device_status_var.set("未检测到设备"))
+        print(f"刷新设备完成 - 在线设备: {online_devices}, 选中设备: {self.selected_device}")
+
+    def _clear_devices_ui(self, status_message):
+        self.device_combobox["values"] = []
+        self.device_var.set("")
+        self.selected_device = None
+        self.update_device_status_color("red")
+        self.root.after(0, lambda m=status_message: self.device_status_var.set(m))
+
+    def refresh_devices(self):
+        """刷新设备列表（同步，供按钮与 API 立即刷新）。"""
+        try:
+            result = self._run_adb_devices()
+            if result.returncode != 0:
+                self._clear_devices_ui("ADB命令失败或无设备")
+                return
+            devices, online_devices = self._parse_adb_devices_stdout(result.stdout)
+            self._apply_parsed_device_list(devices, online_devices)
+        except Exception as e:
+            self._clear_devices_ui(f"刷新出错: {str(e)}")
             print(f"刷新设备时出错: {str(e)}")
+
+    def refresh_devices_async(self):
+        """后台执行 adb devices，在主线程更新 UI；用于定时轮询，避免阻塞界面。"""
+        if getattr(self, "_adb_devices_poll_lock", False):
+            return
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+        try:
+            if not root.winfo_exists():
+                return
+        except Exception:
+            return
+        self._adb_devices_poll_lock = True
+
+        def work():
+            payload = None
+            try:
+                result = self._run_adb_devices()
+                payload = ("ok", result.returncode, result.stdout)
+            except Exception as e:
+                payload = ("ex", str(e))
+
+            def apply():
+                try:
+                    if payload[0] == "ex":
+                        self._clear_devices_ui(f"刷新出错: {payload[1]}")
+                        print(f"异步刷新设备出错: {payload[1]}")
+                    else:
+                        _, rc, out = payload
+                        if rc != 0:
+                            self._clear_devices_ui("ADB命令失败或无设备")
+                        else:
+                            d, o = self._parse_adb_devices_stdout(out)
+                            self._apply_parsed_device_list(d, o)
+                finally:
+                    self._adb_devices_poll_lock = False
+
+            try:
+                root.after(0, apply)
+            except Exception:
+                self._adb_devices_poll_lock = False
+
+        threading.Thread(target=work, daemon=True).start()
     
     def on_device_selected(self, event=None):
         """设备选择事件处理"""
