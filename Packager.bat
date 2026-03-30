@@ -52,7 +52,7 @@ set "VER="
 for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
 if "%VER%"=="" set "VER=1.0"
 set "EXE_NAME=AcouTest.v%VER%"
-:: 完整 exe 路径放入变量，配合延迟展开，避免复杂文件名在 if (...) 块内解析出错
+:: 完整 exe 路径放入变量，配合延迟展开，避免复杂文件名在 if 块内解析出错
 set "DIST_EXE=dist\%EXE_NAME%.exe"
 set "SPEC_FILE=%EXE_NAME%.spec"
 echo 当前版本: %VER% ，输出文件名: %EXE_NAME%.exe
@@ -94,76 +94,70 @@ echo [Packager] Running PyInstaller...
 if not exist "dist" mkdir "dist"
 
 :: 确保所有 Python 模块加入打包（--name 带版本号）
-:: --noupx：UPX 压缩 OpenSSL 的 libcrypto-3.dll 等易导致 onefile 解压失败（Failed to extract libcrypto-3.dll）
+REM noupx: avoid UPX on OpenSSL DLLs; may cause onefile extract errors for libcrypto-3.dll
 python -m PyInstaller --clean --noconsole --onefile --noupx --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^
     main.py
 
-:: 检查打包是否成功（使用 !DIST_EXE!，避免将来若改名含括号时破坏 if 块解析）
-if exist "!DIST_EXE!" (
-    echo 打包成功！执行文件已保存到 !DIST_EXE!
-    
-    echo 正在同步交付资源到 dist（默认跳过已存在且未变旧的文件，见脚本头部说明）...
-    
-    :: logo（与 exe 同级，供界面或文档引用）
-    if exist "logo\" (
-        echo 正在同步 logo...
-        robocopy "logo" "dist\logo" !ROBO_RES! >nul
-        if !errorlevel! GEQ 8 echo [警告] logo 同步可能不完整，请检查 robocopy 日志。
-    )
-    
-    :: 整棵 audio（扫频 elephant/custom、喇叭 speaker、震音 sound 等；不打进 onefile 以控制 exe 体积）
-    if exist "audio\" (
-        echo 正在同步 audio 目录...
-        robocopy "audio" "dist\audio" !ROBO_RES! >nul
-        if !errorlevel! GEQ 8 echo [警告] audio 同步可能不完整。
-    ) else (
-        echo [提示] 未找到 audio 目录，客户将无法使用默认扫频/喇叭等音频，请从源码目录保留 audio 后重新打包。
-    )
-    
-    :: 预建 output 子目录，便于客户一眼看到测试数据落盘位置（与 output_paths.py 一致）
-    echo 正在创建 dist\output 子目录...
-    mkdir "dist\output" 2>nul
-    :: 勿在 if 块内使用 for %%D in (a b c)，闭括号会提前结束外层 if（CMD 解析限制）
-    mkdir "dist\output\logcat" 2>nul
-    mkdir "dist\output\screenshots" 2>nul
-    mkdir "dist\output\mic_test" 2>nul
-    mkdir "dist\output\sweep_recordings" 2>nul
-    mkdir "dist\output\airtightness" 2>nul
-    mkdir "dist\output\loopback" 2>nul
-    mkdir "dist\output\hal_dump" 2>nul
-    mkdir "dist\output\hal_custom" 2>nul
-    python pack_dist_client_files.py 2>nul
-    if not exist "dist\output\README.txt" (
-        echo 声测大师^(AcouTest^) 测试数据目录> "dist\output\README.txt"
-        echo 程序运行后录音、日志、截图等默认保存在本目录各子文件夹中。>> "dist\output\README.txt"
-    )
+REM 不用巨型 if (...) 块，避免 CMD 在嵌套括号与 :: 注释下报 syntax incorrect
+if not exist "!DIST_EXE!" goto PACK_FAIL
 
-    :: elevoc_ukey（烧大象 key，与 exe 同级；不内置到 onefile）
-    if exist "elevoc_ukey\" (
-        echo 正在同步 elevoc_ukey...
-        robocopy "elevoc_ukey" "dist\elevoc_ukey" !ROBO_RES! >nul
-        if !errorlevel! GEQ 8 echo [警告] elevoc_ukey 同步可能不完整。
-    ) else (
-        echo [提示] 未找到 elevoc_ukey 目录，烧大象 key 功能将无法使用（若需要请保留该目录后重新打包）。
-    )
+echo 打包成功！执行文件已保存到 !DIST_EXE!
+echo 正在同步交付资源到 dist...
 
-    :: wakeup_count（唤醒率 100 条测试：art_100.txt + selected_100 等）
-    if exist "wakeup_count\" (
-        echo 正在同步 wakeup_count...
-        robocopy "wakeup_count" "dist\wakeup_count" !ROBO_RES! >nul
-        if !errorlevel! GEQ 8 echo [警告] wakeup_count 同步可能不完整。
-    ) else (
-        echo [提示] 未找到 wakeup_count 目录，唤醒率 100 条测试将无内置语料（若需要请保留该目录后重新打包）。
-    )
-    
-    :: 启动脚本由 pack_dist_client_files.py 生成，避免 if 块内 echo / 括号解析错误
-    
-    echo 完成！dist 目录已包含 exe、audio、output、elevoc_ukey（若有）、wakeup_count（若有）等，可直接打包 zip 发给客户。
+if exist "logo" (
+    echo 正在同步 logo...
+    robocopy "logo" "dist\logo" !ROBO_RES! >nul
+    if !errorlevel! GEQ 8 echo [警告] logo 同步可能不完整，请检查 robocopy 日志。
+)
+
+if exist "audio" (
+    echo 正在同步 audio 目录...
+    robocopy "audio" "dist\audio" !ROBO_RES! >nul
+    if !errorlevel! GEQ 8 echo [警告] audio 同步可能不完整。
 ) else (
-    echo 打包可能失败，未找到 !DIST_EXE!
-) 
+    echo [提示] 未找到 audio 目录，客户将无法使用默认扫频/喇叭等音频，请从源码目录保留 audio 后重新打包。
+)
 
+echo 正在创建 dist\output 子目录...
+mkdir "dist\output" 2>nul
+mkdir "dist\output\logcat" 2>nul
+mkdir "dist\output\screenshots" 2>nul
+mkdir "dist\output\mic_test" 2>nul
+mkdir "dist\output\sweep_recordings" 2>nul
+mkdir "dist\output\airtightness" 2>nul
+mkdir "dist\output\loopback" 2>nul
+mkdir "dist\output\hal_dump" 2>nul
+mkdir "dist\output\hal_custom" 2>nul
+python pack_dist_client_files.py 2>nul
+if not exist "dist\output\README.txt" (
+    echo 声测大师^(AcouTest^) 测试数据目录> "dist\output\README.txt"
+    echo 程序运行后录音、日志、截图等默认保存在本目录各子文件夹中。>> "dist\output\README.txt"
+)
+
+if exist "elevoc_ukey" (
+    echo 正在同步 elevoc_ukey...
+    robocopy "elevoc_ukey" "dist\elevoc_ukey" !ROBO_RES! >nul
+    if !errorlevel! GEQ 8 echo [警告] elevoc_ukey 同步可能不完整。
+) else (
+    echo [提示] 未找到 elevoc_ukey 目录，烧大象 key 功能将无法使用（若需要请保留该目录后重新打包）。
+)
+
+if exist "wakeup_count" (
+    echo 正在同步 wakeup_count...
+    robocopy "wakeup_count" "dist\wakeup_count" !ROBO_RES! >nul
+    if !errorlevel! GEQ 8 echo [警告] wakeup_count 同步可能不完整。
+) else (
+    echo [提示] 未找到 wakeup_count 目录，唤醒率 100 条测试将无内置语料（若需要请保留该目录后重新打包）。
+)
+
+echo 完成！dist 目录已包含 exe、audio、output、elevoc_ukey、wakeup_count等资源，可直接打包 zip 发给客户。
+goto PACK_END
+
+:PACK_FAIL
+echo 打包可能失败，未找到 !DIST_EXE!
+
+:PACK_END
 pause
