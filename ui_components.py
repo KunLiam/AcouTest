@@ -16,6 +16,7 @@ import shutil
 import shlex
 import cmath
 import datetime
+import json
 import sys
 import ctypes
 from ctypes import c_int, c_char_p, c_void_p, POINTER, c_char
@@ -98,6 +99,10 @@ class LogcatViewerWindow(tk.Toplevel):
     LEVEL_PRI = {"V": 0, "D": 1, "I": 2, "W": 3, "E": 4, "F": 5}
     MAX_ROWS = 8000
     MAX_PROCESS_PER_TICK = 300  # 每轮最多处理条数，避免界面卡顿
+    DEFAULT_ADB_FILTER_PRESETS = [
+        "*:V",
+        "audio_preprocess_speech:V elevoc_plugin:V ELEVOCLOG:V AWE_Plugin:V elevoc_verify_license:V audio_hw_hal_primary:V *:S",
+    ]
 
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -113,37 +118,294 @@ class LogcatViewerWindow(tk.Toplevel):
         self._total_count = 0
         self._displayed_count = 0
         self._after_id = None
+        self._adb_filter_presets = self._load_adb_filter_presets()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.focus_set()
 
+    def _get_adb_filter_preset_path(self):
+        try:
+            base_dir = self.app._get_runtime_base_dir()
+        except Exception:
+            base_dir = os.getcwd()
+        return os.path.join(base_dir, "logcat_filter_presets.json")
+
+    def _load_adb_filter_presets(self):
+        presets = list(self.DEFAULT_ADB_FILTER_PRESETS)
+        path = self._get_adb_filter_preset_path()
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                extra = data.get("adb_filter_presets", []) if isinstance(data, dict) else []
+                for item in extra:
+                    s = str(item or "").strip()
+                    if s and s not in presets:
+                        presets.append(s)
+        except Exception:
+            pass
+        return presets
+
+    def _save_adb_filter_presets(self):
+        path = self._get_adb_filter_preset_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"adb_filter_presets": self._adb_filter_presets}, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _split_filter_tokens(text):
+        raw = str(text or "").strip()
+        if not raw:
+            return []
+        return [x.strip().lower() for x in re.split(r"[\s,|;]+", raw) if x.strip()]
+
+    def _apply_selected_adb_filter_preset(self, _evt=None):
+        try:
+            preset = (self._adb_preset_var.get() or "").strip()
+        except Exception:
+            preset = ""
+        if preset:
+            self._adb_filter_var.set(preset)
+            self._update_filter_summary()
+            if self._process is not None and self._process.poll() is None:
+                self._restart_viewer_with_new_filter()
+
+    def _add_current_adb_filter_preset(self):
+        preset = (self._adb_filter_var.get() or "").strip()
+        if not preset:
+            return
+        if preset not in self._adb_filter_presets:
+            self._adb_filter_presets.append(preset)
+            try:
+                self._adb_preset_combo["values"] = self._adb_filter_presets
+            except Exception:
+                pass
+            self._save_adb_filter_presets()
+        try:
+            self._adb_preset_var.set(preset)
+        except Exception:
+            pass
+        self._update_filter_summary()
+
+    def _restart_viewer_with_new_filter(self):
+        """实时查看运行中时，变更 ADB 过滤后自动重启进程使其立即生效。"""
+        try:
+            self._stop_viewer()
+            self.after(80, self._start)
+        except Exception:
+            pass
+
+    def _update_filter_summary(self, *_args):
+        """在工具栏下方显示完整过滤内容，避免长字符串被输入框遮挡。"""
+        try:
+            kw = (self._filter_var.get() or "").strip()
+        except Exception:
+            kw = ""
+        try:
+            adbf = (self._adb_filter_var.get() or "").strip()
+        except Exception:
+            adbf = ""
+        text = f"关键字: {kw or '（无）'}    |    ADB过滤: {adbf or '*:V'}"
+        try:
+            self._filter_summary_var.set(text)
+        except Exception:
+            pass
+
+    def _copy_selected_rows(self, _evt=None):
+        """复制 Treeview 当前选中的多行内容到剪贴板。"""
+        try:
+            items = self._tree.selection()
+        except Exception:
+            items = ()
+        if not items:
+            return "break"
+        lines = []
+        for item in items:
+            try:
+                vals = self._tree.item(item, "values") or ()
+            except Exception:
+                vals = ()
+            if vals:
+                lines.append("\t".join(str(v) for v in vals))
+        if not lines:
+            return "break"
+        try:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(lines))
+            self.update()
+        except Exception:
+            pass
+        return "break"
+
+    def _set_live_state_text(self):
+        try:
+            filter_spec = (self._adb_filter_var.get() or "").strip() or "*:V"
+            self._set_live_state_text()
+        except Exception:
+            pass
+
+    def _freeze_browse(self):
+        """定住当前显示，允许滚动查看旧日志；后台新日志继续进队列。"""
+        if self._paused:
+            return
+        self._paused = True
+        try:
+            self._pause_btn.config(text="继续")
+            self._state_var.set("已定住浏览（按 Enter 恢复实时更新）")
+        except Exception:
+            pass
+
+    def _resume_live_updates(self, _evt=None):
+        """按 Enter 恢复实时更新，并滚到最新日志。"""
+        if not self._paused:
+            return "break"
+        self._paused = False
+        try:
+            self._pause_btn.config(text="暂停")
+            self._set_live_state_text()
+            children = self._tree.get_children()
+            if children and self._auto_scroll_var.get():
+                self._tree.see(children[-1])
+        except Exception:
+            pass
+        return "break"
+
+    def _tree_drag_select_start(self, event):
+        """开始鼠标拖拽跨行选中，同时定住浏览。"""
+        try:
+            item = self._tree.identify_row(event.y)
+        except Exception:
+            item = ""
+        self._drag_select_anchor = item or ""
+        if item:
+            self._freeze_browse()
+            try:
+                self._tree.selection_set(item)
+                self._tree.focus(item)
+                self._tree.focus_set()
+            except Exception:
+                pass
+        return "break"
+
+    def _tree_drag_select_motion(self, event):
+        """拖拽时扩展选区到当前所在行。"""
+        anchor = getattr(self, "_drag_select_anchor", "") or ""
+        if not anchor:
+            return "break"
+        try:
+            item = self._tree.identify_row(event.y)
+        except Exception:
+            item = ""
+        if not item:
+            return "break"
+        try:
+            children = list(self._tree.get_children(""))
+            a = children.index(anchor)
+            b = children.index(item)
+            lo, hi = (a, b) if a <= b else (b, a)
+            self._tree.selection_set(children[lo:hi + 1])
+            self._tree.focus(item)
+            self._tree.see(item)
+        except Exception:
+            pass
+        return "break"
+
+    def _tree_drag_select_end(self, _event=None):
+        self._drag_select_anchor = ""
+        return "break"
+
+    def _show_tree_context_menu(self, event):
+        """右键菜单：复制选中行。"""
+        try:
+            item = self._tree.identify_row(event.y)
+        except Exception:
+            item = ""
+        if item and item not in self._tree.selection():
+            try:
+                self._tree.selection_set(item)
+                self._tree.focus(item)
+                self._tree.focus_set()
+            except Exception:
+                pass
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制选中行", command=self._copy_selected_rows)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
     def _build_ui(self):
         # 工具栏
         toolbar = ttk.Frame(self, padding=5)
         toolbar.pack(fill="x")
+        row1 = ttk.Frame(toolbar)
+        row1.pack(fill="x", pady=(0, 4))
+        row2 = ttk.Frame(toolbar)
+        row2.pack(fill="x", pady=(0, 4))
 
-        ttk.Label(toolbar, text="Filter:").pack(side="left", padx=(0, 4))
+        ttk.Label(row1, text="关键字:").pack(side="left", padx=(0, 4))
         self._filter_var = tk.StringVar()
-        ttk.Entry(toolbar, textvariable=self._filter_var, width=18).pack(side="left", padx=(0, 8))
+        ttk.Entry(row1, textvariable=self._filter_var, width=36).pack(side="left", padx=(0, 8), fill="x", expand=True)
 
-        ttk.Label(toolbar, text="级别:").pack(side="left", padx=(0, 4))
+        ttk.Label(row2, text="ADB过滤:").pack(side="left", padx=(0, 4))
+        init_filter = ""
+        try:
+            init_filter = (getattr(self.app, "logcat_filter_var", None) and self.app.logcat_filter_var.get()) or "*:V"
+        except Exception:
+            init_filter = "*:V"
+        self._adb_filter_var = tk.StringVar(value=init_filter or "*:V")
+        ttk.Entry(row2, textvariable=self._adb_filter_var, width=48).pack(side="left", padx=(0, 8), fill="x", expand=True)
+        ttk.Label(row2, text="预设:").pack(side="left", padx=(0, 4))
+        self._adb_preset_var = tk.StringVar()
+        self._adb_preset_combo = ttk.Combobox(
+            row2,
+            textvariable=self._adb_preset_var,
+            values=self._adb_filter_presets,
+            width=28,
+            state="readonly",
+        )
+        self._adb_preset_combo.pack(side="left", padx=(0, 6))
+        self._adb_preset_combo.bind("<<ComboboxSelected>>", self._apply_selected_adb_filter_preset)
+        ttk.Button(row2, text="保存预设", width=8, command=self._add_current_adb_filter_preset).pack(side="left", padx=(0, 8))
+
+        ttk.Label(row1, text="级别:").pack(side="left", padx=(0, 4))
         self._level_var = tk.StringVar(value="V")
-        level_combo = ttk.Combobox(toolbar, textvariable=self._level_var, values=["V", "D", "I", "W", "E", "F"], width=6, state="readonly")
+        level_combo = ttk.Combobox(row1, textvariable=self._level_var, values=["V", "D", "I", "W", "E", "F"], width=6, state="readonly")
         level_combo.pack(side="left", padx=(0, 8))
 
         self._auto_scroll_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text="自动滚动", variable=self._auto_scroll_var).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(row1, text="自动滚动", variable=self._auto_scroll_var).pack(side="left", padx=(0, 8))
 
-        self._pause_btn = ttk.Button(toolbar, text="暂停", width=6, command=self._toggle_pause)
+        self._show_pkg_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row1, text="显示包名", variable=self._show_pkg_var, command=lambda: _resize_logcat_message_col()).pack(side="left", padx=(0, 8))
+
+        self._pause_btn = ttk.Button(row1, text="暂停", width=6, command=self._toggle_pause)
         self._pause_btn.pack(side="left", padx=(0, 8))
 
-        ttk.Button(toolbar, text="清空", width=6, command=self._clear).pack(side="left", padx=(0, 8))
+        ttk.Button(row1, text="清空", width=6, command=self._clear).pack(side="left", padx=(0, 8))
 
-        self._start_btn = ttk.Button(toolbar, text="开始查看", width=8, command=self._start)
+        self._start_btn = ttk.Button(row1, text="开始查看", width=9, command=self._start)
         self._start_btn.pack(side="left", padx=(0, 6))
-        self._stop_btn = ttk.Button(toolbar, text="停止查看", width=8, command=self._stop_viewer, state="disabled")
+        self._stop_btn = ttk.Button(row1, text="停止查看", width=9, command=self._stop_viewer, state="disabled")
         self._stop_btn.pack(side="left")
+
+        self._filter_summary_var = tk.StringVar()
+        ttk.Label(
+            toolbar,
+            textvariable=self._filter_summary_var,
+            style="Muted.TLabel",
+            wraplength=960,
+            justify=tk.LEFT,
+        ).pack(fill="x", anchor="w", pady=(0, 2))
+        self._filter_var.trace_add("write", self._update_filter_summary)
+        self._adb_filter_var.trace_add("write", self._update_filter_summary)
+        self._update_filter_summary()
 
         # 表格区域
         table_frame = ttk.Frame(self, padding=5)
@@ -154,13 +416,73 @@ class LogcatViewerWindow(tk.Toplevel):
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self._tree.xview)
         self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        col_widths = {
+            "时间": 125,
+            "PID": 52,
+            "TID": 52,
+            "级别": 46,
+            "标签": 160,
+            "包名": 130,
+            "消息": 620,
+        }
         for col in columns:
             self._tree.heading(col, text=col)
-            self._tree.column(col, width=140 if col == "时间" else (60 if col in ("PID", "TID", "级别") else (100 if col in ("标签", "包名") else 400)))
-        self._tree.column("消息", width=400)
+            self._tree.column(
+                col,
+                width=col_widths.get(col, 100),
+                minwidth=col_widths.get(col, 100),
+                stretch=(col == "消息"),
+                anchor="w" if col in ("标签", "包名", "消息") else "center",
+            )
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
         self._tree.pack(side="left", fill="both", expand=True)
+
+        def _resize_logcat_message_col(_evt=None):
+            try:
+                total_w = max(700, table_frame.winfo_width() - 18)
+                pkg_w = col_widths["包名"] if self._show_pkg_var.get() else 0
+                self._tree.column(
+                    "包名",
+                    width=pkg_w,
+                    minwidth=pkg_w,
+                    stretch=False,
+                    anchor="w",
+                )
+                fixed_no_msg = (
+                    col_widths["时间"]
+                    + col_widths["PID"]
+                    + col_widths["TID"]
+                    + col_widths["级别"]
+                )
+                flexible_total = max(420, total_w - fixed_no_msg)
+                tag_w = max(130, min(240, int(flexible_total * 0.20)))
+                remaining = max(320, flexible_total - tag_w - pkg_w)
+                self._tree.column("标签", width=tag_w, minwidth=130, stretch=False, anchor="w")
+                fixed = (
+                    col_widths["时间"]
+                    + col_widths["PID"]
+                    + col_widths["TID"]
+                    + col_widths["级别"]
+                    + tag_w
+                    + pkg_w
+                )
+                msg_w = max(320, total_w - fixed, remaining)
+                self._tree.column("消息", width=msg_w, minwidth=320, stretch=True, anchor="w")
+            except Exception:
+                pass
+
+        table_frame.bind("<Configure>", _resize_logcat_message_col)
+        self.bind("<Control-c>", self._copy_selected_rows)
+        self.bind("<Control-C>", self._copy_selected_rows)
+        self.bind("<Return>", self._resume_live_updates)
+        self._tree.bind("<Control-c>", self._copy_selected_rows)
+        self._tree.bind("<Control-C>", self._copy_selected_rows)
+        self._tree.bind("<Return>", self._resume_live_updates)
+        self._tree.bind("<Button-1>", self._tree_drag_select_start)
+        self._tree.bind("<B1-Motion>", self._tree_drag_select_motion)
+        self._tree.bind("<ButtonRelease-1>", self._tree_drag_select_end)
+        self._tree.bind("<Button-3>", self._show_tree_context_menu)
 
         self._tree.tag_configure("level_v", foreground="#666666")
         self._tree.tag_configure("level_d", foreground="#0066cc")
@@ -174,7 +496,7 @@ class LogcatViewerWindow(tk.Toplevel):
         status_frame.pack(fill="x")
         self._total_var = tk.StringVar(value="总计:0")
         self._displayed_var = tk.StringVar(value="显示:0")
-        self._state_var = tk.StringVar(value="已停止（点击「开始查看」可实时刷新）")
+        self._state_var = tk.StringVar(value="已停止（点击「开始查看」可实时输出）")
         ttk.Label(status_frame, textvariable=self._total_var).pack(side="left", padx=(0, 16))
         ttk.Label(status_frame, textvariable=self._displayed_var).pack(side="left", padx=(0, 16))
         ttk.Label(status_frame, textvariable=self._state_var).pack(side="left")
@@ -251,6 +573,13 @@ class LogcatViewerWindow(tk.Toplevel):
     def _toggle_pause(self):
         self._paused = not self._paused
         self._pause_btn.config(text="继续" if self._paused else "暂停")
+        if self._paused:
+            try:
+                self._state_var.set("已定住浏览（按 Enter 恢复实时更新）")
+            except Exception:
+                pass
+        else:
+            self._set_live_state_text()
 
     def _on_close(self):
         self._stop_viewer()
@@ -265,19 +594,26 @@ class LogcatViewerWindow(tk.Toplevel):
             # 安全获取设备 ID，不依赖 check_device_selected 的弹窗（避免被主窗口挡住）
             device_var = getattr(self.app, "device_var", None)
             device_id = (device_var.get().strip() if device_var else "") or ""
+            filter_spec = (self._adb_filter_var.get() or "").strip() or "*:V"
             argv = ["adb"]
             if device_id:
                 argv.extend(["-s", device_id])
-            argv.extend(["logcat", "-v", "threadtime", "*:V"])
+            argv.extend(["logcat", "-v", "threadtime", filter_spec])
             kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True, "bufsize": 1}
-            # Windows 下用 shell 启动，避免 adb 子进程被立即关闭
             if platform.system() == "Windows":
-                cmd_str = subprocess.list2cmdline(argv)
-                kwargs["shell"] = True
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                self._process = subprocess.Popen(cmd_str, **kwargs)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                kwargs["startupinfo"] = startupinfo
+                kwargs["shell"] = False
+                kwargs["encoding"] = "utf-8"
+                kwargs["errors"] = "replace"
+                self._process = subprocess.Popen(argv, **kwargs)
             else:
                 kwargs["shell"] = False
+                kwargs["encoding"] = "utf-8"
+                kwargs["errors"] = "replace"
                 self._process = subprocess.Popen(argv, **kwargs)
             time.sleep(0.3)
             if self._process.poll() is not None:
@@ -289,7 +625,8 @@ class LogcatViewerWindow(tk.Toplevel):
             self._queue = queue.Queue()
             self._start_btn.config(state="disabled")
             self._stop_btn.config(state="normal")
-            self._state_var.set("运行中")
+            keyword_text = (self._filter_var.get() or "").strip() or "（无）"
+            self._state_var.set(f"运行中 | 关键字: {keyword_text} | ADB过滤: {filter_spec}")
             threading.Thread(target=self._read_thread, daemon=True).start()
             self._schedule_process()
         except FileNotFoundError:
@@ -310,7 +647,7 @@ class LogcatViewerWindow(tk.Toplevel):
             self._process = None
         self._start_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
-        self._state_var.set("已停止（点击「开始查看」可实时刷新）")
+        self._state_var.set("已停止（点击「开始查看」可实时输出）")
         self._paused = False
         self._pause_btn.config(text="暂停")
 
@@ -344,7 +681,7 @@ class LogcatViewerWindow(tk.Toplevel):
         self._stop = True
         self._start_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
-        self._state_var.set("已停止（点击「开始查看」可实时刷新）")
+        self._state_var.set("已停止（点击「开始查看」可实时输出）")
         # 若非用户点击停止且进程异常退出，提示可能原因
         code = getattr(self, "_reader_exit_code", None)
         if code is not None and code != 0 and self.winfo_exists():
@@ -366,7 +703,11 @@ class LogcatViewerWindow(tk.Toplevel):
             self._after_id = self.after(80, self._schedule_process)
 
     def _process_queue(self):
-        keyword = (self._filter_var.get() or "").strip().lower()
+        if self._paused:
+            self._total_var.set(f"总计:{self._total_count}")
+            self._displayed_var.set(f"显示:{self._displayed_count}")
+            return
+        keywords = self._split_filter_tokens(self._filter_var.get())
         level_sel = (self._level_var.get() or "V").upper()
         level_pri = self._level_priority(level_sel)
         processed = 0
@@ -376,18 +717,17 @@ class LogcatViewerWindow(tk.Toplevel):
                     line = self._queue.get_nowait()
                 except queue.Empty:
                     break
+                processed += 1
                 self._total_count += 1
                 time_str, pid, tid, level, tag, pkg, msg = self._parse_threadtime(line)
-                if keyword and keyword not in (time_str + pid + tid + level + tag + pkg + msg).lower():
+                haystack = (time_str + pid + tid + level + tag + pkg + msg).lower()
+                if keywords and not any(k in haystack for k in keywords):
                     continue
                 if self._level_priority(level) < level_pri:
-                    continue
-                if self._paused:
                     continue
                 self._displayed_count += 1
                 tag_name = f"level_{level.lower()}" if level.lower() in "vdiwef" else "level_i"
                 self._tree.insert("", "end", values=(time_str, pid, tid, level, tag, pkg, msg), tags=(tag_name,))
-                processed += 1
             # 超出最大行数时批量删除旧行，保证持续实时刷新
             children = self._tree.get_children()
             if len(children) > self.MAX_ROWS:
@@ -5815,7 +6155,7 @@ class UIComponents:
             text="实时logcat",
             command=self.open_logcat_viewer_window,
             style="Small.TButton",
-            width=11,
+            width=9,
         )
         open_viewer_button.grid(row=0, column=2, padx=(0, 6), pady=(0, 4), sticky="w")
 
@@ -5857,7 +6197,11 @@ class UIComponents:
         """打开独立弹窗「日志查看器 (Logcat Viewer)」"""
         root = getattr(self, "root", None) or getattr(self, "parent", None)
         if root and root.winfo_exists():
-            LogcatViewerWindow(root, self)
+            win = LogcatViewerWindow(root, self)
+            try:
+                win.after(80, win._start)
+            except Exception:
+                pass
 
     def setup_hotword_monitor_tab(self, parent):
         """唤醒监测：过滤 logcat 中 Detected hotword，统计唤醒次数，支持重置"""
@@ -5979,10 +6323,10 @@ class UIComponents:
         self.hotword_monitor_thread = None
         self._hotword_log_max_lines = 200
         self._hotword_last_detected_time = 0.0  # 用于同一唤醒只计一次（去重时间窗）
-        self._hotword_debounce_seconds = 1.5   # 此时间内只计 1 次
+        self._hotword_debounce_seconds = 2.5   # 一次唤醒常会打多条相近日志，放宽一些可避免重复计数
 
     def start_hotword_monitor(self, keep_state=False):
-        """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，只统计「Detected hotword」一次/唤醒。
+        """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，A/B 两类唤醒日志统一按一次唤醒记 1 次。
         keep_state=True 时不清零唤醒次数、不清空日志（用于 100 条测试的「继续测试」）。"""
         if not self.check_device_selected():
             # 明确提示用户，避免“点了没反应”的困惑
@@ -6885,7 +7229,7 @@ class UIComponents:
             messagebox.showerror("保存失败", str(e))
 
     def _read_hotword_logcat(self):
-        """B款: 仅监测 Detected hotword，每条计 1 次（时间窗去重）；A款: 仅监测 LIBAS_HOTWORD_DETECTION_RECEIVED，每条计 0.5（每唤醒 2 条，显示数量除以 2）"""
+        """A/B 两类唤醒日志统一按时间窗去重：一次唤醒只计 1 次，避免同次唤醒多条日志重复加数。"""
         keyword_b = "Detected hotword"
         keyword_a = "LIBAS_HOTWORD_DETECTION_RECEIVED"
         root = getattr(self, "root", None) or getattr(self, "parent", None)
@@ -6951,16 +7295,11 @@ class UIComponents:
                 now = time.time()
                 if now - getattr(self, "_hotword_monitor_start_time", 0) < 1.0:
                     continue
-                if is_b:
-                    # B款: 每条计 1，时间窗去重
-                    debounce = getattr(self, "_hotword_debounce_seconds", 1.5)
-                    if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
-                        continue
-                    self._hotword_last_detected_time = now
-                    self.hotword_count += 1.0
-                else:
-                    # A款: 每条计 0.5（每次唤醒 2 条，显示数量除以 2）
-                    self.hotword_count += 0.5
+                debounce = getattr(self, "_hotword_debounce_seconds", 2.5)
+                if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
+                    continue
+                self._hotword_last_detected_time = now
+                self.hotword_count += 1.0
                 # 仅当“第 N 次”的 N 真正增加时追加一行，避免 A 款一次唤醒两条 log 打两行
                 current_n = int(round(self.hotword_count))
                 last_appended = getattr(self, "_hotword_last_appended_count", 0)
@@ -7073,6 +7412,8 @@ class UIComponents:
             ("tinymix", "tinymix"),
             ("getprop", "getprop"),
             ("getprop ro.build.fingerprint", "getprop ro.build.fingerprint"),
+            ("reboot update", "reboot update"),
+            ("reboot", "reboot"),
             ("dumpsys input", "dumpsys input"),
             ("Bootloader 解锁 + root/remount", None),
         ]
@@ -7082,11 +7423,16 @@ class UIComponents:
             if cmd is None:
                 b = ttk.Button(btns, text=label, style="Small.TButton", command=self.open_device_unlock_window)
             else:
+                direct_run = cmd in ("reboot update", "reboot")
                 b = ttk.Button(
                     btns,
                     text=label,
                     style="Small.TButton",
-                    command=lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd),
+                    command=(
+                        (lambda _cmd=cmd: self._syscmd_run_one(_cmd))
+                        if direct_run
+                        else (lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd))
+                    ),
                 )
             b.grid(row=r, column=c, sticky="ew", pady=4)
             btns.grid_columnconfigure(c, weight=1)
@@ -7279,7 +7625,6 @@ class UIComponents:
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("执行失败", str(e)))
                 return
-            self.root.after(0, lambda: messagebox.showinfo("已执行", f"指令已发送：{cmd[:50]}{'...' if len(cmd) > 50 else ''}"))
 
         threading.Thread(target=_run, daemon=True).start()
 
