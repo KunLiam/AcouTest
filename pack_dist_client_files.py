@@ -29,6 +29,13 @@ def main() -> None:
     root = Path(__file__).resolve().parent
     ver = getattr(feature_config, "APP_VERSION", "1.0")
     exe_name = f"AcouTest.v{ver}.exe"
+    dist = root / "dist"
+    onedir_folder = dist / Path(exe_name).stem
+    exe_onedir = onedir_folder / exe_name
+    if exe_onedir.is_file():
+        launch_rel = f"{onedir_folder.name}\\{exe_name}"
+    else:
+        launch_rel = exe_name
 
     out_readme = root / "dist" / "output" / "README.txt"
     out_readme.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +47,7 @@ def main() -> None:
         "chcp 65001 > nul",
         'cd /d "%~dp0"',
         "echo 正在启动声测大师(AcouTest)...",
-        f'start "" "{exe_name}"',
+        f'start "" "{launch_rel}"',
     ]
     bat_body = "\r\n".join(lines) + "\r\n"
     try:

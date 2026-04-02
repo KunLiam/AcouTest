@@ -30,12 +30,12 @@
 - **气密性测试**
   - 功能用途：对比堵mic与不堵mic两种状态，评估声学密封效果。
   - 测试流程：开始后先选择“堵mic/不堵mic”，按提示完成双阶段测试；文件自动区分命名保存。
-  - 可配置项：**录制设置**（设备/卡号/通道/采样率/位深）、录制时长、**媒体音量档位**、保存路径。播放固定为 APK 内气密音轨（须 `USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER=True`），无 tinyplay/播放文件选择。
+  - 可配置项：**录制设置**（设备/卡号/通道/采样率/位深）、录制时长、**媒体音量档位**、保存路径。播放固定为 APK 内气密音轨（须 `USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER=True`），无 tinyplay/播放文件选择。开始测试前会检查设备是否已安装 `com.player.demo`，未安装则用 `wakeup_count/AudioPlayer.apk` 自动安装（与唤醒监测一致）。
   - 对比分析：支持按通道频谱对比、按选段分析、平均 dB 对比；支持从波形窗口框选后自动回填选段。
   - 手动导入：支持手动指定堵mic与不堵mic录音文件，直接进行对比分析（无需先跑测试流程）。
 - **震音测试**
   - 功能用途：执行震音播放测试并记录听感结果，便于人工评估异常。
-  - 可配置项：**媒体音量档位**（同上 adb 顺序）；默认等待时长见 `JITTER_APK_DURATION_FALLBACK_SEC`（无本机参考 WAV 时）。仅 APK 播放。
+  - 可配置项：**媒体音量档位**（同上 adb 顺序）；默认等待时长见 `JITTER_APK_DURATION_FALLBACK_SEC`（无本机参考 WAV 时）。仅 APK 播放；开始前同样自动检查/安装 AudioPlayer（`wakeup_count/AudioPlayer.apk`）。
   - 结果输出：保留测试结果，便于后续复核。
 - **扫频测试**
   - 功能用途：执行扫频播放与录制，用于频响相关分析和回归测试。
@@ -304,7 +304,7 @@
 运行 **`Packager.bat`** 成功后，`dist` 中会**自动**放入：`AcouTest.v<版本号>.exe`（版本号来自 `feature_config.py` 的 `APP_VERSION`，与发布页、更新清单命名一致）、`logo/`、`audio/`（整目录）、`output/` 及与 `output_paths.py` 一致的子目录与说明、`elevoc_ukey/`（若源码根目录存在）、`wakeup_count/`（若存在）、`启动测试工具.bat`（由 `pack_dist_client_files.py` 生成）。无需再手工拷贝上述资源。
 
 - **说明**：脚本使用 `!DIST_EXE!` 等形式，避免复杂文件名在 `if (...)` 块内被 CMD 误解析。**exe 每次都会重新 PyInstaller 生成**（与当前源码、`APP_VERSION` 一致）。打包命令已带 **`--noupx`**（禁用 UPX），避免 onefile 解压 `libcrypto-3.dll` 等 OpenSSL 库时报 *Failed to extract libcrypto-3.dll*。**logo、audio、elevoc_ukey、wakeup_count** 默认用 `robocopy /XO` 增量同步：dist 里已有且**不比源文件旧**的同名文件会跳过拷贝，省时间、少写盘；你在工程里改新了源文件仍会覆盖 dist。若需对资源做一次「不按时间跳过」的全量同步，打包前在命令行先执行 `set PACKAGER_FULL_RESYNC=1` 再运行 `Packager.bat`。
-- **若客户机仍报解压 DLL 失败**：关闭 exe 后清空 `%TEMP%\_MEI*` 临时目录、将杀毒软件对 dist 目录设排除，或勿从网盘/只读盘直接运行 exe。
+- **若启动报「Failed to extract …」或解压相关错误**：单文件 exe 会把内容解压到 **系统盘临时目录**（`%TEMP%\_MEI*`）。**最常见是 C 盘 / 临时盘空间不足**，请先清理磁盘。其次：关闭 exe 后删掉 `_MEI` 开头的临时文件夹、杀毒对 exe 目录设排除、勿从网盘内直接运行。**可选**：打包前执行 `set PACKAGER_ONEDIR=1` 再运行 `Packager.bat`，生成 `dist\AcouTest.v<版本>\` 子目录版 exe，对临时盘压力更小；把整个 **dist** 发给客户，`启动测试工具.bat` 会自动识别子目录 exe。
 - **可选**：另附项目根目录的 `README.md` 给客户。
 - **不需要给客户**：源码（.py）、build/、项目根下的 `output/`（测试残留）、.git 等。客户运行 exe 后，测试数据会写入**与 exe 同目录**下的 `output/`（打包时已预建空子目录，便于识别）。
 
@@ -448,8 +448,9 @@
   - `download_url`：新版本 **exe** 的 **HTTPS 直链**（见下文「用户无需 Git」）
   - `notes`：更新说明（字符串或字符串数组）
 - 可选字段：
-  - `wakeup_count_apk_url`：与本次版本配套的 **AudioPlayer.apk** 直链。若存在，用户点击「立即更新」时除下载 exe 外，还会下载该文件并保存为安装目录下的 `wakeup_count/AudioPlayer.apk`（目录不存在会自动创建）。若本次发布未改 APK，可从清单中去掉该字段或运行 `sync_version_manifest.py` 前将 `feature_config.py` 里 `WAKEUP_COUNT_APK_DOWNLOAD_URL_*` 留空。
-- **APK 放在哪里**：与 exe 一样，上传到任意可通过 **HTTPS** 直接下载的位置即可，例如 **GitHub Releases** 的 Assets（与 `AcouTest.vx.x.x.exe` 同一次 Release 里再上传 `AudioPlayer.apk`），或阿里云 OSS / 腾讯云 COS / 自有 Nginx 静态目录等。把文件的可下载 URL 填进清单的 `wakeup_count_apk_url`（内部/外部分别维护时，可配合 `feature_config.py` 的 `WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL` / `WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC`，由 `sync_version_manifest.py` 自动生成两条清单中的字段）。
+  - `wakeup_count_apk_url`：**AudioPlayer.apk** 的 HTTPS 直链。推荐由 `feature_config.py` 中 `WAKEUP_COUNT_APK_DOWNLOAD_URL_*` 模板（`{version}`）经 `sync_version_manifest.py` 写入；不需要 APK 时将对应 URL 留空。
+- **版本与 APK 地址**：`APP_VERSION` 控制 exe 与清单 `latest_version`；**`AUDIOPLAYER_APK_VERSION`** 单独手写（与 exe 可不同），控制 APK 模板里 `{version}`。每次发 PlayerDemo 包时改 `AUDIOPLAYER_APK_VERSION`，再运行 `sync_version_manifest.py`。内外通道可分别配置 `WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC` / `_INTERNAL`。
+- **APK 托管**：放到可 HTTPS 直链的位置即可（GitHub Releases、OSS 等）。
 
 #### 用户是否需要安装 Git？
 

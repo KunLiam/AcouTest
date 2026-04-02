@@ -10,8 +10,11 @@ True = 显示该功能
 False = 不显示（相当于不编译进本次发布）
 """
 
-# ========== 应用版本号（仅改此处，主窗口标题、软件信息弹窗、状态栏等会统一更新） ==========
-APP_VERSION = "2.0.3"
+# ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
+APP_VERSION = "2.0.4"
+
+# AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
+AUDIOPLAYER_APK_VERSION = "1.0.1"
 
 # ========== 自动更新配置（双通道：外部 / 内部） ==========
 # RELEASE_CHANNEL：当前构建属于哪条更新通道。
@@ -35,11 +38,11 @@ UPDATE_MANIFEST_URLS_INTERNAL = [
 DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/AcouTest/releases/download/v{version}-public/AcouTest.v{version}.exe"
 DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/AcouTest/releases/download/v{version}/AcouTest.v{version}.exe"
 
-# 可选：与 exe 同版本一并发布的 AudioPlayer.apk 直链（{version} 会被替换为 APP_VERSION）。
-# sync_version_manifest.py 会写入清单字段 wakeup_count_apk_url；自动更新时会下载到安装目录 wakeup_count/AudioPlayer.apk。
-#   https://github.com/<用户>/<仓库>/releases/download/v{version}/AudioPlayer.apk
-WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
-WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.0/AudioPlayer.apk"
+# AudioPlayer.apk 直链模板：{version} 由 sync_version_manifest.py 替换为 AUDIOPLAYER_APK_VERSION。
+# 内外可分别指向不同 tag（例如外部 v{version}-public）；留空则清单不写 wakeup_count_apk_url。
+# sync 后会写入清单 wakeup_count_apk_url；客户端更新时可下载到 wakeup_count/AudioPlayer.apk。
+WAKEUP_COUNT_APK_DOWNLOAD_URL_PUBLIC = "https://github.com/KunLiam/PlayerDemo/releases/download/v{version}/AudioPlayer.apk"
+WAKEUP_COUNT_APK_DOWNLOAD_URL_INTERNAL = "https://github.com/KunLiam/PlayerDemo/releases/download/v{version}/AudioPlayer.apk"
 
 # 以下为兼容旧逻辑：未配置通道专用 URL 时回退使用
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/KunLiam/AcouTest/master/update_manifest.json"
@@ -54,6 +57,7 @@ USE_AUDIO_PLAYER_APK_FOR_AIRTIGHTNESS_AND_JITTER = True
 AUDIO_PLAYER_COMPONENT = "com.player.demo/.MainActivity"
 AUDIO_PLAYER_ACTION_PLAY = "com.player.demo.PLAY"
 AUDIO_PLAYER_ACTION_PAUSE = "com.player.demo.PAUSE"
+AUDIO_PLAYER_ACTION_REPLAY = "com.player.demo.REPLAY"
 AUDIO_PLAYER_EXTRA_TRACK = "com.player.demo.EXTRA_TRACK"
 # 与 APK 文档一致：airtight=sweep_speech_48k.wav，vibration=80-1KHz-20S(-3dB).wav
 AUDIO_PLAYER_TRACK_AIRTIGHT = "airtight"

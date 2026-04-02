@@ -4746,6 +4746,11 @@ class UIComponents:
             f"时长参考 WAV: {path if path else '（无，使用默认等待时长）'}"
         )
         self._append_jitter_log("播放方式: Audio Player APK")
+        if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_jitter_log):
+            self.jitter_start_btn.config(state="normal")
+            self.jitter_stop_btn.config(state="disabled")
+            self.jitter_status_var.set("就绪")
+            return
         threading.Thread(
             target=self._jitter_test_thread,
             args=(path, device_id),
@@ -4772,8 +4777,10 @@ class UIComponents:
             vmsg = self._set_device_stream_music_volume(device_id, vol)
             self._append_jitter_log(vmsg)
             time.sleep(0.25)
-            self._append_jitter_log(f"adb: PLAY + EXTRA_TRACK={fc.AUDIO_PLAYER_TRACK_VIBRATION}")
-            rr = audio_player_apk.run_play(device_id, fc.AUDIO_PLAYER_TRACK_VIBRATION)
+            self._append_jitter_log(
+                f"adb: REPLAY（从头播）+ EXTRA_TRACK={fc.AUDIO_PLAYER_TRACK_VIBRATION}，失败则 force-stop 后 PLAY"
+            )
+            rr = audio_player_apk.run_play_from_start(device_id, fc.AUDIO_PLAYER_TRACK_VIBRATION)
             if rr.returncode != 0:
                 raise RuntimeError((rr.stderr or rr.stdout or "am start 失败").strip()[:240])
             dur = None
@@ -6576,6 +6583,75 @@ class UIComponents:
         y = (dlg.winfo_screenheight() - h) // 2
         dlg.geometry(f"{w}x{h}+{x}+{y}")
 
+    def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None):
+        """
+        测试前确保设备已安装 com.player.demo：与唤醒监测相同，使用 wakeup_count/AudioPlayer.apk 执行 adb install。
+        log_append: 可选，接收 str，用于震音/气密/唤醒等各自的日志区。
+        """
+        base_dir = self._get_runtime_base_dir()
+        wakeup_dir = None
+        for candidate in (base_dir, os.path.dirname(base_dir)):
+            d = os.path.join(candidate, "wakeup_count")
+            if os.path.isdir(d):
+                wakeup_dir = d
+                break
+        if not wakeup_dir:
+            messagebox.showerror(
+                "错误",
+                f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}",
+            )
+            return False
+        apk_path = os.path.join(wakeup_dir, "AudioPlayer.apk")
+        if not os.path.isfile(apk_path):
+            messagebox.showerror(
+                "错误",
+                f"需要 wakeup_count 下 AudioPlayer.apk（设备端播放）。未找到:\n{apk_path}",
+            )
+            return False
+
+        serial = (device_id or "").strip()
+        adb_base = ["adb", "-s", serial] if serial else ["adb"]
+
+        installed = False
+        try:
+            r = subprocess.run(
+                adb_base + ["shell", "pm", "list", "packages", "com.player.demo"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            installed = r.returncode == 0 and "com.player.demo" in (r.stdout or "")
+        except Exception:
+            pass
+
+        if not installed:
+            if log_append:
+                log_append(f"安装 AudioPlayer.apk 到设备 {serial or '默认设备'}...")
+            if hasattr(self, "status_var"):
+                try:
+                    self.status_var.set("正在安装 AudioPlayer.apk...")
+                    self.root.update_idletasks()
+                except Exception:
+                    pass
+            try:
+                r = subprocess.run(adb_base + ["install", "-r", apk_path], capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    messagebox.showerror("安装失败", f"adb install 失败:\n{err[:500]}")
+                    return False
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("安装失败", "安装超时(120s)，请检查设备连接。")
+                return False
+            except Exception as e:
+                messagebox.showerror("安装失败", str(e))
+                return False
+            if log_append:
+                log_append("AudioPlayer.apk 安装完成。")
+        else:
+            if log_append:
+                log_append("设备已安装 AudioPlayer (com.player.demo)，跳过安装。")
+        return True
+
     def _start_wakeup100_test(self, resume=False):
         """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试。resume=True 时从上次暂停处接着测，保留已有结果。"""
         if not self.check_device_selected():
@@ -6618,35 +6694,8 @@ class UIComponents:
         if resume and not getattr(self, "_wakeup100_paused", False):
             messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续测试」）。")
             return
-        installed = False
-        try:
-            r = subprocess.run(
-                ["adb", "-s", device_id, "shell", "pm", "list", "packages", "com.player.demo"],
-                capture_output=True, text=True, timeout=10,
-            )
-            installed = r.returncode == 0 and "com.player.demo" in (r.stdout or "")
-        except Exception:
-            pass
-        if not installed:
-            self._append_hotword_log(f"安装 AudioPlayer.apk 到设备 {device_id}...")
-            if hasattr(self, "status_var"):
-                self.status_var.set("正在安装 AudioPlayer.apk...")
-            self.root.update_idletasks()
-            try:
-                r = subprocess.run(["adb", "-s", device_id, "install", "-r", apk_path], capture_output=True, text=True, timeout=120)
-                if r.returncode != 0:
-                    err = (r.stderr or r.stdout or "").strip()
-                    messagebox.showerror("安装失败", f"adb install 失败:\n{err[:500]}")
-                    return
-            except subprocess.TimeoutExpired:
-                messagebox.showerror("安装失败", "安装超时(120s)，请检查设备连接。")
-                return
-            except Exception as e:
-                messagebox.showerror("安装失败", str(e))
-                return
-            self._append_hotword_log("AudioPlayer.apk 安装完成。")
-        else:
-            self._append_hotword_log("设备已安装 AudioPlayer (com.player.demo)，跳过安装。")
+        if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_hotword_log):
+            return
         current_vol = self._get_device_volume(device_id)
         if current_vol is not None:
             self._append_hotword_log(f"当前系统音量: {current_vol}（将按区间 {v_from}~{v_to} 逐档测试）。")
@@ -9405,6 +9454,12 @@ class UIComponents:
             messagebox.showerror("错误", f"气密性测试需要 APK 播放模块: {e}")
             return
 
+        airtight_dev = (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+        if not airtight_dev:
+            airtight_dev = (getattr(self, "selected_device", None) or "").strip()
+        if not self._ensure_audioplayer_apk_on_device(airtight_dev, log_append=self._append_airtight_info):
+            return
+
         self._append_airtight_info("气密播放：APK 内固定音轨；录制为 tinycap。")
         source_name = "sweep_speech_48k.wav"
         source_file = self._find_airtight_source_file() or ""
@@ -10895,9 +10950,9 @@ class UIComponents:
                                 time.sleep(0.35)
                             except Exception:
                                 pass
-                        rr = audio_player_apk.run_play(device_id, etrack)
+                        rr = audio_player_apk.run_play_from_start(device_id, etrack)
                         if rr.returncode == 0:
-                            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已重新下发"))
+                            getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已重新下发（从头播）"))
                         else:
                             msg = (rr.stderr or rr.stdout or "").strip() or "am start 失败"
                             getattr(self, "root", self.parent).after(0, lambda m=msg: self.update_sweep_info(f"APK 重播失败: {m}"))
@@ -10932,9 +10987,9 @@ class UIComponents:
                                     time.sleep(0.35)
                                 except Exception:
                                     pass
-                            rr = audio_player_apk.run_play(device_id, etrack)
+                            rr = audio_player_apk.run_play_from_start(device_id, etrack)
                             if rr.returncode == 0:
-                                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已再次下发"))
+                                getattr(self, "root", self.parent).after(0, lambda: self.update_sweep_info("APK 播放已再次下发（从头播）"))
                             else:
                                 msg = (rr.stderr or rr.stdout or "").strip() or "am start 失败"
                                 getattr(self, "root", self.parent).after(0, lambda m=msg: self.update_sweep_info(f"APK 重播失败: {m}"))
@@ -10987,7 +11042,7 @@ class UIComponents:
                         time.sleep(0.10)
                     except Exception:
                         pass
-                    rr = audio_player_apk.run_play(device_id, etrack)
+                    rr = audio_player_apk.run_play_from_start(device_id, etrack)
                     apk_err = (rr.stderr or rr.stdout or "").strip()
                     if rr.returncode != 0:
                         raise Exception(f"APK 播放启动失败: {apk_err or 'am start 返回非 0'}")

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from typing import List, Optional
 
 try:
@@ -53,6 +54,46 @@ def run_play(device_id: Optional[str], extra_track: str) -> subprocess.Completed
         extra_track,
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+
+def run_replay(device_id: Optional[str], extra_track: str) -> subprocess.CompletedProcess:
+    """与 PLAY 相同参数，动作为 REPLAY（用于 PAUSE 后从头重播，避免再次 PLAY 被当作续播）。"""
+    action = _cfg("AUDIO_PLAYER_ACTION_REPLAY", "com.player.demo.REPLAY")
+    component = _cfg("AUDIO_PLAYER_COMPONENT", "com.player.demo/.MainActivity")
+    extra_key = _cfg("AUDIO_PLAYER_EXTRA_TRACK", "com.player.demo.EXTRA_TRACK")
+    cmd = adb_base(device_id) + [
+        "shell",
+        "am",
+        "start",
+        "-a",
+        action,
+        "-n",
+        component,
+        "--es",
+        extra_key,
+        extra_track,
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+
+def run_play_from_start(device_id: Optional[str], extra_track: str) -> subprocess.CompletedProcess:
+    """
+    每次测试从头播放：优先 REPLAY（带 EXTRA_TRACK）；失败则 force-stop 包后再 PLAY（冷启动/未支持 REPLAY 时）。
+    """
+    rr = run_replay(device_id, extra_track)
+    if rr.returncode == 0:
+        return rr
+    try:
+        subprocess.run(
+            adb_base(device_id) + ["shell", "am", "force-stop", "com.player.demo"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except Exception:
+        pass
+    time.sleep(0.35)
+    return run_play(device_id, extra_track)
 
 
 def run_pause(device_id: Optional[str]) -> None:

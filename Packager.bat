@@ -53,9 +53,14 @@ for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; pri
 if "%VER%"=="" set "VER=1.0"
 set "EXE_NAME=AcouTest.v%VER%"
 :: 完整 exe 路径放入变量，配合延迟展开，避免复杂文件名在 if 块内解析出错
+:: 默认 onefile；可选 onedir：set PACKAGER_ONEDIR=1（见 README，适合磁盘紧张或不想依赖 %TEMP% 解压）
+set "USE_ONEDIR=0"
+if /I "%PACKAGER_ONEDIR%"=="1" set "USE_ONEDIR=1"
 set "DIST_EXE=dist\%EXE_NAME%.exe"
+if "!USE_ONEDIR!"=="1" set "DIST_EXE=dist\%EXE_NAME%\%EXE_NAME%.exe"
 set "SPEC_FILE=%EXE_NAME%.spec"
 echo 当前版本: %VER% ，输出文件名: %EXE_NAME%.exe
+if "!USE_ONEDIR!"=="1" (echo 打包模式: onedir ^(子目录+exe^)) else (echo 打包模式: onefile ^(单 exe^))
 
 :: 先尝试关闭可能正在运行的应用程序
 echo 正在确保没有应用程序在运行...
@@ -68,6 +73,7 @@ echo 正在清理旧文件...
 if exist "dist\声测大师(AcouTest).exe" del /F /Q "dist\声测大师(AcouTest).exe" > nul 2>&1
 del /F /Q "dist\声测大师*.exe" > nul 2>&1
 if exist "!DIST_EXE!" del /F /Q "!DIST_EXE!" > nul 2>&1
+if exist "dist\%EXE_NAME%" rmdir /S /Q "dist\%EXE_NAME%" > nul 2>&1
 if exist "build" rmdir /S /Q "build" > nul 2>&1
 if exist "声测大师(AcouTest).spec" del /F /Q "声测大师(AcouTest).spec" > nul 2>&1
 if exist "声测大师(AcouTest) v%VER%.spec" del /F /Q "声测大师(AcouTest) v%VER%.spec" > nul 2>&1
@@ -95,7 +101,9 @@ if not exist "dist" mkdir "dist"
 
 :: 确保所有 Python 模块加入打包（--name 带版本号）
 REM noupx: avoid UPX on OpenSSL DLLs; may cause onefile extract errors for libcrypto-3.dll
-python -m PyInstaller --clean --noconsole --onefile --noupx --icon="logo\AcouTest.ico" ^
+set "PI_MODE=--onefile"
+if "!USE_ONEDIR!"=="1" set "PI_MODE=--onedir"
+python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^
