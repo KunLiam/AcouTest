@@ -456,6 +456,11 @@
 
 **不需要。** 自动更新只会用系统自带的 HTTPS 请求去拉取「清单 JSON」和「exe / apk 文件」，与用户电脑上是否安装 Git 无关。若部分网络环境访问 `github.com` 不稳定，可将清单与安装包放到境内可访问的 HTTPS 地址（或继续用仓库里的 jsDelivr 镜像拉 **清单**，exe/apk 则放到你可控的 CDN / 对象存储，并把 `download_url` / `wakeup_count_apk_url` 写成那里的直链）。
 
+#### HTTPS 报错 `CERTIFICATE_VERIFY_FAILED`（无法更新）
+
+- **打包端**：`Packager.bat` 会安装并打入 **certifi**，更新流程对 HTTPS 使用 Mozilla CA 包，减轻 PyInstaller / 部分 Windows 环境「找不到证书颁发者」的问题；请同事使用**你重新打包后的新版本**再试。
+- **公司代理 / SSL 解密**：需安装企业根证书到系统信任，或由 IT 放行；**不得已时**可在用户环境设置 `ACOUTEST_UPDATE_SSL_INSECURE=1` 后启动程序（跳过证书校验，存在中间人风险，仅建议内网排查）。
+
 #### 2) 配置清单地址（任选其一）
 
 - 方式 A：在 `feature_config.py` 填 `UPDATE_MANIFEST_URL`（单地址）或 `UPDATE_MANIFEST_URLS`（多地址）

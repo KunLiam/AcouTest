@@ -1,11 +1,9 @@
 {
-  "latest_version": "2.0.4",
-  "publish_date": "2026-04-02",
+  "latest_version": "2.0.5",
+  "publish_date": "2026-04-03",
   "notes": [
-    "实时 Logcat：多关键字过滤、ADB 过滤预设与保存、工具栏与列宽优化；唤醒监测计数去重修复。",
-    "气密性 / 震音：开始前自动安装 AudioPlayer.apk（与唤醒监测一致）；停止后再测支持从头重播。",
-    "更新清单：`AUDIOPLAYER_APK_VERSION` 与 exe 分开配置，`sync_version_manifest.py` 统一写 APK 直链。"
+    "检查更新：HTTPS 使用 certifi 根证书包，减轻证书验证失败；失败时可设环境变量 ACOUTEST_UPDATE_SSL_INSECURE=1 排查。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.4/AcouTest.v2.0.4.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.5/AcouTest.v2.0.5.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

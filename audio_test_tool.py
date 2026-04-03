@@ -31,6 +31,7 @@ from feature_config import (
     UPDATE_AUTO_CHECK,
 )
 from control_api import AcouTestControlApi
+import updater_http
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
@@ -371,7 +372,8 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         raw = ""
         if manifest_url.lower().startswith(("http://", "https://")):
             req = urllib.request.Request(manifest_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            opener = updater_http.urlopen if manifest_url.lower().startswith("https://") else urllib.request.urlopen
+            with opener(req, timeout=10) as resp:
                 charset = resp.headers.get_content_charset() or "utf-8"
                 raw = resp.read().decode(charset, errors="replace")
         else:
@@ -606,11 +608,23 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                     except Exception:
                         pass
                     shutil.rmtree(tmp_dir, ignore_errors=True)
-                    messagebox.showerror("下载失败", f"{e}\n\n地址：{url}")
+                    messagebox.showerror(
+                        "下载失败",
+                        f"{e}\n\n地址：{url}{self._updater_ssl_error_hint(str(e))}",
+                    )
 
                 self.root.after(0, _err)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _updater_ssl_error_hint(self, err_text: str) -> str:
+        t = (err_text or "").lower()
+        if "certificate" in t or "ssl" in t:
+            return (
+                "\n\n如为证书校验失败：① 请使用已打入 certifi 的新版安装包；② 公司代理需安装企业根证书；"
+                "③ 排查时可设环境变量 ACOUTEST_UPDATE_SSL_INSECURE=1 后重启程序（跳过校验，有风险）。"
+            )
+        return ""
 
     def _updater_normalize_request_url(self, download_url):
         parsed = urllib.parse.urlparse(download_url)
@@ -623,7 +637,8 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         """HTTP(S) 下载到本地文件；progress_cb(done_bytes, total_bytes_or_0) 可选。"""
         normalized_url = self._updater_normalize_request_url(download_url)
         req = urllib.request.Request(normalized_url, headers={"User-Agent": "AcouTest-Updater/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest_path, "wb") as out:
+        opener = updater_http.urlopen if normalized_url.lower().startswith("https://") else urllib.request.urlopen
+        with opener(req, timeout=timeout) as resp, open(dest_path, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             while True:
@@ -714,7 +729,11 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 self.root.after(0, _on_http_error)
                 self.root.after(0, prog.destroy)
             except Exception as e:
-                self.root.after(0, lambda m=str(e): messagebox.showerror("更新失败", f"下载失败：{m}\n\n下载地址：{download_url}"))
+                def _dl_err(m=str(e), u=download_url):
+                    hint = self._updater_ssl_error_hint(m)
+                    messagebox.showerror("更新失败", f"下载失败：{m}\n\n下载地址：{u}{hint}")
+
+                self.root.after(0, _dl_err)
                 self.root.after(0, prog.destroy)
         threading.Thread(target=_worker, daemon=True).start()
 

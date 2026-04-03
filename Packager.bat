@@ -47,6 +47,13 @@ if %errorlevel% neq 0 (
     python -m pip install pillow
 )
 
+:: certifi：打包进 exe，检查更新时 HTTPS 使用 Mozilla CA 包，减少「证书验证失败」
+python -c "import certifi" > nul 2>&1
+if %errorlevel% neq 0 (
+    echo 正在安装 certifi...
+    python -m pip install certifi
+)
+
 :: 从 feature_config 读取版本号，输出 exe 名为 AcouTest.v<版本>.exe（与 release 与更新清单命名一致）
 set "VER="
 for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
@@ -105,6 +112,8 @@ set "PI_MODE=--onefile"
 if "!USE_ONEDIR!"=="1" set "PI_MODE=--onedir"
 python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
+    --hidden-import certifi ^
+    --hidden-import updater_http ^
     --exclude-module numpy ^
     --name "%EXE_NAME%" ^
     main.py
