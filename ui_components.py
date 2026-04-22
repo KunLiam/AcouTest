@@ -6210,6 +6210,118 @@ class UIComponents:
             except Exception:
                 pass
 
+    def _attach_hover_tooltip(self, widget, text, delay_ms=450):
+        """鼠标悬停显示说明，避免长文案挤在界面上被裁切。"""
+        if widget is None or not (text or "").strip():
+            return
+        tip = {"win": None, "after": None}
+        body = (text or "").strip()
+
+        def _destroy_tip():
+            aid = tip.get("after")
+            if aid:
+                try:
+                    widget.after_cancel(aid)
+                except Exception:
+                    pass
+                tip["after"] = None
+            w = tip.get("win")
+            if w is not None:
+                try:
+                    if w.winfo_exists():
+                        w.destroy()
+                except Exception:
+                    pass
+                tip["win"] = None
+
+        def _show_tip():
+            tip["after"] = None
+            if tip.get("win") and tip["win"].winfo_exists():
+                return
+            try:
+                x = int(widget.winfo_rootx() + 12)
+                y = int(widget.winfo_rooty() + widget.winfo_height() + 4)
+            except Exception:
+                x, y = 100, 100
+            tw = tk.Toplevel(widget)
+            tw.wm_overrideredirect(True)
+            try:
+                tw.wm_attributes("-topmost", True)
+            except Exception:
+                pass
+            fam = "Microsoft YaHei UI" if platform.system() == "Windows" else "Arial"
+            lbl = tk.Label(
+                tw,
+                text=body,
+                justify="left",
+                wraplength=400,
+                background="#ffffe0",
+                relief="solid",
+                borderwidth=1,
+                font=(fam, 9),
+                padx=8,
+                pady=6,
+            )
+            lbl.pack()
+            tw.update_idletasks()
+            try:
+                sw = int(tw.winfo_screenwidth())
+                sh = int(tw.winfo_screenheight())
+                tw_w = int(tw.winfo_reqwidth())
+                tw_h = int(tw.winfo_reqheight())
+                if x + tw_w > sw - 8:
+                    x = max(8, sw - tw_w - 8)
+                if y + tw_h > sh - 8:
+                    y = max(8, y - tw_h - widget.winfo_height() - 8)
+            except Exception:
+                pass
+            try:
+                tw.geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+            tip["win"] = tw
+
+        def _on_enter(_e=None):
+            _destroy_tip()
+            try:
+                tip["after"] = widget.after(delay_ms, _show_tip)
+            except Exception:
+                tip["after"] = None
+
+        def _on_leave(_e=None):
+            _destroy_tip()
+
+        try:
+            widget.bind("<Enter>", _on_enter, add=True)
+            widget.bind("<Leave>", _on_leave, add=True)
+            widget.bind("<Destroy>", lambda _e: _destroy_tip(), add=True)
+        except Exception:
+            pass
+
+    def _show_hotword_wakeup100_help(self):
+        messagebox.showinfo(
+            "唤醒率测试说明",
+            "本机扬声器与设备端 AudioPlayer 同步播放唤醒语料，logcat 统计设备唤醒次数。\n\n"
+            "语料目录：与 exe 同目录的 wakeup_count 文件夹。\n"
+            "• ok_google：ok_google/art_100.txt + wav；\n"
+            "• ok_freebox / ok_homa：对应子目录下 wav，按文件名排序播放。\n"
+            "• Freebox 整轨：语料选 ok_freebox 并勾选「整轨」后，使用 wakeup_count/ok_freebox_single/ 下 wav（多文件时取排序第一个），"
+            "「整轨条数」为每一音量档内的唤醒率分母；整轨下「每档条数」「间隔」禁用。\n"
+            "界面「全程合计」= 整轨条数 × 音量档数 × 音效轮数（例如 200×6 档×1 轮音效=1200），表示整轮测试若全部播完时的累计条数，不是「只播一遍 wav」的条数。\n"
+            "整轨时本机用 winsound 播 wav，进度条按文件头里的时长做「已播/总长」估算（与设备端进度无关）。\n\n"
+            "设备端需 wakeup_count/AudioPlayer.apk；Freebox/Homa 另需对应语料 APK，开始测试时会自动安装并拉起。\n"
+            "音量按 0–25 区间逐档测试；可填音效模式（留空则仅按音量）。",
+        )
+
+    def _show_hotword_log_match_help(self):
+        messagebox.showinfo(
+            "日志匹配规则",
+            "以下日志各计为一次唤醒（短时间内的重复行会去重）：\n\n"
+            "• Google：Detected hotword 或 LIBAS_HOTWORD_DETECTION_RECEIVED\n"
+            "• Freebox：Received wake-up event: 1 或 KardomeJni: Keyword recognized!\n"
+            "• Homa：Received wake-up event: 1",
+        )
+
     def _sync_hotword_after_key_for_wakeup_corpus(self, *_args):
         """语料为 ok_google 时默认「关闭助手(force-stop)」；其它语料默认「不关闭」（切换语料时同步，避免误关 Freebox/Homa 前台）。"""
         if not hasattr(self, "hotword_after_key_var") or not hasattr(self, "hotword_wakeup_corpus_var"):
@@ -6225,124 +6337,393 @@ class UIComponents:
                 self.hotword_after_key_var.set("不关闭")
         except Exception:
             pass
+        try:
+            cb = getattr(self, "hotword_freebox_single_cb", None)
+            if cb is not None and cb.winfo_exists():
+                if cid == "ok_freebox":
+                    cb.config(state="normal")
+                else:
+                    if hasattr(self, "hotword_freebox_single_wav_var"):
+                        self.hotword_freebox_single_wav_var.set(False)
+                    cb.config(state="disabled")
+        except Exception:
+            pass
+        try:
+            self._sync_freebox_single_ui_state()
+        except Exception:
+            pass
+
+    def _sync_freebox_single_ui_state(self, *_args):
+        """整轨条数：仅 ok_freebox 且勾选整轨时可编辑。整轨时隐藏「每档条数/间隔」行（多 wav 时显示）。"""
+        ent = getattr(self, "hotword_freebox_single_segment_entry", None)
+        if ent is not None and ent.winfo_exists():
+            try:
+                cid = (self.hotword_wakeup_corpus_var.get() or "").strip()
+                use = bool(getattr(self, "hotword_freebox_single_wav_var", None) and self.hotword_freebox_single_wav_var.get())
+                ent.config(state="normal" if cid == "ok_freebox" and use else "disabled")
+            except Exception:
+                pass
+        use_single = False
+        try:
+            cid = (self.hotword_wakeup_corpus_var.get() or "").strip()
+            use_single = cid == "ok_freebox" and bool(
+                getattr(self, "hotword_freebox_single_wav_var", None) and self.hotword_freebox_single_wav_var.get()
+            )
+        except Exception:
+            use_single = False
+        multi_frm = getattr(self, "hotword_wakeup100_multi_opts_frame", None)
+        if multi_frm is not None:
+            try:
+                if multi_frm.winfo_exists():
+                    if use_single:
+                        multi_frm.pack_forget()
+                    else:
+                        if not multi_frm.winfo_manager():
+                            multi_frm.pack(anchor="w", pady=(2, 0))
+            except Exception:
+                pass
+        for w in (getattr(self, "hotword_wakeup100_per_count_entry", None), getattr(self, "hotword_wakeup100_interval_entry", None)):
+            if w is not None and w.winfo_exists():
+                try:
+                    w.config(state="disabled" if use_single else "normal")
+                except Exception:
+                    pass
+
+    def _resolve_ok_freebox_single_wav_path(self, wakeup_dir):
+        """
+        固定目录 wakeup_count/ok_freebox_single/ 下放一个（或多个）.wav；若有多个则按文件名排序取第一个。
+        返回 (wav 绝对路径 或 None, 目录绝对路径)
+        """
+        d = os.path.join(wakeup_dir, "ok_freebox_single")
+        if not os.path.isdir(d):
+            return None, d
+        names = sorted(
+            n for n in os.listdir(d) if n.lower().endswith(".wav") and os.path.isfile(os.path.join(d, n))
+        )
+        if not names:
+            return None, d
+        return os.path.join(d, names[0]), d
+
+    def _wav_duration_seconds(self, path):
+        """PCM wav 时长（秒），用于整轨本机播放进度估算。"""
+        try:
+            with wave.open(path, "rb") as wf:
+                fr = wf.getframerate()
+                n = wf.getnframes()
+                if not fr:
+                    return 0.0
+                return float(n) / float(fr)
+        except Exception:
+            return 0.0
+
+    def _hotword_show_single_progress_ui(self):
+        """在主线程显示整轨本机播放进度条（由 root.after 调用）。"""
+        fr = getattr(self, "hotword_single_progress_frame", None)
+        if fr is None or not fr.winfo_exists():
+            return
+        try:
+            if not fr.winfo_manager():
+                bf = getattr(self, "hotword_rate_btn_frame", None)
+                if bf is not None and bf.winfo_exists():
+                    fr.pack(fill="x", pady=(0, 6), before=bf)
+                else:
+                    fr.pack(fill="x", pady=(0, 6))
+            if hasattr(self, "hotword_single_progbar") and self.hotword_single_progbar.winfo_exists():
+                self.hotword_single_progbar.config(value=0)
+        except Exception:
+            pass
+
+    def _hotword_clear_single_progress_ui(self):
+        """停止/播完一轮本机 wav 后隐藏进度并取消定时刷新。"""
+        self._wakeup100_single_play_active = False
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        aid = getattr(self, "_wakeup100_single_tick_after_id", None)
+        if aid and root and root.winfo_exists():
+            try:
+                root.after_cancel(aid)
+            except Exception:
+                pass
+        self._wakeup100_single_tick_after_id = None
+        try:
+            if hasattr(self, "hotword_single_time_var"):
+                self.hotword_single_time_var.set("")
+            if hasattr(self, "hotword_single_progbar") and self.hotword_single_progbar.winfo_exists():
+                self.hotword_single_progbar.config(value=0)
+            fr = getattr(self, "hotword_single_progress_frame", None)
+            if fr is not None and fr.winfo_exists() and fr.winfo_manager():
+                fr.pack_forget()
+        except Exception:
+            pass
+
+    def _wakeup100_schedule_single_progress_tick(self):
+        """约 250ms 刷新一次整轨本机播放进度（按文件时长估算，与 winsound 阻塞播放并行）。"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if not root or not root.winfo_exists():
+            return
+        if not getattr(self, "_wakeup100_single_play_active", False):
+            return
+        t0 = float(getattr(self, "_wakeup100_single_play_t0", 0) or 0)
+        dur = float(getattr(self, "_wakeup100_single_play_dur", 1) or 1)
+        elapsed = max(0.0, time.time() - t0)
+        pct = min(100.0, (elapsed / dur) * 100.0) if dur > 0 else 0.0
+
+        def _fmt(sec):
+            sec = int(max(0, sec))
+            return "%d:%02d" % (sec // 60, sec % 60)
+
+        try:
+            if hasattr(self, "hotword_single_progbar") and self.hotword_single_progbar.winfo_exists():
+                self.hotword_single_progbar.config(value=pct)
+            if hasattr(self, "hotword_single_time_var"):
+                self.hotword_single_time_var.set(
+                    "%s / %s（本机计时，仅供参考）" % (_fmt(elapsed), _fmt(int(round(dur))))
+                )
+        except Exception:
+            pass
+        if getattr(self, "_wakeup100_single_play_active", False):
+            self._wakeup100_single_tick_after_id = root.after(250, self._wakeup100_schedule_single_progress_tick)
 
     def setup_hotword_monitor_tab(self, parent):
         """唤醒监测：按当前「唤醒语料库」匹配 logcat 关键字，统计唤醒次数，支持重置"""
-        frame = ttk.Frame(parent, padding=10)
+        try:
+            _hw_style = ttk.Style()
+            # 唤醒监测页统一用小号按钮，避免与上方「开始监测」等视觉不一致
+            _hw_style.configure("Hotword.TButton", padding=(3, 1))
+        except Exception:
+            pass
+        frame = ttk.Frame(parent, padding=(8, 6))
         frame.pack(fill="both", expand=True)
         
-        # 唤醒次数显示（紧凑布局，为下方日志留出空间）
+        # 唤醒次数 + 监测按钮（紧跟计数，避免右侧大块留白）
         count_frame = ttk.LabelFrame(frame, text="唤醒次数")
-        count_frame.pack(fill="x", pady=5)
+        count_frame.pack(fill="x", pady=(0, 4))
+        count_row = ttk.Frame(count_frame)
+        count_row.pack(anchor="w", padx=6, pady=4)
         self.hotword_count_var = tk.StringVar(value="0")
-        self.hotword_count_label = ttk.Label(count_frame, textvariable=self.hotword_count_var, font=("Arial", 16))
-        self.hotword_count_label.pack(pady=6, padx=12)
-        
-        # 按钮
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill="x", pady=10)
-        self.hotword_start_btn = ttk.Button(btn_frame, text="开始监测", command=self.start_hotword_monitor)
-        self.hotword_start_btn.pack(side="left", padx=5)
-        self.hotword_stop_btn = ttk.Button(btn_frame, text="停止监测", command=self.stop_hotword_monitor, state="disabled")
-        self.hotword_stop_btn.pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="重置计数", command=self.reset_hotword_count).pack(side="left", padx=5)
-        
-        # 可选：唤醒后关闭助手弹窗。日志中弹窗为 com.google.android.katniss 的 VoicePlateActivity；force-stop 仅结束助手进程不误退播放器
-        back_frame = ttk.Frame(frame)
-        back_frame.pack(anchor="w", pady=(5, 0))
-        ttk.Label(back_frame, text="唤醒后关闭助手:").pack(side="left")
+        self.hotword_count_label = ttk.Label(count_row, textvariable=self.hotword_count_var, font=("Arial", 16))
+        self.hotword_count_label.pack(side="left", padx=(0, 28))
+        btn_frame = ttk.Frame(count_row)
+        btn_frame.pack(side="left", padx=(10, 0))
+        self.hotword_start_btn = ttk.Button(
+            btn_frame, text="开始监测", style="Hotword.TButton", width=7, command=self.start_hotword_monitor
+        )
+        self.hotword_start_btn.pack(side="left", padx=(0, 3))
+        self.hotword_stop_btn = ttk.Button(
+            btn_frame, text="停止监测", style="Hotword.TButton", width=7, command=self.stop_hotword_monitor, state="disabled"
+        )
+        self.hotword_stop_btn.pack(side="left", padx=(0, 3))
+        ttk.Button(btn_frame, text="重置", style="Hotword.TButton", width=5, command=self.reset_hotword_count).pack(side="left", padx=0)
+        self._attach_hover_tooltip(
+            self.hotword_count_label,
+            "根据下方「唤醒语料库」在 logcat 中匹配关键字，每次有效唤醒计 1。点「匹配规则」可看各语料对应日志行。",
+        )
+
+        rate_frame = ttk.LabelFrame(frame, text="唤醒率测试")
+        rate_frame.pack(fill="x", pady=(6, 3))
+
+        back_frame = ttk.Frame(rate_frame)
+        back_frame.pack(anchor="w", padx=6, pady=(4, 2))
+        ttk.Label(back_frame, text="唤醒后").pack(side="left")
         self.hotword_after_key_var = tk.StringVar(value="关闭助手(force-stop)")
         key_combo = ttk.Combobox(
             back_frame,
             textvariable=self.hotword_after_key_var,
             values=["不关闭", "关闭助手(force-stop)", "返回键(KEYCODE_BACK)", "Home键(KEYCODE_HOME)"],
             state="readonly",
-            width=22,
+            width=16,
         )
-        key_combo.pack(side="left", padx=(6, 0))
-        ttk.Label(back_frame, text=" 延迟(秒):").pack(side="left", padx=(8, 2))
+        key_combo.pack(side="left", padx=(4, 0))
+        ttk.Label(back_frame, text="延迟(s)").pack(side="left", padx=(10, 2))
         self.hotword_back_delay_var = tk.StringVar(value="2")
-        delay_entry = ttk.Entry(back_frame, textvariable=self.hotword_back_delay_var, width=4)
+        delay_entry = ttk.Entry(back_frame, textvariable=self.hotword_back_delay_var, width=3)
         delay_entry.pack(side="left")
-        ttk.Label(back_frame, text="（推荐 force-stop：仅结束 katniss 弹窗）", style="Muted.TLabel").pack(side="left", padx=(4, 0))
-        
-        # 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，设备唤醒计数
-        rate_frame = ttk.LabelFrame(frame, text="100 条唤醒率测试（本机+设备端同时播放，设备唤醒计数）")
-        rate_frame.pack(fill="x", pady=(12, 5))
-        rate_inner = ttk.Frame(rate_frame)
-        rate_inner.pack(fill="x", padx=8, pady=6)
-        ttk.Label(rate_inner, text="预期播放:").pack(side="left")
+        self._attach_hover_tooltip(
+            key_combo,
+            "唤醒后如何处理助手弹窗。选 Google 语料时默认 force-stop 仅结束 katniss，不退出播放器；Freebox/Homa 建议「不关闭」以免打断前台语料应用。",
+        )
+
+        # 单行统计 +「说明」紧跟其后，避免子 Frame expand 造成中间大块留白
+        stat_row = ttk.Frame(rate_frame)
+        stat_row.pack(anchor="w", padx=6, pady=(4, 4))
         self.hotword_rate_expected_var = tk.StringVar(value="100")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_expected_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="条  |  音效:").pack(side="left", padx=(8, 2))
         self.hotword_rate_effx_var = tk.StringVar(value="-")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_effx_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="  音量:").pack(side="left", padx=(6, 2))
         self.hotword_rate_vol_var = tk.StringVar(value="-")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_vol_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="  总次数:").pack(side="left", padx=(6, 2))
         self.hotword_rate_total_var = tk.StringVar(value="0")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_total_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="  已唤醒:").pack(side="left", padx=(6, 2))
         self.hotword_rate_count_var = tk.StringVar(value="0")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_count_var, font=("Arial", 12)).pack(side="left", padx=(0, 1))
-        ttk.Label(rate_inner, text="次  唤醒率:").pack(side="left", padx=(2, 2))
         self.hotword_rate_pct_var = tk.StringVar(value="0.0%")
-        ttk.Label(rate_inner, textvariable=self.hotword_rate_pct_var, font=("Arial", 12)).pack(side="left", padx=2)
+        ttk.Label(stat_row, text="全程合计").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_expected_var, font=("Arial", 10, "bold")).pack(side="left", padx=(2, 8))
+        ttk.Label(stat_row, text="音效").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_effx_var, font=("Arial", 10)).pack(side="left", padx=(2, 8))
+        ttk.Label(stat_row, text="音量").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_vol_var, font=("Arial", 10)).pack(side="left", padx=(2, 8))
+        ttk.Label(stat_row, text="基准").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_total_var, font=("Arial", 10)).pack(side="left", padx=(2, 8))
+        ttk.Label(stat_row, text="已唤醒").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_count_var, font=("Arial", 10)).pack(side="left", padx=(2, 8))
+        ttk.Label(stat_row, text="唤醒率").pack(side="left")
+        ttk.Label(stat_row, textvariable=self.hotword_rate_pct_var, font=("Arial", 10, "bold")).pack(side="left", padx=(2, 10))
+        ttk.Button(
+            stat_row, text="说明", style="Hotword.TButton", width=5, command=self._show_hotword_wakeup100_help
+        ).pack(side="left", padx=(4, 0))
+        self._attach_hover_tooltip(
+            stat_row,
+            "「全程合计」= 整次测试计划累计条数：每档基准条数 × 音量档数 × 音效轮数。"
+            "整轨时：每档基准 = 你填的整轨条数；例 200 条 × 音量 5～10 共 6 档 × 1 轮音效 = 1200。"
+            "「基准」是当前音量档的分母（整轨时即整轨条数）。唤醒率 = 已唤醒÷基准。",
+        )
+
         corpus_row = ttk.Frame(rate_frame)
-        corpus_row.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(corpus_row, text="唤醒语料库:").pack(side="left")
+        corpus_row.pack(anchor="w", padx=6, pady=(0, 3))
+        ttk.Label(corpus_row, text="语料").pack(side="left")
         self.hotword_wakeup_corpus_var = tk.StringVar(value="ok_google")
         self.hotword_wakeup_corpus_combo = ttk.Combobox(
             corpus_row,
             textvariable=self.hotword_wakeup_corpus_var,
             values=["ok_google", "ok_freebox", "ok_homa"],
             state="readonly",
-            width=14,
+            width=11,
         )
-        self.hotword_wakeup_corpus_combo.pack(side="left", padx=(6, 0))
+        self.hotword_wakeup_corpus_combo.pack(side="left", padx=(4, 8))
+        self.hotword_freebox_single_wav_var = tk.BooleanVar(value=False)
+        self.hotword_freebox_single_cb = ttk.Checkbutton(
+            corpus_row,
+            text="Freebox 整轨",
+            variable=self.hotword_freebox_single_wav_var,
+            state="disabled",
+            command=self._sync_freebox_single_ui_state,
+        )
+        self.hotword_freebox_single_cb.pack(side="left", padx=(0, 6))
+        ttk.Label(corpus_row, text="整轨条数").pack(side="left", padx=(4, 2))
+        self.hotword_freebox_single_segment_var = tk.StringVar(value="200")
+        self.hotword_freebox_single_segment_entry = ttk.Entry(
+            corpus_row, textvariable=self.hotword_freebox_single_segment_var, width=6
+        )
+        self.hotword_freebox_single_segment_entry.pack(side="left", padx=(0, 0))
+        self._attach_hover_tooltip(
+            self.hotword_freebox_single_cb,
+            "仅 ok_freebox：使用 wakeup_count/ok_freebox_single/ 下 wav（多文件时按文件名取第一个）。每音量档整轨播一次。",
+        )
+        self._attach_hover_tooltip(
+            self.hotword_freebox_single_segment_entry,
+            "该整轨 wav 内大约含多少条唤醒句，用作本档唤醒率分母。请与 wav 实际条数一致。",
+        )
+        self._attach_hover_tooltip(
+            self.hotword_wakeup_corpus_combo,
+            "切换语料会联动日志关键字与默认「唤醒后」行为（Google 默认关助手，其它默认不关闭）。",
+        )
+        try:
+            self.hotword_freebox_single_wav_var.trace_add("write", self._sync_freebox_single_ui_state)
+        except Exception:
+            pass
         try:
             self.hotword_wakeup_corpus_var.trace_add("write", self._sync_hotword_after_key_for_wakeup_corpus)
         except Exception:
             pass
         self._sync_hotword_after_key_for_wakeup_corpus()
-        ttk.Label(
-            corpus_row,
-            style="Muted.TLabel",
-        ).pack(side="left", padx=(6, 0))
-        rate_opts = ttk.Frame(rate_frame)
-        rate_opts.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(rate_opts, text="系统音量区间(0-25):").pack(side="left")
-        self.hotword_wakeup100_volume_from_var = tk.StringVar(value="5")
-        ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_volume_from_var, width=3).pack(side="left", padx=2)
-        ttk.Label(rate_opts, text="~").pack(side="left")
-        self.hotword_wakeup100_volume_to_var = tk.StringVar(value="10")
-        ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_volume_to_var, width=3).pack(side="left", padx=2)
-        ttk.Label(rate_opts, text="  每档播放条数:").pack(side="left", padx=(8, 0))
-        self.hotword_wakeup100_per_count_var = tk.StringVar(value="100")
-        ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_per_count_var, width=4).pack(side="left", padx=2)
-        ttk.Label(rate_opts, text="  播放间隔(秒):").pack(side="left", padx=(8, 0))
-        self.hotword_wakeup100_interval_var = tk.StringVar(value="3")
-        interval_entry = ttk.Entry(rate_opts, textvariable=self.hotword_wakeup100_interval_var, width=4)
-        interval_entry.pack(side="left", padx=4)
-        rate_opts2 = ttk.Frame(rate_frame)
-        rate_opts2.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(rate_opts2, text="音效模式(如1,2,5，留空仅按音量):").pack(side="left")
+
         self.hotword_wakeup100_effx_modes_var = tk.StringVar(value="")
-        ttk.Entry(rate_opts2, textvariable=self.hotword_wakeup100_effx_modes_var, width=24).pack(side="left", padx=4)
-        ttk.Button(rate_opts2, text="查看音效说明", command=self._show_effx_mode_help).pack(side="left", padx=(4, 0))
-        rate_btn_frame = ttk.Frame(rate_frame)
-        rate_btn_frame.pack(fill="x", padx=8, pady=(0, 6))
-        self.hotword_wakeup100_start_btn = ttk.Button(rate_btn_frame, text="开始唤醒率测试", command=lambda: self._start_wakeup100_test(resume=False))
-        self.hotword_wakeup100_start_btn.pack(side="left", padx=(0, 8))
-        self.hotword_wakeup100_stop_btn = ttk.Button(rate_btn_frame, text="停止播放", command=self._stop_wakeup100_test, state="disabled")
-        self.hotword_wakeup100_stop_btn.pack(side="left", padx=(0, 8))
-        self.hotword_wakeup100_pause_btn = ttk.Button(rate_btn_frame, text="暂停", command=self._pause_wakeup100_test, state="disabled")
-        self.hotword_wakeup100_pause_btn.pack(side="left", padx=(0, 8))
-        self.hotword_wakeup100_resume_btn = ttk.Button(rate_btn_frame, text="继续测试", command=lambda: self._start_wakeup100_test(resume=True), state="disabled")
-        self.hotword_wakeup100_resume_btn.pack(side="left", padx=(0, 8))
-        ttk.Button(rate_btn_frame, text="保存唤醒率结果", command=self._save_wakeup100_result).pack(side="left")
-        ttk.Label(rate_frame, text="本机+设备端同时播放；音量区间 0-25，按档位逐轮测试（每档条数可设，默认 100）；开始前会打印当前系统音量并安装 APK。", style="Muted.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
+        rate_settings = ttk.Frame(rate_frame)
+        rate_settings.pack(anchor="w", padx=6, pady=(0, 2))
+        rate_opts_vol = ttk.Frame(rate_settings)
+        rate_opts_vol.pack(anchor="w")
+        ttk.Label(rate_opts_vol, text="音量").pack(side="left")
+        self.hotword_wakeup100_volume_from_var = tk.StringVar(value="5")
+        vf = ttk.Entry(rate_opts_vol, textvariable=self.hotword_wakeup100_volume_from_var, width=3)
+        vf.pack(side="left", padx=(2, 0))
+        ttk.Label(rate_opts_vol, text="~").pack(side="left", padx=(1, 0))
+        self.hotword_wakeup100_volume_to_var = tk.StringVar(value="10")
+        vt = ttk.Entry(rate_opts_vol, textvariable=self.hotword_wakeup100_volume_to_var, width=3)
+        vt.pack(side="left", padx=(0, 4))
+        ttk.Label(rate_opts_vol, text="(0–25)", style="Muted.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Label(rate_opts_vol, text="音效").pack(side="left", padx=(4, 2))
+        effx_entry = ttk.Entry(rate_opts_vol, textvariable=self.hotword_wakeup100_effx_modes_var, width=12)
+        effx_entry.pack(side="left", padx=(0, 4))
+        ttk.Button(rate_opts_vol, text="音效说明", style="Hotword.TButton", width=7, command=self._show_effx_mode_help).pack(side="left")
+        self._attach_hover_tooltip(vf, "音量下限（含）。")
+        self._attach_hover_tooltip(vt, "音量上限（含）。档数 = 上限 − 下限 + 1。")
+        self._attach_hover_tooltip(effx_entry, "如 1,2,5 表示依次切音效后各跑一遍音量区间；留空仅按音量。")
+
+        self.hotword_wakeup100_multi_opts_frame = ttk.Frame(rate_settings)
+        ttk.Label(self.hotword_wakeup100_multi_opts_frame, text="每档条数").pack(side="left")
+        self.hotword_wakeup100_per_count_var = tk.StringVar(value="100")
+        self.hotword_wakeup100_per_count_entry = ttk.Entry(
+            self.hotword_wakeup100_multi_opts_frame, textvariable=self.hotword_wakeup100_per_count_var, width=4
+        )
+        self.hotword_wakeup100_per_count_entry.pack(side="left", padx=(2, 10))
+        ttk.Label(self.hotword_wakeup100_multi_opts_frame, text="间隔(s)").pack(side="left")
+        self.hotword_wakeup100_interval_var = tk.StringVar(value="3")
+        self.hotword_wakeup100_interval_entry = ttk.Entry(
+            self.hotword_wakeup100_multi_opts_frame, textvariable=self.hotword_wakeup100_interval_var, width=4
+        )
+        self.hotword_wakeup100_interval_entry.pack(side="left", padx=(2, 0))
+        self._attach_hover_tooltip(
+            self.hotword_wakeup100_per_count_entry,
+            "每音量档最多播放多少条 wav（不超过目录内文件数）。",
+        )
+        self._attach_hover_tooltip(self.hotword_wakeup100_interval_entry, "相邻 wav 之间的等待秒数。")
+        self.hotword_wakeup100_multi_opts_frame.pack(anchor="w", pady=(2, 0))
+
+        try:
+            self._sync_freebox_single_ui_state()
+        except Exception:
+            pass
+
+        rate_bottom = ttk.Frame(rate_frame)
+        rate_bottom.pack(fill="x", padx=6, pady=(4, 8))
+        self.hotword_single_progress_frame = ttk.Frame(rate_bottom)
+        ttk.Label(self.hotword_single_progress_frame, text="本机整轨").pack(side="left", padx=(0, 6))
+        self.hotword_single_progbar = ttk.Progressbar(
+            self.hotword_single_progress_frame, orient="horizontal", mode="determinate", maximum=100, length=220
+        )
+        self.hotword_single_progbar.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.hotword_single_time_var = tk.StringVar(value="")
+        ttk.Label(self.hotword_single_progress_frame, textvariable=self.hotword_single_time_var, style="Muted.TLabel").pack(
+            side="left", padx=(0, 0)
+        )
+        self.hotword_rate_btn_frame = ttk.Frame(rate_bottom)
+        self.hotword_rate_btn_frame.pack(fill="x", pady=(0, 0))
+        for _ci in range(5):
+            self.hotword_rate_btn_frame.columnconfigure(_ci, weight=1, uniform="hotword_rate_btns")
+        _rb_w = 7
+        self.hotword_wakeup100_start_btn = ttk.Button(
+            self.hotword_rate_btn_frame,
+            text="开始测试",
+            style="Hotword.TButton",
+            width=_rb_w,
+            command=lambda: self._start_wakeup100_test(resume=False),
+        )
+        self.hotword_wakeup100_start_btn.grid(row=0, column=0, padx=3, pady=2, sticky="ew")
+        self.hotword_wakeup100_stop_btn = ttk.Button(
+            self.hotword_rate_btn_frame,
+            text="停止",
+            style="Hotword.TButton",
+            width=_rb_w,
+            command=self._stop_wakeup100_test,
+            state="disabled",
+        )
+        self.hotword_wakeup100_stop_btn.grid(row=0, column=1, padx=3, pady=2, sticky="ew")
+        self.hotword_wakeup100_pause_btn = ttk.Button(
+            self.hotword_rate_btn_frame,
+            text="暂停",
+            style="Hotword.TButton",
+            width=_rb_w,
+            command=self._pause_wakeup100_test,
+            state="disabled",
+        )
+        self.hotword_wakeup100_pause_btn.grid(row=0, column=2, padx=3, pady=2, sticky="ew")
+        self.hotword_wakeup100_resume_btn = ttk.Button(
+            self.hotword_rate_btn_frame,
+            text="继续",
+            style="Hotword.TButton",
+            width=_rb_w,
+            command=lambda: self._start_wakeup100_test(resume=True),
+            state="disabled",
+        )
+        self.hotword_wakeup100_resume_btn.grid(row=0, column=3, padx=3, pady=2, sticky="ew")
+        ttk.Button(
+            self.hotword_rate_btn_frame, text="保存", style="Hotword.TButton", width=_rb_w, command=self._save_wakeup100_result
+        ).grid(row=0, column=4, padx=3, pady=2, sticky="ew")
         self._wakeup100_play_process = None
         self._wakeup100_play_thread = None
         self._wakeup100_stop_requested = False
@@ -6350,13 +6731,17 @@ class UIComponents:
         self._wakeup100_expected = 100
         self._wakeup100_played_count = 0  # 已播放条数，用于唤醒率分母
         self._wakeup100_update_after_id = None
-        
-        # 最近唤醒日志（只读，expand 占用唤醒次数节省的空间）
-        log_frame = ttk.LabelFrame(
-            frame,
-            text="最近唤醒日志（Google 语料：Detected hotword / LIBAS…；Freebox：Received wake-up event: 1）",
-        )
-        log_frame.pack(fill="both", expand=True, pady=5)
+        self._wakeup100_single_play_active = False
+        self._wakeup100_single_tick_after_id = None
+
+        log_hdr = ttk.Frame(frame)
+        log_hdr.pack(anchor="w", pady=(6, 0))
+        ttk.Label(log_hdr, text="最近唤醒日志", font=("Arial", 9, "bold")).pack(side="left")
+        ttk.Button(
+            log_hdr, text="匹配规则", style="Hotword.TButton", width=7, command=self._show_hotword_log_match_help
+        ).pack(side="left", padx=(8, 0))
+        log_frame = ttk.Frame(frame)
+        log_frame.pack(fill="both", expand=True, pady=(2, 5))
         self.hotword_log_text = tk.Text(log_frame, height=18, font=("Consolas", 9), state="disabled")
         vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.hotword_log_text.yview)
         self.hotword_log_text.configure(yscrollcommand=vsb.set)
@@ -6855,6 +7240,35 @@ class UIComponents:
             c.config(state="disabled" if busy else "readonly")
         except Exception:
             pass
+        fb = getattr(self, "hotword_freebox_single_cb", None)
+        if fb is not None and fb.winfo_exists():
+            try:
+                if busy:
+                    fb.config(state="disabled")
+                else:
+                    cid = (self.hotword_wakeup_corpus_var.get() or "").strip()
+                    fb.config(state="normal" if cid == "ok_freebox" else "disabled")
+            except Exception:
+                pass
+        seg = getattr(self, "hotword_freebox_single_segment_entry", None)
+        if seg is not None and seg.winfo_exists():
+            try:
+                if busy:
+                    seg.config(state="disabled")
+            except Exception:
+                pass
+        for w in (getattr(self, "hotword_wakeup100_per_count_entry", None), getattr(self, "hotword_wakeup100_interval_entry", None)):
+            if w is not None and w.winfo_exists():
+                try:
+                    if busy:
+                        w.config(state="disabled")
+                except Exception:
+                    pass
+        if not busy:
+            try:
+                self._sync_freebox_single_ui_state()
+            except Exception:
+                pass
 
     def _resolve_wakeup100_corpus(self, wakeup_dir, corpus_id):
         """
@@ -6900,18 +7314,26 @@ class UIComponents:
                 files.append(cand2)
         return files
 
-    def _load_wakeup100_files_sorted(self, corpus_dir):
-        """语料目录下递归收集 .wav，按路径名排序（稳定、便于 ok_freebox 等按文件名规律从大到小命名）。"""
+    def _load_wakeup100_files_sorted(self, corpus_dir, exclude_basenames=None):
+        """语料目录下递归收集 .wav，按路径名排序（稳定、便于 ok_freebox 等按文件名规律从大到小命名）。
+        exclude_basenames：小写文件名集合，用于文件夹模式排除「单文件整轨」wav，避免重复测。"""
         out = []
         for root, _, names in os.walk(corpus_dir):
             for n in names:
                 if n.lower().endswith(".wav"):
                     out.append(os.path.join(root, n))
         out.sort(key=lambda p: p.replace("\\", "/").lower())
+        if exclude_basenames:
+            ex = {str(x).lower() for x in exclude_basenames if x}
+            out = [p for p in out if os.path.basename(p).lower() not in ex]
         return out
 
     def _start_wakeup100_test(self, resume=False):
         """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试。resume=True 时从上次暂停处接着测，保留已有结果。"""
+        try:
+            self._hotword_clear_single_progress_ui()
+        except Exception:
+            pass
         if not self.check_device_selected():
             return
         device_id = (getattr(self, "selected_device", None) or "").strip() or (self.device_var.get() or "").strip()
@@ -6953,10 +7375,10 @@ class UIComponents:
         self._wakeup100_last_playback_mode = "本机+设备端同时"
         self._wakeup100_corpus_id = layout.get("corpus_id") or corpus_id
         if getattr(self, "_wakeup100_play_thread", None) and self._wakeup100_play_thread.is_alive():
-            messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」或「暂停」再操作。")
+            messagebox.showinfo("提示", "唤醒率测试已在运行中，请先「停止」或「暂停」再操作。")
             return
         if resume and not getattr(self, "_wakeup100_paused", False):
-            messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续测试」）。")
+            messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续」）。")
             return
         if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_hotword_log, corpus_id=corpus_id):
             return
@@ -6992,13 +7414,51 @@ class UIComponents:
                 except (ValueError, TypeError):
                     pass
         self._wakeup100_effx_modes = effx_modes if effx_modes else None
+        self._wakeup100_freebox_single_wav_mode = False
+        self._wakeup100_items_per_round = None
         list_path = list_file
         files = []
+        use_single_freebox = False
         try:
-            if use_art and list_path:
+            if corpus_id == "ok_freebox" and getattr(self, "hotword_freebox_single_wav_var", None):
+                use_single_freebox = bool(self.hotword_freebox_single_wav_var.get())
+        except Exception:
+            use_single_freebox = False
+        try:
+            if corpus_id == "ok_freebox" and use_single_freebox:
+                sp, single_dir = self._resolve_ok_freebox_single_wav_path(wakeup_dir)
+                if not sp:
+                    messagebox.showerror(
+                        "错误",
+                        "已勾选「Freebox 整轨目录」，但未找到 .wav 文件。\n请将整轨 wav 放入目录（可替换同名或任意名，多文件时取排序第一个）：\n%s"
+                        % single_dir,
+                    )
+                    return
+                try:
+                    seg_raw = (getattr(self, "hotword_freebox_single_segment_var", None) or tk.StringVar(value="200")).get().strip()
+                    segment_count = int(seg_raw or "200")
+                    if segment_count < 1:
+                        raise ValueError("min")
+                except (ValueError, TypeError):
+                    messagebox.showerror("错误", "「整轨条数」请填写正整数（表示该 wav 内有多少条唤醒句，用于唤醒率分母）。")
+                    return
+                files = [sp]
+                self._wakeup100_freebox_single_wav_mode = True
+                self._wakeup100_items_per_round = segment_count
+                try:
+                    nw = len(
+                        [n for n in os.listdir(single_dir) if n.lower().endswith(".wav") and os.path.isfile(os.path.join(single_dir, n))]
+                    )
+                    if nw > 1:
+                        self._append_hotword_log(
+                            "提示: ok_freebox_single 内共 %d 个 wav，已按文件名排序使用: %s" % (nw, os.path.basename(sp))
+                        )
+                except Exception:
+                    pass
+            elif use_art and list_path:
                 files = self._load_wakeup100_files_art(list_path, audio_dir)
             else:
-                files = self._load_wakeup100_files_sorted(audio_dir)
+                files = self._load_wakeup100_files_sorted(audio_dir, exclude_basenames=None)
         except Exception as e:
             messagebox.showerror("错误", f"读取语料失败: {e}")
             return
@@ -7008,16 +7468,20 @@ class UIComponents:
             else:
                 messagebox.showerror("错误", f"语料目录内未找到 wav 文件:\n{audio_dir}")
             return
-        try:
-            per_count_raw = (getattr(self, "hotword_wakeup100_per_count_var", None) or tk.StringVar(value="100")).get().strip()
-            per_volume_count = max(1, min(len(files), int(per_count_raw or "100")))
-        except (ValueError, TypeError):
-            per_volume_count = min(100, len(files))
-        files = files[:per_volume_count]
+        if getattr(self, "_wakeup100_freebox_single_wav_mode", False):
+            items_per_round = int(self._wakeup100_items_per_round)
+        else:
+            try:
+                per_count_raw = (getattr(self, "hotword_wakeup100_per_count_var", None) or tk.StringVar(value="100")).get().strip()
+                per_volume_count = max(1, min(len(files), int(per_count_raw or "100")))
+            except (ValueError, TypeError):
+                per_volume_count = min(100, len(files))
+            files = files[:per_volume_count]
+            items_per_round = len(files)
         num_rounds = v_to - v_from + 1
         num_effx = len(self._wakeup100_effx_modes) if self._wakeup100_effx_modes else 1
-        self._wakeup100_expected = len(files) * num_rounds * num_effx
-        self._wakeup100_per_volume_count = len(files)
+        self._wakeup100_expected = items_per_round * num_rounds * num_effx
+        self._wakeup100_per_volume_count = items_per_round
         if not resume:
             self._wakeup100_played_count = 0
         if resume:
@@ -7037,7 +7501,7 @@ class UIComponents:
                     if n < num_rounds:
                         last = lst[-1]
                         actual_played = last[3] if len(last) >= 4 else 0
-                        total_per_round = len(files)  # 每档条数
+                        total_per_round = getattr(self, "_wakeup100_per_volume_count", len(files))  # 每档条数
                         if actual_played > 0 and actual_played < total_per_round:
                             # 最后一档是未播完的局部结果，从该档接着播，从第 actual_played 首开始
                             mode_start, round_start = mi, n - 1
@@ -7056,7 +7520,7 @@ class UIComponents:
                 if rres:
                     last = rres[-1]
                     actual_played = last[3] if len(last) >= 4 else 0
-                    total_per_round = len(files)
+                    total_per_round = getattr(self, "_wakeup100_per_volume_count", len(files))
                     if actual_played > 0 and actual_played < total_per_round:
                         self._wakeup100_resume_round_start = len(rres) - 1
                         self._wakeup100_resume_file_index = actual_played
@@ -7064,6 +7528,8 @@ class UIComponents:
                         self._wakeup100_resume_file_index = 0
                 else:
                     self._wakeup100_resume_file_index = 0
+            if getattr(self, "_wakeup100_freebox_single_wav_mode", False):
+                self._wakeup100_resume_file_index = 0
             self._append_hotword_log(f"继续测试：从第 {self._wakeup100_resume_mode_start + 1} 个音效、第 {self._wakeup100_resume_round_start + 1} 档音量接着测（本档从第 {self._wakeup100_resume_file_index + 1} 首播）。")
             self._wakeup100_resume_from_pause = True  # 继续时先发 RESUME 让设备端从暂停处恢复
         else:
@@ -7104,14 +7570,26 @@ class UIComponents:
             self.status_var.set("100 条唤醒率测试：本机+设备端同时播放中，按音量档位逐轮测试")
         if use_art and list_path:
             self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，列表: {list_path}")
+        elif getattr(self, "_wakeup100_freebox_single_wav_mode", False):
+            self._append_hotword_log(
+                "语料: ok_freebox 单文件整轨，%s（计 %s 条，整轨播一次/每档）"
+                % (os.path.basename(files[0]), items_per_round)
+            )
         else:
-            self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，目录: {audio_dir}（按文件名排序，共 {len(files)} 条）")
+            self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，目录: {audio_dir}（按文件名排序，共 {len(files)} 个 wav）")
         effx_names = {1: "Movie", 2: "Music", 3: "HALL", 4: "Classical", 5: "Normal", 6: "POP", 7: "Live", 8: "News", 9: "FTest", 10: "Customize", 11: "Game"}
         if self._wakeup100_effx_modes:
             self._append_hotword_log(f"音效模式: {self._wakeup100_effx_modes}，将依次设音效后各做一遍音量区间测试")
-        self._append_hotword_log(f"Total {len(files)} files x {num_rounds} 轮(音量 {v_from}~{v_to}) x {num_effx} 音效, interval {interval_sec} sec")
+        if getattr(self, "_wakeup100_freebox_single_wav_mode", False):
+            self._append_hotword_log(
+                "Total 单文件整轨计 %s 条 x %s 轮(音量 %s~%s) x %s 音效, interval %s sec"
+                % (items_per_round, num_rounds, v_from, v_to, num_effx, interval_sec)
+            )
+        else:
+            self._append_hotword_log(f"Total {len(files)} files x {num_rounds} 轮(音量 {v_from}~{v_to}) x {num_effx} 音效, interval {interval_sec} sec")
         self._append_hotword_log("Set default speaker to Bluetooth, then start monitoring. Playing...")
-        total_files = len(files)
+        total_files = int(getattr(self, "_wakeup100_per_volume_count", len(files)))
+        single_fb = bool(getattr(self, "_wakeup100_freebox_single_wav_mode", False))
         device_id_for_replay = getattr(self, "_wakeup100_device_id", None)
         root = getattr(self, "root", None) or getattr(self, "parent", None)
         volume_levels = list(range(v_from, v_to + 1))
@@ -7170,7 +7648,7 @@ class UIComponents:
                         self._wakeup100_current_effx_display = f"{effx_mode} ({effx_names.get(effx_mode, '')})"
                     else:
                         self._wakeup100_current_effx_display = "-"
-                    self._wakeup100_current_round_total = len(files)
+                    self._wakeup100_current_round_total = total_files
                     # 从暂停恢复或从中间轮次恢复时都视为 resume，才能正确从 resume_file_index 续播
                     is_resume = (mode_start > 0 or round_start > 0) or getattr(self, "_wakeup100_resume_from_pause", False)
                     # 仅当「继续测试且本轮已有局部结果（暂停时写入）」时不重置，让唤醒计数接着累计
@@ -7236,27 +7714,60 @@ class UIComponents:
                         self._wakeup100_round_start_count = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
                     except Exception:
                         self._wakeup100_round_start_count = 0.0
-                    self._append_hotword_log(f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {len(files)} 条。" + (f"（从第 {resume_file_index + 1} 首接着播）" if has_partial_for_this_round and resume_file_index > 0 else ""))
+                    self._append_hotword_log(
+                        f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {total_files} 条。"
+                        + (f"（从第 {resume_file_index + 1} 首接着播）" if has_partial_for_this_round and resume_file_index > 0 and not single_fb else "")
+                    )
+                    if single_fb:
+                        # 开播前即写入本档条数基准，供界面定时刷新唤醒率分母（整轨播放耗时长，不能等播完再置）
+                        self._wakeup100_current_round_played = total_files
                     for i, path in enumerate(files):
                         if has_partial_for_this_round and i < resume_file_index:
                             continue
                         if stop():
                             break
                         base_offset = mode_idx * (num_rounds * total_files) + round_index * total_files
-                        self._wakeup100_played_count = base_offset + (i + 1)
-                        self._wakeup100_current_round_played = i + 1
                         basename = os.path.basename(path)
-                        self._append_hotword_log(f"[{i + 1}/{total_files}] Playing: {basename}")
+                        if single_fb:
+                            self._append_hotword_log(f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}")
+                        else:
+                            self._append_hotword_log(f"[{i + 1}/{len(files)}] Playing: {basename}")
+                        r_ui = getattr(self, "root", None) or getattr(self, "parent", None)
+                        if single_fb and path and r_ui and r_ui.winfo_exists():
+                            dur_est = self._wav_duration_seconds(path)
+
+                            def _arm_single_ui():
+                                self._wakeup100_single_play_active = True
+                                self._wakeup100_single_play_t0 = time.time()
+                                self._wakeup100_single_play_dur = max(0.5, float(dur_est or 0.5))
+                                self._hotword_show_single_progress_ui()
+                                self._wakeup100_schedule_single_progress_tick()
+
+                            try:
+                                r_ui.after(0, _arm_single_ui)
+                            except Exception:
+                                pass
                         try:
                             if platform.system() == "Windows":
                                 import winsound
                                 winsound.PlaySound(path, winsound.SND_FILENAME)
                             else:
                                 import subprocess as _sp
-                                _sp.run(["aplay", "-q", path], timeout=60, capture_output=True)
+                                _sp.run(["aplay", "-q", path], timeout=7200, capture_output=True)
                         except Exception:
                             pass
-                        if i < len(files) - 1 and not stop():
+                        finally:
+                            if single_fb and r_ui and r_ui.winfo_exists():
+                                try:
+                                    r_ui.after(0, self._hotword_clear_single_progress_ui)
+                                except Exception:
+                                    pass
+                        if single_fb:
+                            self._wakeup100_played_count = base_offset + total_files
+                        else:
+                            self._wakeup100_played_count = base_offset + (i + 1)
+                            self._wakeup100_current_round_played = i + 1
+                        if i < len(files) - 1 and not stop() and not single_fb:
                             self._append_hotword_log(f"  Waiting {interval} sec...")
                             for _ in range(steps):
                                 if stop():
@@ -7312,20 +7823,45 @@ class UIComponents:
             current_round_wake = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
         except Exception:
             current_round_wake = 0.0
-        denominator = max(1, current_round_played)
-        pct = (current_round_wake / denominator * 100) if denominator else 0.0
+        single_fb = bool(getattr(self, "_wakeup100_freebox_single_wav_mode", False))
+        try:
+            cid_ui = (getattr(self, "hotword_wakeup_corpus_var", None) and self.hotword_wakeup_corpus_var.get() or "").strip()
+            if (
+                not single_fb
+                and cid_ui == "ok_freebox"
+                and getattr(self, "hotword_freebox_single_wav_var", None)
+                and self.hotword_freebox_single_wav_var.get()
+            ):
+                single_fb = True
+        except Exception:
+            pass
+        try:
+            per_vol = max(1, int(getattr(self, "_wakeup100_per_volume_count", 1)))
+        except (TypeError, ValueError):
+            per_vol = max(1, current_round_played or 1)
+        if single_fb:
+            # 整轨：分母固定为「整轨条数」，避免长 wav 播完前 current_round_played 仍为 0 导致唤醒率>100%
+            denominator = per_vol
+            total_display = str(per_vol)
+        else:
+            denominator = max(1, current_round_played)
+            total_display = str(current_round_played)
+        pct = (current_round_wake / float(denominator) * 100.0) if denominator else 0.0
         if hasattr(self, "hotword_rate_effx_var"):
             self.hotword_rate_effx_var.set(getattr(self, "_wakeup100_current_effx_display", "-"))
         if hasattr(self, "hotword_rate_vol_var"):
             self.hotword_rate_vol_var.set(str(getattr(self, "_wakeup100_current_vol", "-")))
         if hasattr(self, "hotword_rate_total_var"):
-            # 总次数显示当前档实际已播放条数，与唤醒率分母一致（支持中途停止）
-            self.hotword_rate_total_var.set(str(current_round_played))
+            self.hotword_rate_total_var.set(total_display)
         if hasattr(self, "hotword_rate_count_var"):
             self.hotword_rate_count_var.set(str(int(round(current_round_wake))))
         if hasattr(self, "hotword_rate_pct_var"):
             self.hotword_rate_pct_var.set(f"{pct:.1f}%")
         if th is None or not th.is_alive():
+            try:
+                self._hotword_clear_single_progress_ui()
+            except Exception:
+                pass
             if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
                 self.hotword_wakeup100_start_btn.config(state="normal")
             if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
@@ -7352,7 +7888,7 @@ class UIComponents:
                     pass
             if hasattr(self, "status_var"):
                 if is_paused:
-                    self.status_var.set("已暂停，可点击「继续测试」接着测或「保存唤醒率结果」保存当前结果")
+                    self.status_var.set("已暂停，可点「继续」接着测或「保存」导出数据")
                 else:
                     self.status_var.set(f"播放结束，最终唤醒率: {pct:.1f}%")
             return
@@ -7371,6 +7907,10 @@ class UIComponents:
                 pass
         self._wakeup100_update_after_id = None
         self._wakeup100_play_thread = None  # 不 join，避免界面卡顿；播放线程会在后台写完当前档后退出
+        try:
+            self._hotword_clear_single_progress_ui()
+        except Exception:
+            pass
         self._wakeup100_corpus_ui_busy(True)
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="normal")
@@ -7391,10 +7931,10 @@ class UIComponents:
             except Exception:
                 self._append_hotword_log("发送 PAUSE 失败，设备端可能仍在前台播放。")
         if hasattr(self, "status_var"):
-            self.status_var.set("已暂停，可点击「继续测试」接着测或「保存唤醒率结果」保存当前结果")
+            self.status_var.set("已暂停，可点「继续」接着测或「保存」导出数据")
         if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
             self.hotword_wakeup100_resume_btn.config(state="normal")
-        self._append_hotword_log("已暂停，结果已保留；可点击「继续测试」接着播。")
+        self._append_hotword_log("已暂停，结果已保留；可点击「继续」接着播。")
 
     def _stop_wakeup100_test(self):
         """停止 100 条播放（请求线程在下一首前退出），并一并停止唤醒监测与设备端 APK 播放"""
@@ -7408,6 +7948,10 @@ class UIComponents:
             except Exception:
                 pass
         self._wakeup100_update_after_id = None
+        try:
+            self._hotword_clear_single_progress_ui()
+        except Exception:
+            pass
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="normal")
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
@@ -7461,7 +8005,7 @@ class UIComponents:
             f"语料库: {corpus_line}",
             f"播放方式: {playback_mode}",
             f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档预期 {per_vol} 条，唤醒率按该档实际已播放条数计算）",
-            f"预期播放: {getattr(self, '_wakeup100_expected', 100)} 条",
+            f"全程合计(条): {getattr(self, '_wakeup100_expected', 100)}（= 每档基准×音量档数×音效轮数）",
             f"已播放: {played} 条",
             f"合计唤醒次数: {total_wake}",
             "",
@@ -7554,11 +8098,13 @@ class UIComponents:
         """与「唤醒语料库」下拉一致：返回若干子串，log 行包含其中任意一个则视为一次可计数的唤醒候选（仍受去重时间窗约束）。"""
         cid = (corpus_id or "ok_google").strip() or "ok_google"
         if cid == "ok_freebox":
-            # Freebox：单次唤醒 pipeline 中此条较唯一；同次其它行（phrase=、kws wakeup）由去重窗合并为 1 次
-            return ("Received wake-up event: 1",)
+            # 两版软件二选一：A 版 audio_preprocess_speech；B 版 KardomeJni。不会同时出现，命中任一则计数（仍受去重时间窗约束）
+            return (
+                "Received wake-up event: 1",
+                "KardomeJni: Keyword recognized!",
+            )
         if cid == "ok_homa":
-            # 暂无专属日志时与 Google 路径一致，后续可改为 Homa 专用子串
-            return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
+            return ("Received wake-up event: 1",)
         return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
 
     def _read_hotword_logcat(self):

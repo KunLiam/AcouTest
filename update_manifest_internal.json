@@ -1,9 +1,10 @@
 {
-  "latest_version": "2.0.6",
+  "latest_version": "2.0.7",
   "publish_date": "2026-04-22",
   "notes": [
-    "唤醒监测支持多语料（Google / Freebox / Homa），计数与附加 APK 随语料切换；Google 默认关助手，其它语料默认不关。"
+    "Freebox 整轨：ok_freebox_single 任意 wav + 界面「整轨条数」；整轨唤醒率分母与「全程合计」说明；整轨时本机播放进度条（按 wav 时长估算）。",
+    "唤醒率页 UI 收敛：唤醒后/延迟并入测试框，音量与音效一行，底部按钮均分；悬停说明与帮助弹窗保留。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.6/AcouTest.v2.0.6.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.7/AcouTest.v2.0.7.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }
