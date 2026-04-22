@@ -6210,8 +6210,24 @@ class UIComponents:
             except Exception:
                 pass
 
+    def _sync_hotword_after_key_for_wakeup_corpus(self, *_args):
+        """语料为 ok_google 时默认「关闭助手(force-stop)」；其它语料默认「不关闭」（切换语料时同步，避免误关 Freebox/Homa 前台）。"""
+        if not hasattr(self, "hotword_after_key_var") or not hasattr(self, "hotword_wakeup_corpus_var"):
+            return
+        try:
+            cid = (self.hotword_wakeup_corpus_var.get() or "ok_google").strip() or "ok_google"
+        except Exception:
+            cid = "ok_google"
+        try:
+            if cid == "ok_google":
+                self.hotword_after_key_var.set("关闭助手(force-stop)")
+            else:
+                self.hotword_after_key_var.set("不关闭")
+        except Exception:
+            pass
+
     def setup_hotword_monitor_tab(self, parent):
-        """唤醒监测：过滤 logcat 中 Detected hotword，统计唤醒次数，支持重置"""
+        """唤醒监测：按当前「唤醒语料库」匹配 logcat 关键字，统计唤醒次数，支持重置"""
         frame = ttk.Frame(parent, padding=10)
         frame.pack(fill="both", expand=True)
         
@@ -6273,6 +6289,27 @@ class UIComponents:
         ttk.Label(rate_inner, text="次  唤醒率:").pack(side="left", padx=(2, 2))
         self.hotword_rate_pct_var = tk.StringVar(value="0.0%")
         ttk.Label(rate_inner, textvariable=self.hotword_rate_pct_var, font=("Arial", 12)).pack(side="left", padx=2)
+        corpus_row = ttk.Frame(rate_frame)
+        corpus_row.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(corpus_row, text="唤醒语料库:").pack(side="left")
+        self.hotword_wakeup_corpus_var = tk.StringVar(value="ok_google")
+        self.hotword_wakeup_corpus_combo = ttk.Combobox(
+            corpus_row,
+            textvariable=self.hotword_wakeup_corpus_var,
+            values=["ok_google", "ok_freebox", "ok_homa"],
+            state="readonly",
+            width=14,
+        )
+        self.hotword_wakeup_corpus_combo.pack(side="left", padx=(6, 0))
+        try:
+            self.hotword_wakeup_corpus_var.trace_add("write", self._sync_hotword_after_key_for_wakeup_corpus)
+        except Exception:
+            pass
+        self._sync_hotword_after_key_for_wakeup_corpus()
+        ttk.Label(
+            corpus_row,
+            style="Muted.TLabel",
+        ).pack(side="left", padx=(6, 0))
         rate_opts = ttk.Frame(rate_frame)
         rate_opts.pack(fill="x", padx=8, pady=(0, 4))
         ttk.Label(rate_opts, text="系统音量区间(0-25):").pack(side="left")
@@ -6315,7 +6352,10 @@ class UIComponents:
         self._wakeup100_update_after_id = None
         
         # 最近唤醒日志（只读，expand 占用唤醒次数节省的空间）
-        log_frame = ttk.LabelFrame(frame, text="最近唤醒日志（B款 Detected hotword / A款 LIBAS_HOTWORD_DETECTION_RECEIVED）")
+        log_frame = ttk.LabelFrame(
+            frame,
+            text="最近唤醒日志（Google 语料：Detected hotword / LIBAS…；Freebox：Received wake-up event: 1）",
+        )
         log_frame.pack(fill="both", expand=True, pady=5)
         self.hotword_log_text = tk.Text(log_frame, height=18, font=("Consolas", 9), state="disabled")
         vsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.hotword_log_text.yview)
@@ -6583,29 +6623,143 @@ class UIComponents:
         y = (dlg.winfo_screenheight() - h) // 2
         dlg.geometry(f"{w}x{h}+{x}+{y}")
 
-    def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None):
-        """
-        测试前确保设备已安装 com.player.demo：与唤醒监测相同，使用 wakeup_count/AudioPlayer.apk 执行 adb install。
-        log_append: 可选，接收 str，用于震音/气密/唤醒等各自的日志区。
-        """
+    def _find_wakeup_count_dir(self):
+        """返回已存在的 wakeup_count 目录路径，找不到则 (None, base_dir)。"""
         base_dir = self._get_runtime_base_dir()
-        wakeup_dir = None
         for candidate in (base_dir, os.path.dirname(base_dir)):
             d = os.path.join(candidate, "wakeup_count")
             if os.path.isdir(d):
-                wakeup_dir = d
-                break
+                return d, base_dir
+        return None, base_dir
+
+    def _resolve_wakeup_corpus_extra_apk(self, wakeup_dir, corpus_id):
+        """
+        唤醒率测试除必选 AudioPlayer.apk（com.player.demo）外，部分语料需在 wakeup_count 下额外安装的 APK（固定文件名）。
+        返回 (绝对路径 或 None, 展示用文件名)
+        """
+        cid = (corpus_id or "ok_google").strip() or "ok_google"
+        if cid == "ok_freebox":
+            name = "ok_freebox_32.apk"
+            return os.path.join(wakeup_dir, name), name
+        if cid == "ok_homa":
+            name = "ok_homa_31.apk"
+            return os.path.join(wakeup_dir, name), name
+        return None, None
+
+    def _package_name_from_apk_badging(self, apk_path):
+        """用 aapt / aapt2 dump badging 解析包名（需 Android SDK build-tools 在 PATH）。"""
+        if not apk_path or not os.path.isfile(apk_path):
+            return None
+        kwargs_win = {}
+        if platform.system() == "Windows":
+            kwargs_win["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for exe in ("aapt2", "aapt"):
+            binp = shutil.which(exe)
+            if not binp:
+                continue
+            try:
+                r = subprocess.run(
+                    [binp, "dump", "badging", apk_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                    **kwargs_win,
+                )
+                out = (r.stdout or "") + (r.stderr or "")
+                m = re.search(r"package:\s*name='([^']+)'", out)
+                if m:
+                    return m.group(1).strip()
+            except Exception:
+                continue
+        return None
+
+    def _configured_launch_package_for_corpus_extra(self, corpus_id):
+        try:
+            import feature_config as fc
+        except Exception:
+            return None
+        cid = (corpus_id or "").strip()
+        if cid == "ok_freebox":
+            p = str(getattr(fc, "WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX", "") or "").strip()
+            return p or None
+        if cid == "ok_homa":
+            p = str(getattr(fc, "WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA", "") or "").strip()
+            return p or None
+        return None
+
+    def _launch_wakeup_corpus_extra_app(self, device_id, extra_apk_path, corpus_id, log_append=None):
+        """
+        安装语料附加 APK 后将其应用拉到前台：adb shell monkey -p <包名> -c android.intent.category.LAUNCHER 1
+        包名顺序：feature_config → aapt badging 解析 APK。
+        """
+        pkg = self._configured_launch_package_for_corpus_extra(corpus_id)
+        if not pkg:
+            pkg = self._package_name_from_apk_badging(extra_apk_path)
+        if not pkg:
+            if log_append:
+                log_append(
+                    "未能自动拉起语料 APK：请在 feature_config.py 填写 "
+                    "WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX 或 OK_HOMA（主包名），"
+                    "或将 aapt/aapt2 加入 PATH 以便从 APK 解析包名。"
+                )
+            return False
+        serial = (device_id or "").strip()
+        adb_base = ["adb", "-s", serial] if serial else ["adb"]
+        kwargs = {"capture_output": True, "text": True, "timeout": 45}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(
+                adb_base + ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+                **kwargs,
+            )
+            err_tail = (r.stderr or r.stdout or "").strip()
+            if r.returncode != 0:
+                if log_append:
+                    log_append("拉起语料应用失败 (%s): %s" % (pkg, err_tail[:400]))
+                try:
+                    messagebox.showwarning(
+                        "启动语料应用",
+                        "已安装附加 APK，但自动启动失败。\n包名: %s\n\n请手动打开该应用，或在 feature_config 核对包名。\n%s"
+                        % (pkg, err_tail[:300]),
+                    )
+                except Exception:
+                    pass
+                return False
+            if log_append:
+                log_append("已启动语料应用: %s" % pkg)
+            time.sleep(0.6)
+            return True
+        except Exception as e:
+            if log_append:
+                log_append("启动语料应用异常: %s" % e)
+            try:
+                messagebox.showwarning("启动语料应用", "拉起应用时异常：%s" % e)
+            except Exception:
+                pass
+            return False
+
+    def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None, corpus_id=None):
+        """
+        始终使用 wakeup_count/AudioPlayer.apk 确保设备已安装 com.player.demo（本机+设备端播放）。
+        唤醒率测试且语料为 ok_freebox / ok_homa 时，再额外 adb install -r 对应语料 APK：
+        ok_freebox_32.apk、ok_homa_31.apk（与 AudioPlayer 独立，均在 wakeup_count 根目录）；安装成功后自动 monkey 拉起该应用（包名见 feature_config 或 aapt 解析）。
+        corpus_id 为 None（气密/震音等）：只处理 AudioPlayer.apk。
+        log_append: 可选，接收 str，用于震音/气密/唤醒等各自的日志区。
+        """
+        wakeup_dir, base_dir = self._find_wakeup_count_dir()
         if not wakeup_dir:
             messagebox.showerror(
                 "错误",
                 f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}",
             )
             return False
+
         apk_path = os.path.join(wakeup_dir, "AudioPlayer.apk")
         if not os.path.isfile(apk_path):
             messagebox.showerror(
                 "错误",
-                f"需要 wakeup_count 下 AudioPlayer.apk（设备端播放）。未找到:\n{apk_path}",
+                f"需要 wakeup_count 下 AudioPlayer.apk（设备端播放，必选）。未找到:\n{apk_path}",
             )
             return False
 
@@ -6626,7 +6780,7 @@ class UIComponents:
 
         if not installed:
             if log_append:
-                log_append(f"安装 AudioPlayer.apk 到设备 {serial or '默认设备'}...")
+                log_append("安装 AudioPlayer.apk 到设备 %s..." % (serial or "默认设备"))
             if hasattr(self, "status_var"):
                 try:
                     self.status_var.set("正在安装 AudioPlayer.apk...")
@@ -6637,7 +6791,7 @@ class UIComponents:
                 r = subprocess.run(adb_base + ["install", "-r", apk_path], capture_output=True, text=True, timeout=120)
                 if r.returncode != 0:
                     err = (r.stderr or r.stdout or "").strip()
-                    messagebox.showerror("安装失败", f"adb install 失败:\n{err[:500]}")
+                    messagebox.showerror("安装失败", "adb install 失败:\n%s" % err[:500])
                     return False
             except subprocess.TimeoutExpired:
                 messagebox.showerror("安装失败", "安装超时(120s)，请检查设备连接。")
@@ -6650,7 +6804,111 @@ class UIComponents:
         else:
             if log_append:
                 log_append("设备已安装 AudioPlayer (com.player.demo)，跳过安装。")
+
+        if corpus_id is not None:
+            cid = (corpus_id or "ok_google").strip() or "ok_google"
+            extra_path, extra_label = self._resolve_wakeup_corpus_extra_apk(wakeup_dir, cid)
+            if extra_path:
+                if not os.path.isfile(extra_path):
+                    messagebox.showerror(
+                        "错误",
+                        "当前语料为「%s」，需要额外 APK 文件:\n%s\n\n请放入 wakeup_count 目录后重试。"
+                        % (cid, extra_path),
+                    )
+                    return False
+                if log_append:
+                    log_append("额外安装语料 APK: %s ..." % extra_label)
+                if hasattr(self, "status_var"):
+                    try:
+                        self.status_var.set("正在安装 %s..." % extra_label)
+                        self.root.update_idletasks()
+                    except Exception:
+                        pass
+                try:
+                    r = subprocess.run(
+                        adb_base + ["install", "-r", extra_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    if r.returncode != 0:
+                        err = (r.stderr or r.stdout or "").strip()
+                        messagebox.showerror("安装失败", "%s 安装失败:\n%s" % (extra_label, err[:500]))
+                        return False
+                except subprocess.TimeoutExpired:
+                    messagebox.showerror("安装失败", "%s 安装超时(120s)。" % extra_label)
+                    return False
+                except Exception as e:
+                    messagebox.showerror("安装失败", str(e))
+                    return False
+                if log_append:
+                    log_append("%s 安装完成。" % extra_label)
+                self._launch_wakeup_corpus_extra_app(serial, extra_path, cid, log_append=log_append)
         return True
+
+    def _wakeup100_corpus_ui_busy(self, busy):
+        """唤醒率测试进行中或暂停待续播时禁用语料库下拉，空闲时恢复为只读可选。"""
+        c = getattr(self, "hotword_wakeup_corpus_combo", None)
+        if not c or not c.winfo_exists():
+            return
+        try:
+            c.config(state="disabled" if busy else "readonly")
+        except Exception:
+            pass
+
+    def _resolve_wakeup100_corpus(self, wakeup_dir, corpus_id):
+        """
+        解析唤醒率测试语料目录。
+        - ok_google：优先 wakeup_count/ok_google/art_100.txt + 同目录 wav；否则兼容旧版 art_100.txt + selected_100。
+        - ok_freebox / ok_homa：wakeup_count/<语料名>/ 下所有 .wav，按路径排序播放。
+        返回 dict: ok, audio_dir, list_file(可选), use_art, err(可选)
+        """
+        cid = (corpus_id or "ok_google").strip()
+        if cid == "ok_google":
+            new_dir = os.path.join(wakeup_dir, "ok_google")
+            new_art = os.path.join(new_dir, "art_100.txt")
+            if os.path.isfile(new_art) and os.path.isdir(new_dir):
+                return {"ok": True, "corpus_id": cid, "audio_dir": new_dir, "list_file": new_art, "use_art": True}
+            leg_art = os.path.join(wakeup_dir, "art_100.txt")
+            leg_audio = os.path.join(wakeup_dir, "selected_100")
+            if os.path.isfile(leg_art) and os.path.isdir(leg_audio):
+                return {"ok": True, "corpus_id": cid, "audio_dir": leg_audio, "list_file": leg_art, "use_art": True}
+            return {
+                "ok": False,
+                "err": "未找到 ok_google 语料。\n请使用 wakeup_count/ok_google/art_100.txt 与同目录下的 wav，\n或旧版 wakeup_count/art_100.txt + selected_100/。",
+            }
+        sub = os.path.join(wakeup_dir, cid)
+        if not os.path.isdir(sub):
+            return {"ok": False, "err": f"未找到语料目录:\nwakeup_count/{cid}/\n（请将对应 wav 放入该文件夹）"}
+        return {"ok": True, "corpus_id": cid, "audio_dir": sub, "list_file": None, "use_art": False}
+
+    def _load_wakeup100_files_art(self, list_path, audio_dir):
+        """按 art_100.txt 顺序解析 wav 路径：先尝试相对路径，再尝试仅文件名（兼容扁平目录）。"""
+        with open(list_path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        files = []
+        for line in lines:
+            rel = line.replace("/", os.sep).strip().lstrip(os.sep)
+            if not rel:
+                continue
+            cand = os.path.normpath(os.path.join(audio_dir, rel))
+            if os.path.isfile(cand):
+                files.append(cand)
+                continue
+            cand2 = os.path.join(audio_dir, os.path.basename(rel))
+            if os.path.isfile(cand2):
+                files.append(cand2)
+        return files
+
+    def _load_wakeup100_files_sorted(self, corpus_dir):
+        """语料目录下递归收集 .wav，按路径名排序（稳定、便于 ok_freebox 等按文件名规律从大到小命名）。"""
+        out = []
+        for root, _, names in os.walk(corpus_dir):
+            for n in names:
+                if n.lower().endswith(".wav"):
+                    out.append(os.path.join(root, n))
+        out.sort(key=lambda p: p.replace("\\", "/").lower())
+        return out
 
     def _start_wakeup100_test(self, resume=False):
         """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试。resume=True 时从上次暂停处接着测，保留已有结果。"""
@@ -6670,15 +6928,20 @@ class UIComponents:
         if not wakeup_dir:
             messagebox.showerror("错误", f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}")
             return
-        list_file = os.path.join(wakeup_dir, "art_100.txt")
-        audio_dir = os.path.join(wakeup_dir, "selected_100")
-        apk_path = os.path.join(wakeup_dir, "AudioPlayer.apk")
-        if not os.path.isfile(list_file) or not os.path.isdir(audio_dir):
-            messagebox.showerror("错误", "需要 wakeup_count 下 art_100.txt 与 selected_100 文件夹（本机播放）。")
+        corpus_id = "ok_google"
+        try:
+            v = getattr(self, "hotword_wakeup_corpus_var", None)
+            if v is not None:
+                corpus_id = (v.get() or "ok_google").strip() or "ok_google"
+        except Exception:
+            corpus_id = "ok_google"
+        layout = self._resolve_wakeup100_corpus(wakeup_dir, corpus_id)
+        if not layout.get("ok"):
+            messagebox.showerror("错误", layout.get("err") or "语料目录无效。")
             return
-        if not os.path.isfile(apk_path):
-            messagebox.showerror("错误", f"需要 wakeup_count 下 AudioPlayer.apk（设备端同时播放）。未找到:\n{apk_path}")
-            return
+        audio_dir = layout["audio_dir"]
+        list_file = layout.get("list_file")
+        use_art = layout.get("use_art")
         try:
             v_from = max(0, min(25, int((getattr(self, "hotword_wakeup100_volume_from_var", None) or tk.StringVar(value="5")).get().strip() or "5")))
             v_to = max(0, min(25, int((getattr(self, "hotword_wakeup100_volume_to_var", None) or tk.StringVar(value="10")).get().strip() or "10")))
@@ -6688,13 +6951,14 @@ class UIComponents:
             v_from = v_to = 5
         self._wakeup100_last_volume = f"{v_from}-{v_to}"
         self._wakeup100_last_playback_mode = "本机+设备端同时"
+        self._wakeup100_corpus_id = layout.get("corpus_id") or corpus_id
         if getattr(self, "_wakeup100_play_thread", None) and self._wakeup100_play_thread.is_alive():
             messagebox.showinfo("提示", "100 条播放已在运行中，请先「停止播放」或「暂停」再操作。")
             return
         if resume and not getattr(self, "_wakeup100_paused", False):
             messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续测试」）。")
             return
-        if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_hotword_log):
+        if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_hotword_log, corpus_id=corpus_id):
             return
         current_vol = self._get_device_volume(device_id)
         if current_vol is not None:
@@ -6729,20 +6993,20 @@ class UIComponents:
                     pass
         self._wakeup100_effx_modes = effx_modes if effx_modes else None
         list_path = list_file
+        files = []
         try:
-            with open(list_path, "r", encoding="utf-8") as f:
-                lines = [ln.strip() for ln in f if ln.strip()]
-            files = []
-            for line in lines:
-                name = os.path.basename(line.replace("/", os.sep))
-                full = os.path.join(audio_dir, name)
-                if os.path.isfile(full):
-                    files.append(full)
+            if use_art and list_path:
+                files = self._load_wakeup100_files_art(list_path, audio_dir)
+            else:
+                files = self._load_wakeup100_files_sorted(audio_dir)
         except Exception as e:
-            messagebox.showerror("错误", f"读取 art_100.txt 或 selected_100 失败: {e}")
+            messagebox.showerror("错误", f"读取语料失败: {e}")
             return
         if not files:
-            messagebox.showerror("错误", f"art_100.txt 中无有效条目或 selected_100 内无对应 wav 文件。")
+            if use_art:
+                messagebox.showerror("错误", "art_100.txt 中无有效条目，或语料目录内找不到对应 wav 文件。")
+            else:
+                messagebox.showerror("错误", f"语料目录内未找到 wav 文件:\n{audio_dir}")
             return
         try:
             per_count_raw = (getattr(self, "hotword_wakeup100_per_count_var", None) or tk.StringVar(value="100")).get().strip()
@@ -6829,6 +7093,7 @@ class UIComponents:
                 self.hotword_rate_pct_var.set("0.0%")
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="disabled")
+        self._wakeup100_corpus_ui_busy(True)
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
             self.hotword_wakeup100_stop_btn.config(state="normal")
         if hasattr(self, "hotword_wakeup100_pause_btn") and self.hotword_wakeup100_pause_btn.winfo_exists():
@@ -6837,7 +7102,10 @@ class UIComponents:
             self.hotword_wakeup100_resume_btn.config(state="disabled")
         if hasattr(self, "status_var"):
             self.status_var.set("100 条唤醒率测试：本机+设备端同时播放中，按音量档位逐轮测试")
-        self._append_hotword_log(f"Reading list: {list_path}")
+        if use_art and list_path:
+            self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，列表: {list_path}")
+        else:
+            self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，目录: {audio_dir}（按文件名排序，共 {len(files)} 条）")
         effx_names = {1: "Movie", 2: "Music", 3: "HALL", 4: "Classical", 5: "Normal", 6: "POP", 7: "Live", 8: "News", 9: "FTest", 10: "Customize", 11: "Game"}
         if self._wakeup100_effx_modes:
             self._append_hotword_log(f"音效模式: {self._wakeup100_effx_modes}，将依次设音效后各做一遍音量区间测试")
@@ -7067,6 +7335,7 @@ class UIComponents:
             is_paused = getattr(self, "_wakeup100_paused", False)
             if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
                 self.hotword_wakeup100_resume_btn.config(state="normal" if is_paused else "disabled")
+            self._wakeup100_corpus_ui_busy(is_paused)
             self._wakeup100_play_thread = None
             self._wakeup100_update_after_id = None
             self.stop_hotword_monitor()
@@ -7102,6 +7371,7 @@ class UIComponents:
                 pass
         self._wakeup100_update_after_id = None
         self._wakeup100_play_thread = None  # 不 join，避免界面卡顿；播放线程会在后台写完当前档后退出
+        self._wakeup100_corpus_ui_busy(True)
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="normal")
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
@@ -7142,6 +7412,7 @@ class UIComponents:
             self.hotword_wakeup100_start_btn.config(state="normal")
         if hasattr(self, "hotword_wakeup100_stop_btn") and self.hotword_wakeup100_stop_btn.winfo_exists():
             self.hotword_wakeup100_stop_btn.config(state="disabled")
+        self._wakeup100_corpus_ui_busy(False)
         self.stop_hotword_monitor()
         device_id = getattr(self, "_wakeup100_device_id", None)
         if device_id:
@@ -7182,10 +7453,12 @@ class UIComponents:
         volume_level = getattr(self, "_wakeup100_last_volume", None)
         per_vol = max(1, getattr(self, "_wakeup100_per_volume_count", 100))
         effx_names = {1: "Movie", 2: "Music", 3: "HALL", 4: "Classical", 5: "Normal", 6: "POP", 7: "Live", 8: "News", 9: "FTest", 10: "Customize", 11: "Game"}
+        corpus_line = getattr(self, "_wakeup100_corpus_id", None) or "-"
         lines = [
             "100 条唤醒率测试结果",
             "=" * 40,
             f"时间: {ts}",
+            f"语料库: {corpus_line}",
             f"播放方式: {playback_mode}",
             f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档预期 {per_vol} 条，唤醒率按该档实际已播放条数计算）",
             f"预期播放: {getattr(self, '_wakeup100_expected', 100)} 条",
@@ -7277,10 +7550,19 @@ class UIComponents:
         except Exception as e:
             messagebox.showerror("保存失败", str(e))
 
+    def _hotword_log_markers_for_corpus(self, corpus_id):
+        """与「唤醒语料库」下拉一致：返回若干子串，log 行包含其中任意一个则视为一次可计数的唤醒候选（仍受去重时间窗约束）。"""
+        cid = (corpus_id or "ok_google").strip() or "ok_google"
+        if cid == "ok_freebox":
+            # Freebox：单次唤醒 pipeline 中此条较唯一；同次其它行（phrase=、kws wakeup）由去重窗合并为 1 次
+            return ("Received wake-up event: 1",)
+        if cid == "ok_homa":
+            # 暂无专属日志时与 Google 路径一致，后续可改为 Homa 专用子串
+            return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
+        return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
+
     def _read_hotword_logcat(self):
-        """A/B 两类唤醒日志统一按时间窗去重：一次唤醒只计 1 次，避免同次唤醒多条日志重复加数。"""
-        keyword_b = "Detected hotword"
-        keyword_a = "LIBAS_HOTWORD_DETECTION_RECEIVED"
+        """按语料匹配 logcat 子串；时间窗去重：一次唤醒只计 1 次，避免同次唤醒多条日志重复加数。"""
         root = getattr(self, "root", None) or getattr(self, "parent", None)
 
         def _ui_append(display_count, line_text):
@@ -7337,9 +7619,13 @@ class UIComponents:
                     break
                 if not line:
                     continue
-                is_b = keyword_b in line
-                is_a = keyword_a in line
-                if not is_b and not is_a:
+                try:
+                    cv = getattr(self, "hotword_wakeup_corpus_var", None)
+                    corpus_id = (cv.get() if cv is not None else None) or "ok_google"
+                except Exception:
+                    corpus_id = "ok_google"
+                markers = self._hotword_log_markers_for_corpus(corpus_id)
+                if not any(m in line for m in markers):
                     continue
                 now = time.time()
                 if now - getattr(self, "_hotword_monitor_start_time", 0) < 1.0:

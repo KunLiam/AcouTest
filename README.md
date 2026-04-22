@@ -57,8 +57,8 @@
   - 结果输出：日志文件落盘；支持日志查看器实时筛选查看。
 - **唤醒监测**
   - 功能用途：监测唤醒关键词相关日志并统计命中次数；支持「100 条唤醒率测试」本地按序播放 100 条唤醒语并统计唤醒率。
-  - 可配置项：关键词、监测时机、日志范围；唤醒后关闭方式（不关闭/force-stop 助手/返回键/Home 键）、关闭延迟。
-  - 100 条测试：使用内置播放逻辑，只需在 exe 同目录或上一级目录放置 **wakeup_count** 文件夹，内含 **art_100.txt**（播放顺序列表）与 **selected_100** 文件夹（对应 wav 文件），无需提供任何 .py 脚本。
+  - 可配置项：与「唤醒语料库」联动的 logcat 匹配规则（Google：`Detected hotword` / `LIBAS_HOTWORD…`；Freebox：`Received wake-up event: 1`）；唤醒后关闭方式（不关闭/force-stop 助手/返回键/Home 键）、关闭延迟。切换语料时默认联动：**ok_google** 默认选「关闭助手(force-stop)」；**ok_freebox / ok_homa** 默认「不关闭」（仍可手动改）。
+  - 100 条测试：在 exe 同目录或上一级放置 **wakeup_count** 文件夹。**ok_google**：`wakeup_count/ok_google/art_100.txt`（播放顺序）与同目录（或子目录）下的 wav；仍兼容旧版 `wakeup_count/art_100.txt` + `selected_100/`。**ok_freebox / ok_homa**：`wakeup_count/<语料名>/` 下放入 wav，按路径排序播放。界面「唤醒语料库」下拉框切换语料。**设备端 APK**：`wakeup_count/AudioPlayer.apk`（`com.player.demo`，必选）与气密/震音共用；开始唤醒率测试时若选 **ok_freebox** 会再 `install -r` **`wakeup_count/ok_freebox_32.apk`** 并 **自动启动该应用**（`adb shell monkey -p 主包名 …`）；**ok_homa** 同理安装 **`ok_homa_31.apk`** 并启动。主包名可在 **`feature_config.py`** 中填写 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`；留空时若本机 PATH 有 **aapt/aapt2**，会尝试从 APK 解析包名。
   - 结果输出：实时显示命中状态与计数；100 条测试时显示预期条数、当前唤醒次数与唤醒率。
 - **系统指令**
   - 功能用途：执行常用系统指令（如 `dumpsys`、`tinymix`、`getprop`）与自定义命令。
@@ -94,6 +94,8 @@
   - 结果输出：写入结果反馈与可追溯日志。
 
 ## 最近更新（V1.6）
+
+- **唤醒率多语料**：「唤醒监测」中「100 条唤醒率测试」增加语料库下拉（ok_google / ok_freebox / ok_homa）。`ok_google` 使用 `wakeup_count/ok_google/art_100.txt` 顺序；其它语料目录内 wav 按路径排序播放；仍兼容旧目录 `art_100.txt` + `selected_100/`。唤醒计数随语料切换：Freebox 以 logcat 含 **`Received wake-up event: 1`** 为一次唤醒；Google 仍为 `Detected hotword` / `LIBAS_HOTWORD_DETECTION_RECEIVED`。必选 **`wakeup_count/AudioPlayer.apk`**；Freebox/Homa 另在根目录放置 **`ok_freebox_32.apk`** / **`ok_homa_31.apk`**，开始测试时额外 **install -r**。
 
 - **OpenClaw HTTP 控制接口**
   - 新增本地 HTTP 接口服务，默认监听 `127.0.0.1:8765`，可供 OpenClaw 直接调用控制声测大师执行动作。

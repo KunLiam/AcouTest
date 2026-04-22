@@ -1,9 +1,9 @@
 {
-  "latest_version": "2.0.5",
-  "publish_date": "2026-04-03",
+  "latest_version": "2.0.6",
+  "publish_date": "2026-04-22",
   "notes": [
-    "检查更新：HTTPS 使用 certifi 根证书包，减轻证书验证失败；失败时可设环境变量 ACOUTEST_UPDATE_SSL_INSECURE=1 排查。"
+    "唤醒监测支持多语料（Google / Freebox / Homa），计数与附加 APK 随语料切换；Google 默认关助手，其它语料默认不关。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.5/AcouTest.v2.0.5.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.6/AcouTest.v2.0.6.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }
