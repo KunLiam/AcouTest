@@ -101,3 +101,18 @@ def run_pause(device_id: Optional[str]) -> None:
     component = _cfg("AUDIO_PLAYER_COMPONENT", "com.player.demo/.MainActivity")
     cmd = adb_base(device_id) + ["shell", "am", "start", "-a", action, "-n", component]
     subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+
+def run_resume(device_id: Optional[str]) -> subprocess.CompletedProcess:
+    """PAUSE 后恢复设备端播放（进程未 kill 时由 MainActivity 续播）；未配置或失败时由调用方回退 REPLAY。"""
+    action = (_cfg("AUDIO_PLAYER_ACTION_RESUME", "com.player.demo.RESUME") or "").strip()
+    component = _cfg("AUDIO_PLAYER_COMPONENT", "com.player.demo/.MainActivity")
+    if not action:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="AUDIO_PLAYER_ACTION_RESUME empty",
+        )
+    cmd = adb_base(device_id) + ["shell", "am", "start", "-a", action, "-n", component]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)

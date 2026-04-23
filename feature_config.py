@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
-APP_VERSION = "2.0.7"
+APP_VERSION = "2.0.8"
 
 # AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
 AUDIOPLAYER_APK_VERSION = "1.0.1"
@@ -58,6 +58,8 @@ AUDIO_PLAYER_COMPONENT = "com.player.demo/.MainActivity"
 AUDIO_PLAYER_ACTION_PLAY = "com.player.demo.PLAY"
 AUDIO_PLAYER_ACTION_PAUSE = "com.player.demo.PAUSE"
 AUDIO_PLAYER_ACTION_REPLAY = "com.player.demo.REPLAY"
+# 唤醒率测试「继续」且暂停时未 force-stop 本 APK 时优先下发（与 PlayerDemo MainActivity 一致则设备可从暂停处续播）
+AUDIO_PLAYER_ACTION_RESUME = "com.player.demo.RESUME"
 AUDIO_PLAYER_EXTRA_TRACK = "com.player.demo.EXTRA_TRACK"
 # 唤醒率测试：安装 ok_freebox_32.apk / ok_homa_31.apk 后要 adb 拉起的主包名（adb shell monkey -p <包名> …）。
 # 留空时程序会尝试用本机 PATH 中的 aapt/aapt2 从 APK 解析包名；若解析失败请在下方填写包名。

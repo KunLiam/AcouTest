@@ -6404,8 +6404,52 @@ class UIComponents:
             return None, d
         return os.path.join(d, names[0]), d
 
+    def _wav_duration_seconds_riff(self, path):
+        """不依赖 wave：由 data 块大小与 fmt 的 block_align、sample_rate 估算时长（兼容 IEEE float 等）。"""
+        try:
+            file_size = os.path.getsize(path)
+            if file_size < 44:
+                return 0.0
+            with open(path, "rb") as f:
+                riff = f.read(12)
+                if len(riff) < 12 or riff[:4] != b"RIFF" or riff[8:12] != b"WAVE":
+                    return 0.0
+                fmt_payload = None
+                data_size = 0
+                pos = 12
+                while pos + 8 <= file_size:
+                    f.seek(pos)
+                    cid = f.read(4)
+                    if len(cid) < 4:
+                        break
+                    sz_b = f.read(4)
+                    if len(sz_b) < 4:
+                        break
+                    csz = struct.unpack("<I", sz_b)[0]
+                    payload0 = pos + 8
+                    next_pos = payload0 + csz + (csz % 2)
+                    if cid == b"fmt ":
+                        f.seek(payload0)
+                        fmt_payload = f.read(csz)
+                    elif cid == b"data":
+                        data_size = csz
+                    pos = next_pos
+            if not fmt_payload or len(fmt_payload) < 16 or data_size <= 0:
+                return 0.0
+            _af, _n_ch, rate, _br, block_align, bits = struct.unpack("<HHIIHH", fmt_payload[:16])
+            if rate <= 0:
+                return 0.0
+            if block_align <= 0 and bits > 0:
+                block_align = _n_ch * max(1, bits // 8)
+            if block_align <= 0:
+                return 0.0
+            nframes = data_size // block_align
+            return float(nframes) / float(rate)
+        except Exception:
+            return 0.0
+
     def _wav_duration_seconds(self, path):
-        """PCM wav 时长（秒），用于整轨本机播放进度估算。"""
+        """wav 时长（秒），用于整轨本机播放进度估算；wave 不支持时回退 RIFF 解析。"""
         try:
             with wave.open(path, "rb") as wf:
                 fr = wf.getframerate()
@@ -6414,7 +6458,111 @@ class UIComponents:
                     return 0.0
                 return float(n) / float(fr)
         except Exception:
-            return 0.0
+            return self._wav_duration_seconds_riff(path)
+
+    def _hotword_make_wav_remainder_riff_slice(self, src_path, offset_sec):
+        """不依赖 wave 模块：按 RIFF 的 data 块做字节级截断，兼容 IEEE float / 24bit 等 wave 写头易失败的情况。"""
+        try:
+            off = float(offset_sec or 0)
+            if off < 0.05:
+                return None
+            file_size = os.path.getsize(src_path)
+            if file_size < 44:
+                return None
+            with open(src_path, "rb") as f:
+                riff = f.read(12)
+                if len(riff) < 12 or riff[:4] != b"RIFF" or riff[8:12] != b"WAVE":
+                    return None
+                fmt_payload = None
+                data_start = None
+                data_size = 0
+                pos = 12
+                while pos + 8 <= file_size:
+                    f.seek(pos)
+                    cid = f.read(4)
+                    if len(cid) < 4:
+                        break
+                    sz_b = f.read(4)
+                    if len(sz_b) < 4:
+                        break
+                    csz = struct.unpack("<I", sz_b)[0]
+                    payload0 = pos + 8
+                    next_pos = payload0 + csz + (csz % 2)
+                    if cid == b"fmt ":
+                        f.seek(payload0)
+                        fmt_payload = f.read(csz)
+                    elif cid == b"data":
+                        data_start = payload0
+                        data_size = csz
+                    pos = next_pos
+                if not fmt_payload or data_start is None or data_size <= 0:
+                    return None
+                if len(fmt_payload) < 16:
+                    return None
+                audio_fmt, n_ch, rate, _byte_rate, block_align, bits = struct.unpack("<HHIIHH", fmt_payload[:16])
+                if rate <= 0 or n_ch <= 0:
+                    return None
+                if block_align <= 0 and bits > 0:
+                    block_align = n_ch * max(1, bits // 8)
+                if block_align <= 0:
+                    return None
+                skip_b = int(off * float(rate)) * int(block_align)
+                skip_b = max(0, min(skip_b, data_size - 1))
+                if skip_b >= data_size:
+                    return None
+                new_data_sz = data_size - skip_b
+                f.seek(0)
+                prefix = bytearray(f.read(data_start))
+                if len(prefix) != data_start:
+                    return None
+                struct.pack_into("<I", prefix, data_start - 4, new_data_sz)
+                f.seek(data_start + skip_b)
+                tail_pcm = f.read(new_data_sz)
+                if len(tail_pcm) != new_data_sz:
+                    return None
+            body = bytes(prefix) + tail_pcm
+            body = bytearray(body)
+            struct.pack_into("<I", body, 4, len(body) - 8)
+            _fd, tmp = tempfile.mkstemp(suffix=".wav")
+            os.close(_fd)
+            with open(tmp, "wb") as wf:
+                wf.write(body)
+            return tmp
+        except Exception:
+            return None
+
+    def _hotword_make_wav_remainder_temp(self, src_path, offset_sec):
+        """从 offset_sec 起截一段 wav 到临时文件供本机续播；先 wave（PCM），失败则 RIFF 字节切片（float 等）。"""
+        try:
+            off = float(offset_sec or 0)
+            if off < 0.05:
+                return None
+            with wave.open(src_path, "rb") as wr:
+                ch = wr.getnchannels()
+                sw = wr.getsampwidth()
+                fr = wr.getframerate()
+                nframes = wr.getnframes()
+                if not fr or nframes <= 0 or ch <= 0 or sw <= 0:
+                    return None
+                skip = int(off * fr)
+                skip = max(0, min(skip, nframes))
+                if skip >= nframes:
+                    return None
+                wr.setpos(skip)
+                rest = wr.readframes(nframes - skip)
+                if not rest:
+                    return None
+            _fd, tmp = tempfile.mkstemp(suffix=".wav")
+            os.close(_fd)
+            with wave.open(tmp, "wb") as ww:
+                ww.setnchannels(ch)
+                ww.setsampwidth(sw)
+                ww.setframerate(fr)
+                ww.writeframes(rest)
+            return tmp
+        except Exception:
+            pass
+        return self._hotword_make_wav_remainder_riff_slice(src_path, offset_sec)
 
     def _hotword_show_single_progress_ui(self):
         """在主线程显示整轨本机播放进度条（由 root.after 调用）。"""
@@ -6433,9 +6581,36 @@ class UIComponents:
         except Exception:
             pass
 
+    def _hotword_stop_local_wakeup_playback(self):
+        """停止/暂停时打断本机 wav（整轨异步 winsound 或 aplay 子进程）。"""
+        if platform.system() == "Windows":
+            try:
+                import winsound
+
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+        proc = getattr(self, "_wakeup100_aplay_proc", None)
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.5)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            self._wakeup100_aplay_proc = None
+
     def _hotword_clear_single_progress_ui(self):
         """停止/播完一轮本机 wav 后隐藏进度并取消定时刷新。"""
         self._wakeup100_single_play_active = False
+        self._wakeup100_single_progress_base_sec = 0.0
+        self._wakeup100_single_progress_total_sec = 0.0
         root = getattr(self, "root", None) or getattr(self, "parent", None)
         aid = getattr(self, "_wakeup100_single_tick_after_id", None)
         if aid and root and root.winfo_exists():
@@ -6452,6 +6627,27 @@ class UIComponents:
             fr = getattr(self, "hotword_single_progress_frame", None)
             if fr is not None and fr.winfo_exists() and fr.winfo_manager():
                 fr.pack_forget()
+        except Exception:
+            pass
+
+    def _hotword_freeze_single_progress_on_pause(self):
+        """整轨本机播放被用户暂停：停掉定时刷新，保留进度条与当前百分比（不 pack_forget）。"""
+        self._wakeup100_single_play_active = False
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        aid = getattr(self, "_wakeup100_single_tick_after_id", None)
+        if aid and root and root.winfo_exists():
+            try:
+                root.after_cancel(aid)
+            except Exception:
+                pass
+        self._wakeup100_single_tick_after_id = None
+        try:
+            if hasattr(self, "hotword_single_time_var"):
+                cur = (self.hotword_single_time_var.get() or "").strip()
+                if cur and "已暂停" not in cur:
+                    self.hotword_single_time_var.set(cur + " · 已暂停")
+                elif not cur:
+                    self.hotword_single_time_var.set("已暂停（本机计时）")
         except Exception:
             pass
 
@@ -6733,6 +6929,12 @@ class UIComponents:
         self._wakeup100_update_after_id = None
         self._wakeup100_single_play_active = False
         self._wakeup100_single_tick_after_id = None
+        self._wakeup100_aplay_proc = None
+        self._wakeup100_single_local_offset_sec = 0.0
+        self._wakeup100_single_fb_defer_round_result = False
+        self._wakeup100_single_progress_base_sec = 0.0
+        self._wakeup100_single_progress_total_sec = 0.0
+        self._wakeup100_apk_prepare_thread = None
 
         log_hdr = ttk.Frame(frame)
         log_hdr.pack(anchor="w", pady=(6, 0))
@@ -6808,7 +7010,7 @@ class UIComponents:
             else:
                 kwargs["shell"] = False
                 self.hotword_monitor_process = subprocess.Popen(argv, **kwargs)
-            time.sleep(0.3)
+            self._pump_tk_idletasks_ms(300)
             if self.hotword_monitor_process.poll() is not None:
                 out = ""
                 try:
@@ -6857,6 +7059,21 @@ class UIComponents:
             self.hotword_log_text.config(state="normal")
             self.hotword_log_text.delete("1.0", "end")
             self.hotword_log_text.config(state="disabled")
+
+    def _pump_tk_idletasks_ms(self, total_ms=500, step_ms=25):
+        """在阻塞操作间隙调用 update_idletasks，减轻「未响应」转圈（不替代后台线程）。"""
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if not root or not root.winfo_exists():
+            time.sleep(max(0, total_ms) / 1000.0)
+            return
+        step = max(5, int(step_ms))
+        n = max(1, int(math.ceil(float(total_ms) / float(step))))
+        for _ in range(n):
+            try:
+                root.update_idletasks()
+            except Exception:
+                pass
+            time.sleep(step / 1000.0)
 
     def _append_hotword_log(self, msg):
         """从任意线程安全地向「最近唤醒日志」追加一行（用于 100 条播放进度等）"""
@@ -7072,7 +7289,7 @@ class UIComponents:
             return p or None
         return None
 
-    def _launch_wakeup_corpus_extra_app(self, device_id, extra_apk_path, corpus_id, log_append=None):
+    def _launch_wakeup_corpus_extra_app(self, device_id, extra_apk_path, corpus_id, log_append=None, ui_silent=False):
         """
         安装语料附加 APK 后将其应用拉到前台：adb shell monkey -p <包名> -c android.intent.category.LAUNCHER 1
         包名顺序：feature_config → aapt badging 解析 APK。
@@ -7102,14 +7319,15 @@ class UIComponents:
             if r.returncode != 0:
                 if log_append:
                     log_append("拉起语料应用失败 (%s): %s" % (pkg, err_tail[:400]))
-                try:
-                    messagebox.showwarning(
-                        "启动语料应用",
-                        "已安装附加 APK，但自动启动失败。\n包名: %s\n\n请手动打开该应用，或在 feature_config 核对包名。\n%s"
-                        % (pkg, err_tail[:300]),
-                    )
-                except Exception:
-                    pass
+                if not ui_silent:
+                    try:
+                        messagebox.showwarning(
+                            "启动语料应用",
+                            "已安装附加 APK，但自动启动失败。\n包名: %s\n\n请手动打开该应用，或在 feature_config 核对包名。\n%s"
+                            % (pkg, err_tail[:300]),
+                        )
+                    except Exception:
+                        pass
                 return False
             if log_append:
                 log_append("已启动语料应用: %s" % pkg)
@@ -7118,35 +7336,40 @@ class UIComponents:
         except Exception as e:
             if log_append:
                 log_append("启动语料应用异常: %s" % e)
-            try:
-                messagebox.showwarning("启动语料应用", "拉起应用时异常：%s" % e)
-            except Exception:
-                pass
+            if not ui_silent:
+                try:
+                    messagebox.showwarning("启动语料应用", "拉起应用时异常：%s" % e)
+                except Exception:
+                    pass
             return False
 
-    def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None, corpus_id=None):
+    def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None, corpus_id=None, ui_silent=False):
         """
         始终使用 wakeup_count/AudioPlayer.apk 确保设备已安装 com.player.demo（本机+设备端播放）。
         唤醒率测试且语料为 ok_freebox / ok_homa 时，再额外 adb install -r 对应语料 APK：
         ok_freebox_32.apk、ok_homa_31.apk（与 AudioPlayer 独立，均在 wakeup_count 根目录）；安装成功后自动 monkey 拉起该应用（包名见 feature_config 或 aapt 解析）。
         corpus_id 为 None（气密/震音等）：只处理 AudioPlayer.apk。
         log_append: 可选，接收 str，用于震音/气密/唤醒等各自的日志区。
+        ui_silent=True 时不弹 messagebox，错误写入 _wakeup100_prepare_err 并打日志（供后台线程调用）。
         """
+        def _err(msg):
+            if ui_silent:
+                self._wakeup100_prepare_err = msg
+                if log_append:
+                    log_append(msg)
+                return False
+            messagebox.showerror("错误", msg)
+            return False
+
         wakeup_dir, base_dir = self._find_wakeup_count_dir()
         if not wakeup_dir:
-            messagebox.showerror(
-                "错误",
-                f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}",
+            return _err(
+                f"未找到 wakeup_count 目录。已尝试:\n• {os.path.join(base_dir, 'wakeup_count')}\n• {os.path.join(os.path.dirname(base_dir), 'wakeup_count')}"
             )
-            return False
 
         apk_path = os.path.join(wakeup_dir, "AudioPlayer.apk")
         if not os.path.isfile(apk_path):
-            messagebox.showerror(
-                "错误",
-                f"需要 wakeup_count 下 AudioPlayer.apk（设备端播放，必选）。未找到:\n{apk_path}",
-            )
-            return False
+            return _err(f"需要 wakeup_count 下 AudioPlayer.apk（设备端播放，必选）。未找到:\n{apk_path}")
 
         serial = (device_id or "").strip()
         adb_base = ["adb", "-s", serial] if serial else ["adb"]
@@ -7166,7 +7389,7 @@ class UIComponents:
         if not installed:
             if log_append:
                 log_append("安装 AudioPlayer.apk 到设备 %s..." % (serial or "默认设备"))
-            if hasattr(self, "status_var"):
+            if not ui_silent and hasattr(self, "status_var"):
                 try:
                     self.status_var.set("正在安装 AudioPlayer.apk...")
                     self.root.update_idletasks()
@@ -7176,14 +7399,11 @@ class UIComponents:
                 r = subprocess.run(adb_base + ["install", "-r", apk_path], capture_output=True, text=True, timeout=120)
                 if r.returncode != 0:
                     err = (r.stderr or r.stdout or "").strip()
-                    messagebox.showerror("安装失败", "adb install 失败:\n%s" % err[:500])
-                    return False
+                    return _err("adb install 失败:\n%s" % err[:500])
             except subprocess.TimeoutExpired:
-                messagebox.showerror("安装失败", "安装超时(120s)，请检查设备连接。")
-                return False
+                return _err("安装超时(120s)，请检查设备连接。")
             except Exception as e:
-                messagebox.showerror("安装失败", str(e))
-                return False
+                return _err(str(e))
             if log_append:
                 log_append("AudioPlayer.apk 安装完成。")
         else:
@@ -7195,15 +7415,12 @@ class UIComponents:
             extra_path, extra_label = self._resolve_wakeup_corpus_extra_apk(wakeup_dir, cid)
             if extra_path:
                 if not os.path.isfile(extra_path):
-                    messagebox.showerror(
-                        "错误",
-                        "当前语料为「%s」，需要额外 APK 文件:\n%s\n\n请放入 wakeup_count 目录后重试。"
-                        % (cid, extra_path),
+                    return _err(
+                        "当前语料为「%s」，需要额外 APK 文件:\n%s\n\n请放入 wakeup_count 目录后重试。" % (cid, extra_path)
                     )
-                    return False
                 if log_append:
                     log_append("额外安装语料 APK: %s ..." % extra_label)
-                if hasattr(self, "status_var"):
+                if not ui_silent and hasattr(self, "status_var"):
                     try:
                         self.status_var.set("正在安装 %s..." % extra_label)
                         self.root.update_idletasks()
@@ -7218,17 +7435,17 @@ class UIComponents:
                     )
                     if r.returncode != 0:
                         err = (r.stderr or r.stdout or "").strip()
-                        messagebox.showerror("安装失败", "%s 安装失败:\n%s" % (extra_label, err[:500]))
-                        return False
+                        return _err("%s 安装失败:\n%s" % (extra_label, err[:500]))
                 except subprocess.TimeoutExpired:
-                    messagebox.showerror("安装失败", "%s 安装超时(120s)。" % extra_label)
-                    return False
+                    return _err("%s 安装超时(120s)。" % extra_label)
                 except Exception as e:
-                    messagebox.showerror("安装失败", str(e))
-                    return False
+                    return _err(str(e))
                 if log_append:
                     log_append("%s 安装完成。" % extra_label)
-                self._launch_wakeup_corpus_extra_app(serial, extra_path, cid, log_append=log_append)
+                if not self._launch_wakeup_corpus_extra_app(serial, extra_path, cid, log_append=log_append, ui_silent=ui_silent):
+                    if ui_silent and not (getattr(self, "_wakeup100_prepare_err", None) or "").strip():
+                        self._wakeup100_prepare_err = "语料 APK 已安装但未能自动拉起前台应用，请查看日志或核对 feature_config 包名。"
+                    return False
         return True
 
     def _wakeup100_corpus_ui_busy(self, busy):
@@ -7331,7 +7548,9 @@ class UIComponents:
     def _start_wakeup100_test(self, resume=False):
         """开始 100 条唤醒率测试：本机扬声器与设备端 APK 同时播放，按音量区间逐档测试。resume=True 时从上次暂停处接着测，保留已有结果。"""
         try:
-            self._hotword_clear_single_progress_ui()
+            # 「继续」时不要清整轨进度条，避免误杀后续逻辑里依赖的 UI 状态；全新开始才收起
+            if not resume:
+                self._hotword_clear_single_progress_ui()
         except Exception:
             pass
         if not self.check_device_selected():
@@ -7380,16 +7599,95 @@ class UIComponents:
         if resume and not getattr(self, "_wakeup100_paused", False):
             messagebox.showinfo("提示", "没有可继续的测试（请先「暂停」一次后再点「继续」）。")
             return
-        if not self._ensure_audioplayer_apk_on_device(device_id, log_append=self._append_hotword_log, corpus_id=corpus_id):
+        if getattr(self, "_wakeup100_apk_prepare_thread", None) and self._wakeup100_apk_prepare_thread.is_alive():
+            messagebox.showinfo("提示", "正在准备设备端 APK，请稍候完成后再试。")
             return
-        current_vol = self._get_device_volume(device_id)
-        if current_vol is not None:
-            self._append_hotword_log(f"当前系统音量: {current_vol}（将按区间 {v_from}~{v_to} 逐档测试）。")
+        self._wakeup100_prepare_err = None
+        self._wakeup100_prepare_ok = False
+        self._wakeup100_start_ctx = {
+            "resume": resume,
+            "device_id": device_id,
+            "corpus_id": corpus_id,
+            "wakeup_dir": wakeup_dir,
+            "audio_dir": audio_dir,
+            "list_file": list_file,
+            "use_art": use_art,
+            "v_from": v_from,
+            "v_to": v_to,
+        }
+
+        def _apk_prepare_worker():
+            try:
+                self._wakeup100_prepare_err = None
+                ok = self._ensure_audioplayer_apk_on_device(
+                    device_id, log_append=self._append_hotword_log, corpus_id=corpus_id, ui_silent=True
+                )
+                vol = self._get_device_volume(device_id) if ok else None
+            except Exception as e:
+                ok = False
+                vol = None
+                if not (getattr(self, "_wakeup100_prepare_err", None) or "").strip():
+                    self._wakeup100_prepare_err = str(e)
+            self._wakeup100_prepare_ok = bool(ok)
+            self._wakeup100_prepare_vol = vol
+            rt = getattr(self, "root", None) or getattr(self, "parent", None)
+            if rt and rt.winfo_exists():
+                rt.after(0, self._wakeup100_after_adb_prepare)
+
+        self._wakeup100_apk_prepare_thread = threading.Thread(target=_apk_prepare_worker, daemon=True)
+        self._wakeup100_apk_prepare_thread.start()
+        try:
+            if hasattr(self, "status_var"):
+                self.status_var.set("正在检查/安装设备端 APK…")
+            self._pump_tk_idletasks_ms(80)
+        except Exception:
+            pass
+        return
+
+    def _wakeup100_after_adb_prepare(self):
+        """后台 adb 准备完成后在主线程继续：弹错、写音量日志、启动 logcat、再跑播放线程。"""
+        self._wakeup100_apk_prepare_thread = None
+        ctx = getattr(self, "_wakeup100_start_ctx", None)
+        if not ctx:
+            return
+        if not getattr(self, "_wakeup100_prepare_ok", False):
+            err = (getattr(self, "_wakeup100_prepare_err", None) or "").strip() or "设备端 APK 检查或安装失败，请查看「最近唤醒日志」。"
+            try:
+                messagebox.showerror("唤醒率测试", err)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "status_var"):
+                    self.status_var.set("就绪")
+            except Exception:
+                pass
+            return
+        resume = ctx["resume"]
+        device_id = ctx["device_id"]
+        v_from = ctx["v_from"]
+        v_to = ctx["v_to"]
+        vol = getattr(self, "_wakeup100_prepare_vol", None)
+        if vol is not None:
+            self._append_hotword_log(f"当前系统音量: {vol}（将按区间 {v_from}~{v_to} 逐档测试）。")
         else:
             self._append_hotword_log(f"无法读取当前系统音量，将按区间 {v_from}~{v_to} 逐档测试。")
+        self._wakeup100_run_after_apk_ready(
+            resume,
+            device_id,
+            ctx["corpus_id"],
+            ctx["wakeup_dir"],
+            ctx["audio_dir"],
+            ctx["list_file"],
+            ctx["use_art"],
+            v_from,
+            v_to,
+        )
+
+    def _wakeup100_run_after_apk_ready(self, resume, device_id, corpus_id, wakeup_dir, audio_dir, list_file, use_art, v_from, v_to):
+        """APK 已就绪且音量已读：启动 logcat 监测并起播放线程（原 _start_wakeup100_test 后半段）。"""
         if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
             self.start_hotword_monitor(keep_state=resume)  # 继续测试时保留暂停前的唤醒次数与日志
-            time.sleep(0.5)
+            self._pump_tk_idletasks_ms(500)
             if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
                 return
         self._wakeup100_stop_requested = False
@@ -7399,6 +7697,8 @@ class UIComponents:
             self._wakeup100_round_results = []
             self._wakeup100_results_by_mode = {}
             self._wakeup100_cumulative_wake = 0
+            self._wakeup100_single_local_offset_sec = 0.0
+            self._wakeup100_single_fb_defer_round_result = False
         self._wakeup100_current_round_played = 0
         self._wakeup100_current_effx_display = "-"
         self._wakeup100_current_vol = "-"
@@ -7529,9 +7829,11 @@ class UIComponents:
                 else:
                     self._wakeup100_resume_file_index = 0
             if getattr(self, "_wakeup100_freebox_single_wav_mode", False):
-                self._wakeup100_resume_file_index = 0
+                # 整轨中途暂停续测：保留本机偏移，不强制 file_index；无偏移时仍从文件头播
+                if float(getattr(self, "_wakeup100_single_local_offset_sec", 0) or 0) < 0.05:
+                    self._wakeup100_resume_file_index = 0
             self._append_hotword_log(f"继续测试：从第 {self._wakeup100_resume_mode_start + 1} 个音效、第 {self._wakeup100_resume_round_start + 1} 档音量接着测（本档从第 {self._wakeup100_resume_file_index + 1} 首播）。")
-            self._wakeup100_resume_from_pause = True  # 继续时先发 RESUME 让设备端从暂停处恢复
+            self._wakeup100_resume_from_pause = True  # 继续时由播放线程优先 RESUME，失败再 REPLAY
         else:
             self._wakeup100_resume_mode_start = 0
             self._wakeup100_resume_round_start = 0
@@ -7659,6 +7961,8 @@ class UIComponents:
                     else:
                         n_results = len(getattr(self, "_wakeup100_round_results", []))
                         has_partial_for_this_round = is_resume and (mode_idx == mode_start and round_index == round_start) and n_results > round_start
+                    if getattr(self, "_wakeup100_resume_from_pause", False) and mode_idx == mode_start and round_index == round_start:
+                        has_partial_for_this_round = True
                     resume_file_index = getattr(self, "_wakeup100_resume_file_index", 0)
                     self._wakeup100_current_round_played = resume_file_index if has_partial_for_this_round else 0
                     self._wakeup100_round_was_resumed = has_partial_for_this_round  # 本轮结束时若为 True 则替换最后一条而非 append
@@ -7678,13 +7982,34 @@ class UIComponents:
                         resume_from_pause = getattr(self, "_wakeup100_resume_from_pause", False)
                         if resume_from_pause:
                             try:
-                                subprocess.run(
-                                    ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.RESUME", "-n", "com.player.demo/.MainActivity"],
-                                    capture_output=True, timeout=10,
-                                )
+                                import audio_player_apk as _apk_w100
+
+                                rr = _apk_w100.run_resume(device_id_for_replay)
+                                if rr.returncode != 0:
+                                    subprocess.run(
+                                        [
+                                            "adb",
+                                            "-s",
+                                            device_id_for_replay,
+                                            "shell",
+                                            "am",
+                                            "start",
+                                            "-a",
+                                            "com.player.demo.REPLAY",
+                                            "-n",
+                                            "com.player.demo/.MainActivity",
+                                        ],
+                                        capture_output=True,
+                                        timeout=10,
+                                    )
+                                    self._append_hotword_log(
+                                        "设备端 RESUME 未成功，已回退 REPLAY（蓝牙轨可能从头播）；"
+                                        "若需续播请确认 PlayerDemo 已实现 com.player.demo.RESUME。"
+                                    )
+                                else:
+                                    self._append_hotword_log("设备端暂停后继续：RESUME。")
                             except Exception:
                                 pass
-                            self._append_hotword_log("设备端从暂停恢复播放: am start -a com.player.demo.RESUME ...")
                             self._wakeup100_resume_from_pause = False
                             time.sleep(0.3)
                         elif is_first_round and not is_resume:
@@ -7709,11 +8034,18 @@ class UIComponents:
                                 self._append_hotword_log("换音效，设备端重播: am start -a com.player.demo.REPLAY ...")
                             time.sleep(0.3)
                         _set_volume_on_device(vol)
-                    # 记录本档开始时的唤醒次数，结束时用「当前总数 - 本档开始」得到本档增量，避免多档重复累计
-                    try:
-                        self._wakeup100_round_start_count = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
-                    except Exception:
-                        self._wakeup100_round_start_count = 0.0
+                    elif getattr(self, "_wakeup100_resume_from_pause", False):
+                        self._wakeup100_resume_from_pause = False
+                    # 记录本档开始时的唤醒次数；同一档从暂停恢复时不重置基准（否则唤醒率从 0 重算）
+                    if not has_partial_for_this_round:
+                        try:
+                            self._wakeup100_round_start_count = (
+                                float(getattr(self, "hotword_count", 0))
+                                if isinstance(getattr(self, "hotword_count", 0), (int, float))
+                                else 0.0
+                            )
+                        except Exception:
+                            self._wakeup100_round_start_count = 0.0
                     self._append_hotword_log(
                         f"第 {round_index + 1}/{num_rounds} 轮，系统音量 {vol}，开始播放 {total_files} 条。"
                         + (f"（从第 {resume_file_index + 1} 首接着播）" if has_partial_for_this_round and resume_file_index > 0 and not single_fb else "")
@@ -7728,40 +8060,125 @@ class UIComponents:
                             break
                         base_offset = mode_idx * (num_rounds * total_files) + round_index * total_files
                         basename = os.path.basename(path)
+                        r_ui = getattr(self, "root", None) or getattr(self, "parent", None)
+                        base_off_sec = float(getattr(self, "_wakeup100_single_local_offset_sec", 0) or 0)
+                        full_dur = max(0.01, float(self._wav_duration_seconds(path) or 0.5)) if single_fb else 0.01
+                        tmp_clip = None
+                        play_path = path
+                        if single_fb and base_off_sec > 0.05:
+                            tmp_clip = self._hotword_make_wav_remainder_temp(path, base_off_sec)
+                            if tmp_clip:
+                                play_path = tmp_clip
                         if single_fb:
-                            self._append_hotword_log(f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}")
+                            if base_off_sec > 0.05 and play_path != path:
+                                self._append_hotword_log(
+                                    f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}（本机从约 {base_off_sec:.1f}s 续播，已用切片文件）"
+                                )
+                            elif base_off_sec > 0.05:
+                                self._append_hotword_log(
+                                    f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}（偏移 {base_off_sec:.1f}s 但续播切片失败，将整轨重播；可检查 wav 格式）"
+                                )
+                            else:
+                                self._append_hotword_log(f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}")
                         else:
                             self._append_hotword_log(f"[{i + 1}/{len(files)}] Playing: {basename}")
-                        r_ui = getattr(self, "root", None) or getattr(self, "parent", None)
                         if single_fb and path and r_ui and r_ui.winfo_exists():
-                            dur_est = self._wav_duration_seconds(path)
+                            seg_dur = max(0.35, float(self._wav_duration_seconds(play_path) or (full_dur - base_off_sec)))
 
-                            def _arm_single_ui():
+                            def _arm_single_ui_seg(dseg):
                                 self._wakeup100_single_play_active = True
                                 self._wakeup100_single_play_t0 = time.time()
-                                self._wakeup100_single_play_dur = max(0.5, float(dur_est or 0.5))
+                                self._wakeup100_single_play_dur = max(0.35, float(dseg or 0.35))
                                 self._hotword_show_single_progress_ui()
                                 self._wakeup100_schedule_single_progress_tick()
 
                             try:
-                                r_ui.after(0, _arm_single_ui)
+                                r_ui.after(0, lambda sd=seg_dur: _arm_single_ui_seg(sd))
                             except Exception:
                                 pass
+                        single_fb_interrupted = False
                         try:
                             if platform.system() == "Windows":
                                 import winsound
-                                winsound.PlaySound(path, winsound.SND_FILENAME)
+
+                                if single_fb:
+                                    winsound.PlaySound(play_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                                    dur_wait = max(0.35, float(self._wav_duration_seconds(play_path) or 0.5))
+                                    deadline = time.time() + dur_wait + 1.2
+                                    while time.time() < deadline and not stop():
+                                        time.sleep(0.12)
+                                    single_fb_interrupted = bool(stop())
+                                    winsound.PlaySound(None, winsound.SND_PURGE)
+                                    if single_fb_interrupted:
+                                        try:
+                                            t0p = float(getattr(self, "_wakeup100_single_play_t0", time.time()))
+                                            elapsed_seg = max(0.0, time.time() - t0p)
+                                            self._wakeup100_single_local_offset_sec = min(
+                                                full_dur, base_off_sec + min(elapsed_seg, dur_wait)
+                                            )
+                                            self._wakeup100_single_fb_defer_round_result = True
+                                        except Exception:
+                                            self._wakeup100_single_fb_defer_round_result = True
+                                    else:
+                                        self._wakeup100_single_local_offset_sec = 0.0
+                                else:
+                                    winsound.PlaySound(path, winsound.SND_FILENAME)
                             else:
                                 import subprocess as _sp
-                                _sp.run(["aplay", "-q", path], timeout=7200, capture_output=True)
+
+                                if single_fb:
+                                    proc = _sp.Popen(
+                                        ["aplay", "-q", play_path],
+                                        stdout=_sp.DEVNULL,
+                                        stderr=_sp.DEVNULL,
+                                    )
+                                    self._wakeup100_aplay_proc = proc
+                                    while proc.poll() is None and not stop():
+                                        time.sleep(0.12)
+                                    single_fb_interrupted = bool(stop()) and (proc.poll() is None)
+                                    if proc.poll() is None:
+                                        proc.terminate()
+                                        try:
+                                            proc.wait(timeout=1.5)
+                                        except Exception:
+                                            try:
+                                                proc.kill()
+                                            except Exception:
+                                                pass
+                                    self._wakeup100_aplay_proc = None
+                                    if single_fb_interrupted:
+                                        try:
+                                            t0p = float(getattr(self, "_wakeup100_single_play_t0", time.time()))
+                                            elapsed_seg = max(0.0, time.time() - t0p)
+                                            seg_cap = max(0.35, float(self._wav_duration_seconds(play_path) or (full_dur - base_off_sec)))
+                                            self._wakeup100_single_local_offset_sec = min(
+                                                full_dur, base_off_sec + min(elapsed_seg, seg_cap)
+                                            )
+                                            self._wakeup100_single_fb_defer_round_result = True
+                                        except Exception:
+                                            self._wakeup100_single_fb_defer_round_result = True
+                                    else:
+                                        self._wakeup100_single_local_offset_sec = 0.0
+                                else:
+                                    _sp.run(["aplay", "-q", path], timeout=7200, capture_output=True)
                         except Exception:
                             pass
                         finally:
+                            if tmp_clip:
+                                try:
+                                    os.unlink(tmp_clip)
+                                except OSError:
+                                    pass
                             if single_fb and r_ui and r_ui.winfo_exists():
                                 try:
-                                    r_ui.after(0, self._hotword_clear_single_progress_ui)
+                                    if single_fb_interrupted and getattr(self, "_wakeup100_paused", False):
+                                        r_ui.after(0, self._hotword_freeze_single_progress_on_pause)
+                                    else:
+                                        r_ui.after(0, self._hotword_clear_single_progress_ui)
                                 except Exception:
                                     pass
+                        if single_fb and single_fb_interrupted:
+                            break
                         if single_fb:
                             self._wakeup100_played_count = base_offset + total_files
                         else:
@@ -7773,6 +8190,14 @@ class UIComponents:
                                 if stop():
                                     break
                                 time.sleep(0.1)
+                    _defer_single_fb = bool(getattr(self, "_wakeup100_single_fb_defer_round_result", False))
+                    if _defer_single_fb:
+                        self._wakeup100_single_fb_defer_round_result = False
+                        self._append_hotword_log(
+                            "整轨本档未播完（已暂停/停止），不写本轮统计；本机将从已播位置续播；"
+                            "设备端优先 RESUME，失败则 REPLAY 可能从头。"
+                        )
+                        break
                     # 无论本轮播完还是中途停止，都按「当前档已播放条数」统计唤醒率并写入结果
                     # 本档唤醒次数 = 当前总次数 - 本档开始时的总次数（避免把前面档的唤醒算进本档导致唤醒率>100%）
                     actual_played = getattr(self, "_wakeup100_current_round_played", 0)
@@ -7808,6 +8233,8 @@ class UIComponents:
                         self._append_hotword_log(f"音量 {vol} 完成，本轮已播放 {actual_played} 条、唤醒 {round_count} 次，唤醒率 {round_rate:.1f}%（累计 {self._wakeup100_cumulative_wake} 次）。")
                     if stop():
                         break
+                if stop():
+                    break
         self._wakeup100_play_thread = threading.Thread(target=_play_wav_list, daemon=True)
         self._wakeup100_play_thread.start()
         self._wakeup100_schedule_rate_update()
@@ -7899,6 +8326,12 @@ class UIComponents:
         self._append_hotword_log("正在暂停…")
         self._wakeup100_paused = True
         self._wakeup100_stop_requested = True
+        # 先让播放线程看到 stop 并写入整轨位移，再 PURGE/terminate，避免本机 winsound 先停而线程仍认为未暂停
+        self._pump_tk_idletasks_ms(150)
+        try:
+            self._hotword_stop_local_wakeup_playback()
+        except Exception:
+            pass
         aid = getattr(self, "_wakeup100_update_after_id", None)
         if aid and getattr(self, "root", None) and self.root.winfo_exists():
             try:
@@ -7907,10 +8340,7 @@ class UIComponents:
                 pass
         self._wakeup100_update_after_id = None
         self._wakeup100_play_thread = None  # 不 join，避免界面卡顿；播放线程会在后台写完当前档后退出
-        try:
-            self._hotword_clear_single_progress_ui()
-        except Exception:
-            pass
+        # 整轨进度条由播放线程在「暂停」分支里冻结保留，此处不 clear（避免一暂停进度条就消失）
         self._wakeup100_corpus_ui_busy(True)
         if hasattr(self, "hotword_wakeup100_start_btn") and self.hotword_wakeup100_start_btn.winfo_exists():
             self.hotword_wakeup100_start_btn.config(state="normal")
@@ -7922,14 +8352,15 @@ class UIComponents:
         device_id = getattr(self, "_wakeup100_device_id", None)
         if device_id:
             try:
-                # 暂停：am start -a com.player.demo.PAUSE（不 force-stop），继续测试时发 RESUME 恢复
-                subprocess.run(
-                    ["adb", "-s", device_id, "shell", "am", "start", "-a", "com.player.demo.PAUSE", "-n", "com.player.demo/.MainActivity"],
-                    capture_output=True, timeout=10,
+                import audio_player_apk as _apk_hw
+
+                _apk_hw.run_pause(device_id)
+                self._append_hotword_log(
+                    "已暂停本机播放；设备端已下发 PAUSE（未 force-stop AudioPlayer，便于继续时 RESUME 续播）。"
+                    "若蓝牙仍不停播可再点「停止」结束进程。"
                 )
-                self._append_hotword_log("已通知设备端 AudioPlayer 暂停播放（应用未退出，继续测试时将发 RESUME 恢复）。")
             except Exception:
-                self._append_hotword_log("发送 PAUSE 失败，设备端可能仍在前台播放。")
+                self._append_hotword_log("设备端 PAUSE 可能未完全生效，可再点「停止」或拔掉蓝牙排查。")
         if hasattr(self, "status_var"):
             self.status_var.set("已暂停，可点「继续」接着测或「保存」导出数据")
         if hasattr(self, "hotword_wakeup100_resume_btn") and self.hotword_wakeup100_resume_btn.winfo_exists():
@@ -7939,8 +8370,14 @@ class UIComponents:
     def _stop_wakeup100_test(self):
         """停止 100 条播放（请求线程在下一首前退出），并一并停止唤醒监测与设备端 APK 播放"""
         self._append_hotword_log("正在停止播放、唤醒监测与设备端播放…")
+        try:
+            self._hotword_stop_local_wakeup_playback()
+        except Exception:
+            pass
         self._wakeup100_paused = False  # 停止不算暂停，不显示「继续测试」
         self._wakeup100_stop_requested = True
+        self._wakeup100_single_local_offset_sec = 0.0
+        self._wakeup100_single_fb_defer_round_result = False
         aid = getattr(self, "_wakeup100_update_after_id", None)
         if aid and getattr(self, "root", None) and self.root.winfo_exists():
             try:
