@@ -2754,116 +2754,335 @@ class TestOperations:
             self.hal_save_path_var.set(folder_path)
             self.hal_status_var.set(f"已设置本地保存路径: {folder_path}")
 
-    def start_hal_recording(self):
-        """开始HAL录音"""
-        if not self.check_device_selected():
-            return
-        
-        # 获取选中的属性
+    def _hal_collect_selected_props(self):
         selected_props = []
         for prop, var in self.hal_props.items():
             if var.get():
                 selected_props.append(prop)
-        
+        return selected_props
+
+    def _hal_prop_set_value(self, prop):
+        var = self.hal_props.get(prop)
+        if var is not None and hasattr(var, "value") and getattr(var, "value", None) not in (None, ""):
+            return str(var.value)
+        return "1"
+
+    def _hal_prepare_device_recording_dir(self, directory):
+        """确保设备上录音目录存在（必要时创建并 chmod）。"""
+        check_cmd = self.get_adb_command(f"shell ls -la {directory}")
+        result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            if "No such file or directory" in (result.stderr or ""):
+                mkdir_cmd = self.get_adb_command(f"shell mkdir -p {directory}")
+                result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise Exception(f"创建目录失败: {result.stderr}")
+                chmod_cmd = self.get_adb_command(f"shell chmod 777 {directory}")
+                subprocess.run(chmod_cmd, shell=True, capture_output=True, text=True)
+
+    def _hal_clear_device_recordings(self, directory, *, log_prefix=""):
+        """删除设备目录下常见 HAL dump 扩展名文件。"""
+        clear_cmd = self.get_adb_command(f"shell rm -f {directory}/*.pcm {directory}/*.raw")
+        subprocess.run(clear_cmd, shell=True)
+        msg = (log_prefix + "已清空录音目录中的旧文件") if log_prefix else "已清空录音目录中的旧文件"
+        self.hal_status_var.set(msg)
+        if hasattr(self, "update_info_text"):
+            self.update_info_text(msg)
+
+    def _hal_apply_recording_props(self, selected_props):
+        for prop in selected_props:
+            val = self._hal_prop_set_value(prop)
+            set_cmd = self.get_adb_command(f"shell setprop {prop} {val}")
+            result = subprocess.run(set_cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f"设置属性 {prop} 失败: {result.stderr}")
+
+    def _hal_device_serial_configured(self):
+        """是否已填写设备序列号（不做 adb devices 在线校验）。adb root 后设备常短暂 offline，严格检查会导致自动停止/拉取被静默跳过。"""
+        try:
+            if hasattr(self, "device_combobox"):
+                if self.device_combobox.winfo_exists():
+                    s = self.device_combobox.get().strip()
+                    if s:
+                        return True
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "device_var"):
+                s = str(self.device_var.get()).strip()
+                if s:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _hal_recover_hal_buttons_idle(self):
+        """未进入停止工作线程时恢复按钮（例如自动停止入口因异常提前 return）。"""
+        setattr(self, "_hal_stopping", False)
+        try:
+            if getattr(self, "start_hal_button", None) and self.start_hal_button.winfo_exists():
+                self.start_hal_button.config(state="normal")
+            if getattr(self, "stop_hal_button", None) and self.stop_hal_button.winfo_exists():
+                self.stop_hal_button.config(state="disabled")
+        except Exception:
+            pass
+        try:
+            if getattr(self, "hal_recording_status_var", None):
+                self.hal_recording_status_var.set("就绪")
+        except Exception:
+            pass
+
+    def _hal_cancel_hal_stop_schedulers(self):
+        """取消本段 HAL 自动停止（Tk after 与旧版 Timer 二选一，全部尝试取消）。"""
+        rid = getattr(self, "_hal_after_id", None)
+        aw = getattr(self, "_hal_after_widget", None)
+        if rid is not None and aw is not None:
+            try:
+                if aw.winfo_exists():
+                    aw.after_cancel(rid)
+            except Exception:
+                pass
+        self._hal_after_id = None
+        self._hal_after_widget = None
+        if hasattr(self, "hal_timer") and self.hal_timer:
+            try:
+                self.hal_timer.cancel()
+            except Exception:
+                pass
+            self.hal_timer = None
+
+    def _hal_timer_fire_marshal_stop(self, cycle_segment_end: bool):
+        """Timer 线程到期后投递到主线程执行停止（仅此处允许从后台线程调用 root.after）。"""
+        main = self._get_root()
+        ce = bool(cycle_segment_end)
+
+        def _run():
+            try:
+                self.stop_hal_recording(cycle_segment_end=ce)
+            except Exception as ex:
+                try:
+                    if hasattr(self, "update_info_text"):
+                        self.update_info_text(f"自动停止调度异常: {ex}")
+                except Exception:
+                    pass
+
+        try:
+            if main is not None and main.winfo_exists():
+                main.after(0, _run)
+                return
+        except Exception:
+            pass
+        _run()
+
+    def _hal_arm_stop_timer(self, auto_stop_sec, *, cycle_segment_end):
+        """用后台 Timer 计时，到期后 main.after(0) 回主线程执行停止。
+
+        长延迟仅依赖 Tk widget.after(ms) 在部分环境（独立 Toplevel 等）不可靠；Timer 墙钟更稳。
+        """
+        self._hal_cancel_hal_stop_schedulers()
+        if auto_stop_sec <= 0:
+            return
+
+        ce = bool(cycle_segment_end)
+
+        def _timer_fire():
+            self._hal_timer_fire_marshal_stop(ce)
+
+        self.hal_timer = threading.Timer(float(auto_stop_sec), _timer_fire)
+        self.hal_timer.daemon = True
+        self.hal_timer.start()
+
+        if hasattr(self, "update_info_text"):
+            m, sec = divmod(int(auto_stop_sec), 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                human = f"{h} 小时 {m} 分 {sec} 秒"
+            elif m > 0:
+                human = f"{m} 分 {sec} 秒"
+            else:
+                human = f"{sec} 秒"
+            self.update_info_text(f"已定时：{human}（{int(auto_stop_sec)} 秒）后自动停止并拉取。")
+
+    def _hal_begin_segment_common(self, selected_props, directory, auto_stop_sec, clear_mode, *, cycle_segment_end):
+        """
+        clear_mode: 'ask' 弹窗确认是否清空 | 'auto' 每段开始前自动清空 | 'skip' 不清空
+        cycle_segment_end: 传给定时器，用于区分「本段到时」与「用户停止整段流程」
+        """
+        subprocess.run(self.get_adb_command("root"), shell=True)
+        time.sleep(1)
+        subprocess.run(self.get_adb_command("shell setenforce 0"), shell=True)
+        self._hal_prepare_device_recording_dir(directory)
+
+        if clear_mode == "ask":
+            if messagebox.askyesno("确认", "是否清空录音目录中的旧文件？"):
+                self._hal_clear_device_recordings(directory)
+        elif clear_mode == "auto":
+            self._hal_clear_device_recordings(directory, log_prefix="定时循环: ")
+
+        self._hal_apply_recording_props(selected_props)
+        start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.hal_start_time_var.set(start_time)
+        self.hal_recording_status_var.set("录音中...")
+        n = len(selected_props)
+        if auto_stop_sec > 0:
+            if cycle_segment_end:
+                self.hal_status_var.set(
+                    f"定时循环: 录音中（本段 {auto_stop_sec // 60} 分钟），已启用 {n} 个属性"
+                )
+            else:
+                self.hal_status_var.set(f"录音已开始，将在 {auto_stop_sec} 秒后自动停止")
+        else:
+            self.hal_status_var.set(f"录音已开始，已启用 {n} 个属性")
+
+        self._hal_arm_stop_timer(auto_stop_sec, cycle_segment_end=cycle_segment_end)
+
+    def _hal_cycle_after_segment(self):
+        """定时循环：上一段已完全结束（含拉取）后，在主线程启动下一段。"""
+        if not getattr(self, "_hal_cycle_active", False):
+            return
+        if getattr(self, "_hal_stopping", False):
+            r = self._get_root()
+            if r:
+                r.after(400, self._hal_cycle_after_segment)
+            return
+
+        selected_props = self._hal_collect_selected_props()
+        if not selected_props:
+            self._hal_cycle_active = False
+            messagebox.showwarning("警告", "定时循环已停止：没有选中的录音属性")
+            return
+        directory = self.hal_dir_var.get().strip()
+        if not directory:
+            self._hal_cycle_active = False
+            messagebox.showwarning("警告", "定时循环已停止：录音目录为空")
+            return
+        try:
+            minutes = int((getattr(self, "hal_cycle_minutes_var", None) and self.hal_cycle_minutes_var.get()) or "0")
+            if minutes < 1:
+                raise ValueError("每段时长至少为 1 分钟")
+        except ValueError:
+            self._hal_cycle_active = False
+            messagebox.showwarning("警告", "定时循环已停止：「每段时长(分钟)」须为正整数")
+            return
+
+        auto_stop_sec = minutes * 60
+        self._hal_cycle_segment_index = int(getattr(self, "_hal_cycle_segment_index", 0)) + 1
+        seg_i = self._hal_cycle_segment_index
+
+        try:
+            self.hal_status_var.set(f"定时循环: 准备第 {seg_i} 段...")
+            self.hal_recording_status_var.set("准备中...")
+            self.start_hal_button.config(state="disabled")
+            self.stop_hal_button.config(state="normal")
+            self.update_info_text(f"--- 定时循环 第 {seg_i} 段开始 ---")
+            self._hal_begin_segment_common(
+                selected_props, directory, auto_stop_sec, "auto", cycle_segment_end=True
+            )
+        except Exception as e:
+            self._hal_cycle_active = False
+            self.hal_status_var.set(f"定时循环启动下一段失败: {str(e)}")
+            self.hal_recording_status_var.set("启动失败")
+            self.start_hal_button.config(state="normal")
+            self.stop_hal_button.config(state="disabled")
+            messagebox.showerror("错误", f"定时循环启动下一段时出错:\n{str(e)}")
+
+    def start_hal_recording(self):
+        """开始 HAL 录音。勾选「定时循环录音」时走循环逻辑，否则保持原先单次录音行为。"""
+        if not self.check_device_selected():
+            return
+
+        selected_props = self._hal_collect_selected_props()
         if not selected_props:
             messagebox.showwarning("警告", "请先选择要启用的录音属性")
             return
-        
-        # 获取录音目录
+
         directory = self.hal_dir_var.get().strip()
         if not directory:
             messagebox.showwarning("警告", "请输入录音目录路径")
             return
-        
-        # 获取自动停止时间
-        try:
-            auto_stop_duration = int(self.hal_duration_var.get())
-            if auto_stop_duration < 0:
-                messagebox.showwarning("警告", "自动停止时间不能为负数")
+
+        cycle_on = getattr(self, "hal_cycle_mode_var", None) and self.hal_cycle_mode_var.get()
+        if cycle_on:
+            try:
+                minutes = int((getattr(self, "hal_cycle_minutes_var", None) and self.hal_cycle_minutes_var.get()) or "0")
+                if minutes < 1:
+                    messagebox.showwarning("警告", "定时循环时每段时长至少为 1 分钟")
+                    return
+            except ValueError:
+                messagebox.showwarning("警告", "「每段时长(分钟)」须为整数")
                 return
-        except ValueError:
-            messagebox.showwarning("警告", "自动停止时间必须是整数")
-            return
-        
+            auto_stop_duration = minutes * 60
+            clear_mode = "auto"
+            cycle_segment_end = True
+        else:
+            try:
+                auto_stop_duration = int(self.hal_duration_var.get())
+                if auto_stop_duration < 0:
+                    messagebox.showwarning("警告", "自动停止时间不能为负数")
+                    return
+            except ValueError:
+                messagebox.showwarning("警告", "自动停止时间必须是整数")
+                return
+            clear_mode = "ask"
+            cycle_segment_end = False
+
         try:
-            # 更新状态
             self.hal_status_var.set("正在准备录音...")
             self.hal_recording_status_var.set("准备中...")
-            
-            # 禁用开始按钮，启用停止按钮
             self.start_hal_button.config(state="disabled")
             self.stop_hal_button.config(state="normal")
-            
-            # 获取 root 权限
-            subprocess.run(self.get_adb_command("root"), shell=True)
-            time.sleep(1)  # 等待 root 权限生效
-            
-            # 设置 SELinux 为 permissive 模式
-            subprocess.run(self.get_adb_command("shell setenforce 0"), shell=True)
-            
-            # 检查并创建目录
-            check_cmd = self.get_adb_command(f"shell ls -la {directory}")
-            result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                if "No such file or directory" in result.stderr:
-                    # 创建目录
-                    mkdir_cmd = self.get_adb_command(f"shell mkdir -p {directory}")
-                    result = subprocess.run(mkdir_cmd, shell=True, capture_output=True, text=True)
-                    
-                    if result.returncode != 0:
-                        raise Exception(f"创建目录失败: {result.stderr}")
-                    
-                    # 设置权限
-                    chmod_cmd = self.get_adb_command(f"shell chmod 777 {directory}")
-                    result = subprocess.run(chmod_cmd, shell=True, capture_output=True, text=True)
-            
-            # 清空录音目录中的旧文件
-            if messagebox.askyesno("确认", "是否清空录音目录中的旧文件？"):
-                clear_cmd = self.get_adb_command(f"shell rm -f {directory}/*.pcm {directory}/*.raw")
-                subprocess.run(clear_cmd, shell=True)
-                self.hal_status_var.set("已清空录音目录中的旧文件")
-            
-            # 设置选中的属性
-            for prop in selected_props:
-                # 设置属性为1
-                set_cmd = self.get_adb_command(f"shell setprop {prop} 1")
-                result = subprocess.run(set_cmd, shell=True, capture_output=True, text=True)
-                
-                if result.returncode != 0:
-                    raise Exception(f"设置属性 {prop} 失败: {result.stderr}")
-            
-            # 记录开始时间
-            start_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            self.hal_start_time_var.set(start_time)
-            
-            # 更新状态
-            self.hal_status_var.set(f"录音已开始，已启用 {len(selected_props)} 个属性")
-            self.hal_recording_status_var.set("录音中...")
-            
-            # 如果设置了自动停止时间
-            if auto_stop_duration > 0:
-                self.hal_status_var.set(f"录音已开始，将在 {auto_stop_duration} 秒后自动停止")
-                
-                # 启动定时器自动停止录音
-                self.hal_timer = threading.Timer(auto_stop_duration, self.stop_hal_recording)
-                self.hal_timer.daemon = True
-                self.hal_timer.start()
-            
+
+            if cycle_on:
+                self._hal_cycle_active = True
+                self._hal_cycle_segment_index = 1
+                self.update_info_text(
+                    f"--- 定时循环开始（每段 {minutes} 分钟，结束自动拉取并清空设备目录）---"
+                )
+                self.hal_status_var.set(f"定时循环: 准备第 1 段...")
+
+            self._hal_begin_segment_common(
+                selected_props, directory, auto_stop_duration, clear_mode, cycle_segment_end=cycle_segment_end
+            )
+
         except Exception as e:
+            self._hal_cycle_active = False
             self.hal_status_var.set(f"启动录音出错: {str(e)}")
             self.hal_recording_status_var.set("启动失败")
             self.start_hal_button.config(state="normal")
             self.stop_hal_button.config(state="disabled")
             messagebox.showerror("错误", f"启动录音时出错:\n{str(e)}")
 
-    def stop_hal_recording(self):
-        """停止HAL录音并自动拉取文件（耗时操作在后台线程，避免界面卡顿与重复点击）"""
-        if not self.check_device_selected():
-            return
+    def stop_hal_recording(self, cycle_segment_end=False):
+        """停止 HAL 录音并自动拉取文件（耗时操作在后台线程）。
+
+        cycle_segment_end: 为 True 表示本段计时结束，若仍处在定时循环中则会自动开始下一段；
+        为 False（默认）表示用户停止，将结束整个定时循环。
+        """
+        if cycle_segment_end:
+            if not self._hal_device_serial_configured():
+                self._hal_cycle_active = False
+                self._hal_cancel_hal_stop_schedulers()
+                if hasattr(self, "update_info_text"):
+                    self.update_info_text("自动停止失败：未选择设备，已结束循环。")
+                self._hal_recover_hal_buttons_idle()
+                return
+        else:
+            if not self.check_device_selected():
+                return
         if getattr(self, "_hal_stopping", False):
             return  # 防止重复点击
+
+        if not cycle_segment_end:
+            self._hal_cycle_active = False
+
         self._hal_stopping = True
+        seg_end_flag = bool(cycle_segment_end)
+
+        if hasattr(self, "update_info_text"):
+            if cycle_segment_end:
+                self.update_info_text("到时：正在停止并拉取…")
+            else:
+                self.update_info_text("正在停止…")
 
         # 立即更新 UI：禁用停止按钮、显示“正在停止”
         self.hal_status_var.set("正在停止录音...")
@@ -2875,13 +3094,7 @@ class TestOperations:
 
         def _worker():
             try:
-                # 取消定时器（如果存在）
-                if hasattr(self, 'hal_timer') and self.hal_timer:
-                    try:
-                        self.hal_timer.cancel()
-                    except Exception:
-                        pass
-                    self.hal_timer = None
+                self._hal_cancel_hal_stop_schedulers()
 
                 # 获取所有属性并禁用
                 all_props = list(self.hal_props.keys())
@@ -2906,16 +3119,23 @@ class TestOperations:
                 self._auto_pull_hal_files_impl()
 
                 self._safe_finish_stop_hal(
-                    start_hal_button, stop_hal_button,
+                    start_hal_button,
+                    stop_hal_button,
                     getattr(self, "_hal_pull_final_status", "就绪"),
-                    "已停止"
+                    "已停止",
                 )
+                if seg_end_flag and getattr(self, "_hal_cycle_active", False):
+                    r = self._get_root()
+                    if r:
+                        try:
+                            r.after(1000, self._hal_cycle_after_segment)
+                        except Exception:
+                            pass
             except Exception as e:
+                self._hal_cycle_active = False
                 self._safe_update_info(f"停止/拉取出错: {str(e)}")
                 self._safe_finish_stop_hal(
-                    start_hal_button, stop_hal_button,
-                    f"停止录音出错: {str(e)}",
-                    "停止失败"
+                    start_hal_button, stop_hal_button, f"停止录音出错: {str(e)}", "停止失败"
                 )
                 root = self._get_root()
                 if root:
@@ -2925,7 +3145,9 @@ class TestOperations:
 
     def _auto_pull_hal_files_impl(self):
         """自动拉取HAL录音文件（在后台线程中调用，通过 _safe_update_info 更新录音信息与进度）"""
-        if not self.check_device_selected():
+        if not self._hal_device_serial_configured():
+            self._safe_update_info("拉取跳过：未选择设备序列号")
+            setattr(self, "_hal_pull_final_status", "未选择设备")
             return
 
         directory = (getattr(self, "hal_dir_var", None) and self.hal_dir_var.get() or "").strip()
@@ -3000,9 +3222,12 @@ class TestOperations:
                             subprocess.run(["xdg-open", save_dir])
                     except Exception:
                         pass
-                root = self._get_root()
-                if root:
-                    root.after(0, _open_dir)
+
+                # 定时循环进行中会连续多段拉取，不自动弹出资源管理器以免打扰
+                if not getattr(self, "_hal_cycle_active", False):
+                    root = self._get_root()
+                    if root:
+                        root.after(0, _open_dir)
             else:
                 self._safe_set_hal_status("未成功拉取任何文件")
                 self._safe_update_info("未成功拉取任何文件")

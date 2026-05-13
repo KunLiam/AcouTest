@@ -5238,6 +5238,32 @@ class UIComponents:
         self.hal_duration_var = tk.StringVar(value="0")
         ttk.Entry(duration_frame, textvariable=self.hal_duration_var, width=5, font=("Arial", 9)).pack(side="left", padx=2)
         ttk.Label(duration_frame, text="(0表示不自动停止)", font=("Arial", 9)).pack(side="left", padx=2)
+
+        # 定时循环录音（可选）：说明用多行 Label + wraplength，避免长句被裁切
+        cycle_frame = ttk.Frame(control_frame)
+        cycle_frame.pack(fill="x", pady=(4, 0))
+        self.hal_cycle_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            cycle_frame,
+            text="定时循环",
+            variable=self.hal_cycle_mode_var,
+            style="Small.TCheckbutton",
+        ).pack(side="left", anchor="nw")
+        ttk.Label(
+            control_frame,
+            text="到时：停→拉取→清设备→再录；「停止录音」停",
+            font=("Arial", 9),
+            wraplength=560,
+        ).pack(fill="x", anchor="w", pady=(0, 2))
+
+        cycle_min_frame = ttk.Frame(control_frame)
+        cycle_min_frame.pack(fill="x", pady=2)
+        ttk.Label(cycle_min_frame, text="每段(分钟):", font=("Arial", 9)).pack(side="left", padx=2)
+        self.hal_cycle_minutes_var = tk.StringVar(value="30")
+        ttk.Entry(cycle_min_frame, textvariable=self.hal_cycle_minutes_var, width=6, font=("Arial", 9)).pack(
+            side="left", padx=2
+        )
+        ttk.Label(cycle_min_frame, text="≥1", font=("Arial", 9)).pack(side="left", padx=2)
         
         # 保存路径设置
         save_path_frame = ttk.Frame(control_frame)
@@ -6307,7 +6333,7 @@ class UIComponents:
             "• ok_freebox / ok_homa：对应子目录下 wav，按文件名排序播放。\n"
             "• Freebox 整轨：语料选 ok_freebox 并勾选「整轨」后，使用 wakeup_count/ok_freebox_single/ 下 wav（多文件时取排序第一个），"
             "「整轨条数」为每一音量档内的唤醒率分母；整轨下「每档条数」「间隔」禁用。\n"
-            "界面「全程合计」= 整轨条数 × 音量档数 × 音效轮数（例如 200×6 档×1 轮音效=1200），表示整轮测试若全部播完时的累计条数，不是「只播一遍 wav」的条数。\n"
+            "界面「全程合计」= 整轨条数 × 音量档数 × 音效轮数（例如 150×6 档×1 轮音效=900），表示整轮测试若全部播完时的累计条数，不是「只播一遍 wav」的条数。\n"
             "整轨时本机用 winsound 播 wav，进度条按文件头里的时长做「已播/总长」估算（与设备端进度无关）。\n\n"
             "设备端需 wakeup_count/AudioPlayer.apk；Freebox/Homa 另需对应语料 APK，开始测试时会自动安装并拉起。\n"
             "音量按 0–25 区间逐档测试；可填音效模式（留空则仅按音量）。",
@@ -6765,7 +6791,7 @@ class UIComponents:
         self._attach_hover_tooltip(
             stat_row,
             "「全程合计」= 整次测试计划累计条数：每档基准条数 × 音量档数 × 音效轮数。"
-            "整轨时：每档基准 = 你填的整轨条数；例 200 条 × 音量 5～10 共 6 档 × 1 轮音效 = 1200。"
+            "整轨时：每档基准 = 你填的整轨条数；例 150 条 × 音量 5～10 共 6 档 × 1 轮音效 = 900。"
             "「基准」是当前音量档的分母（整轨时即整轨条数）。唤醒率 = 已唤醒÷基准。",
         )
 
@@ -6791,7 +6817,7 @@ class UIComponents:
         )
         self.hotword_freebox_single_cb.pack(side="left", padx=(0, 6))
         ttk.Label(corpus_row, text="整轨条数").pack(side="left", padx=(4, 2))
-        self.hotword_freebox_single_segment_var = tk.StringVar(value="200")
+        self.hotword_freebox_single_segment_var = tk.StringVar(value="150")
         self.hotword_freebox_single_segment_entry = ttk.Entry(
             corpus_row, textvariable=self.hotword_freebox_single_segment_var, width=6
         )
@@ -7735,8 +7761,8 @@ class UIComponents:
                     )
                     return
                 try:
-                    seg_raw = (getattr(self, "hotword_freebox_single_segment_var", None) or tk.StringVar(value="200")).get().strip()
-                    segment_count = int(seg_raw or "200")
+                    seg_raw = (getattr(self, "hotword_freebox_single_segment_var", None) or tk.StringVar(value="150")).get().strip()
+                    segment_count = int(seg_raw or "150")
                     if segment_count < 1:
                         raise ValueError("min")
                 except (ValueError, TypeError):
@@ -13654,10 +13680,10 @@ class UIComponents:
         except Exception as e:
             messagebox.showerror("错误", f"开始HAL录音失败:\n{str(e)}")
 
-    def stop_hal_recording(self):
-        """停止HAL录音"""
+    def stop_hal_recording(self, cycle_segment_end=False):
+        """停止 HAL 录音（定时循环到点时会传 cycle_segment_end=True，须原样交给 TestOperations）。"""
         try:
-            return super().stop_hal_recording()
+            return super().stop_hal_recording(cycle_segment_end=cycle_segment_end)
         except Exception as e:
             messagebox.showerror("错误", f"停止HAL录音失败:\n{str(e)}")
     

@@ -181,8 +181,15 @@ class DeviceOperations:
     
     def get_adb_command(self, cmd):
         """获取完整的ADB命令"""
-        if self.selected_device:
-            full_cmd = f"adb -s {self.selected_device} {cmd}"
+        # adb root 后轮询可能把 selected_device 置空，但下拉框仍有序列号；无 -s 时多设备/离线易错
+        dev = (getattr(self, "selected_device", None) or "").strip()
+        if not dev and hasattr(self, "device_var"):
+            try:
+                dev = str(self.device_var.get() or "").strip()
+            except Exception:
+                dev = ""
+        if dev:
+            full_cmd = f"adb -s {dev} {cmd}"
         else:
             full_cmd = f"adb {cmd}"
         # 仅在 OpenClaw 触发上下文中记录 ADB 命令，避免污染普通手工操作日志

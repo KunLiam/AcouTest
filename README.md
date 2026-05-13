@@ -49,14 +49,14 @@
   - 结果输出：录音文件自动保存，支持波形查看。
 - **HAL录音**
   - 功能用途：进行 HAL 层录音与文件拉取，用于底层问题定位。
-  - 可配置项：录音属性、录音目录、保存路径、自动停止策略。
+  - 可配置项：录音属性、录音目录、保存路径、自动停止策略；可选 **定时循环录音**（每段时长按分钟），每段结束自动停止、拉取到「保存路径」下带时间戳子目录、清空设备录音目录后再开下一段，点「停止录音」结束整个循环；未勾选时与原先单次录音（含「自动停止(秒)」与清空确认弹窗）一致。
   - 结果输出：按配置保存 HAL 录音数据与拉取结果。
 - **Logcat日志**
   - 功能用途：抓取设备日志用于音频问题排查（支持开机等待抓取）。
   - 可配置项：日志过滤规则、保存路径、自动停止时间、属性开关。
   - 结果输出：日志文件落盘；支持日志查看器实时筛选查看。
 - **唤醒监测**
-  - 功能用途：监测唤醒关键词相关日志并统计命中次数；支持「100 条唤醒率测试」本地按序播放 100 条唤醒语并统计唤醒率。
+  - 功能用途：监测唤醒关键词相关日志并统计命中次数；支持按语料与音量/音效的批量唤醒率测试（本机与设备端同步播放）。**分步操作、目录结构与按钮说明**见下文 [AcouTest 唤醒率测试操作说明](#acoutest-唤醒率测试操作说明)。
   - 可配置项：与「唤醒语料库」联动的 logcat 匹配规则（Google：`Detected hotword` / `LIBAS_HOTWORD…`；Freebox：命中 **`Received wake-up event: 1`** 或 **`KardomeJni: Keyword recognized!`** 任一即计；**Homa**：仅 **`Received wake-up event: 1`**）；唤醒后关闭方式、关闭延迟及语料默认联动同前。
   - 100 条测试：在 exe 同目录或上一级放置 **wakeup_count** 文件夹。**ok_google**：`wakeup_count/ok_google/art_100.txt`（播放顺序）与同目录（或子目录）下的 wav；仍兼容旧版 `wakeup_count/art_100.txt` + `selected_100/`。**ok_freebox / ok_homa**：`wakeup_count/<语料名>/` 下放入 wav，按路径排序播放。**Freebox 整轨目录**：语料选 ok_freebox 并勾选「Freebox 整轨目录 ok_freebox_single/」时，使用 **`wakeup_count/ok_freebox_single/`** 内的一个 wav（可任意命名、直接替换；若有多个 wav 则按文件名排序取第一个），整轨每档播一次；在界面 **「整轨条数」** 填写该 wav 内含多少条唤醒句，作为唤醒率分母（无需改代码或 feature_config）；整轨时「每档播放条数」「播放间隔」会禁用且不参与流程，状态栏预期条数与唤醒率按整轨条数×音量档数计算，避免长文件未播完时出现总次数为 0、唤醒率异常。不勾选则仍按 `ok_freebox/` 多 wav 与「每档播放条数」逻辑。界面「唤醒语料库」下拉框切换语料。**设备端 APK**：`wakeup_count/AudioPlayer.apk`（`com.player.demo`，必选）与气密/震音共用；开始唤醒率测试时若选 **ok_freebox** 会再 `install -r` **`wakeup_count/ok_freebox_32.apk`** 并 **自动启动该应用**（`adb shell monkey -p 主包名 …`）；**ok_homa** 同理安装 **`ok_homa_31.apk`** 并启动。主包名可在 **`feature_config.py`** 中填写 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`；留空时若本机 PATH 有 **aapt/aapt2**，会尝试从 APK 解析包名。
   - 结果输出：实时显示命中状态与计数；100 条测试时显示预期条数、当前唤醒次数与唤醒率。
@@ -94,6 +94,8 @@
   - 结果输出：写入结果反馈与可追溯日志。
 
 ## 最近更新（V1.6）
+
+- **HAL 录音 · 定时循环（可选）**：在「音频调试 → HAL录音」勾选「定时循环」并设置「每段(分钟)」后，每段到时自动停止、拉取 `.pcm/.raw`、清空设备目录再开始下一段；循环进行中不自动打开资源管理器。计时时用 `threading.Timer`，到期后用主窗 `after(0, …)` 回到主线程执行停止（避免长间隔 `after(ms)` 在独立 HAL 窗口上偶发不触发）。`get_adb_command` 在 `selected_device` 被轮询清空时回退 `device_var`，避免 `adb root` 后无 `-s` 拉取失败。到时停止/拉取不做严格 `adb devices` 在线校验；手动「停止录音」仍走完整检查。
 
 - **唤醒率多语料**：「唤醒监测」中「100 条唤醒率测试」增加语料库下拉（ok_google / ok_freebox / ok_homa）。`ok_google` 使用 `wakeup_count/ok_google/art_100.txt` 顺序；其它语料目录内 wav 按路径排序播放；仍兼容旧目录 `art_100.txt` + `selected_100/`。Freebox 支持 **`wakeup_count/ok_freebox_single/`** 整轨 wav + 界面填写条数，无需改配置。唤醒计数：Freebox 为 **`Received wake-up event: 1`** 或 **`KardomeJni: Keyword recognized!`**；**Homa** 仅 **`Received wake-up event: 1`**；Google 仍为 `Detected hotword` / `LIBAS_HOTWORD_DETECTION_RECEIVED`。必选 **`wakeup_count/AudioPlayer.apk`**；Freebox/Homa 另在根目录放置 **`ok_freebox_32.apk`** / **`ok_homa_31.apk`**，开始测试时额外 **install -r**。
 
@@ -224,6 +226,67 @@
 3. 弹窗中可使用 **Ctrl+F** 搜索内容，点击“刷新”重新执行命令，点击“保存”将结果保存为文件
 4. 在“自定义指令”输入框中输入任意 adb shell 命令（如 `dumpsys media.audio`），点击“运行”执行
 5. 设备解锁等敏感操作在“设备解锁”区域，使用前请注意提示（可能清数据）
+
+## AcouTest 唤醒率测试操作说明
+
+### 1 用途
+
+监测设备端唤醒相关日志，并按所选**唤醒语料库**匹配关键字统计唤醒次数；支持「按音量档 / 音效模式」的批量唤醒率测试：笔记本侧按序播放唤醒词 WAV（走 Windows **默认音频输出设备**，将默认设备设为蓝牙音箱即可从音箱出声），被测设备通过 **AudioPlayer**（`com.player.demo`）同步播放同批语料，设备麦克风采集两路声音后触发唤醒，工具通过 ADB `logcat` 统计唤醒次数与唤醒率。监测与统计使用的过滤级别为 `*:I`，在代码中按语料子串匹配，避免仅 `native:I` 时漏掉 Java 等 tag 的日志。
+
+**各语料在 logcat 中的匹配规则**（短时间内的重复命中会去重，一次唤醒计 1 次；详情可点界面「**匹配规则**」）：
+
+- **ok_google（Google）**：行中含 `Detected hotword` 或 `LIBAS_HOTWORD_DETECTION_RECEIVED`。
+- **ok_freebox（Freebox）**：行中含 `Received wake-up event: 1` 或 `KardomeJni: Keyword recognized!`（两版软件二选一）。
+- **ok_homa（Homa）**：行中含 `Received wake-up event: 1`。
+
+「最近唤醒日志」区域在监测到有效唤醒时主要显示**计数提示**（如「监测到唤醒，计数+1（当前：第 N 次）」），与原始 log 行不一定逐字一致；需核对原始行时请用「音频调试 → Logcat 日志」单独抓取。
+
+### 1.1 设备连接
+
+1. 用 USB 数据线或网络 ADB 将 Android 设备与笔记本连接，在设备上开启 USB 调试并授权本机 adb。在声测大师顶部选择该设备，状态为「已选择设备: xxx」且设备在线。
+2. **仅做「唤醒次数监测」**：只需 USB 或网络 ADB 连接即可。
+3. **做批量唤醒率测试**（界面「唤醒率测试」）：除上述连接外，若需「笔记本播放从蓝牙音箱出声」，请按 1.2 节连接并设置好蓝牙音箱与摆放。
+
+### 1.2 批量测试时的播放方式与连接
+
+1. **唤醒词（本机侧）**：由笔记本通过蓝牙连接蓝牙音箱，并将 **Windows 默认播放设备** 设为该蓝牙音箱；本机播放的 WAV 经系统默认输出从蓝牙音箱出声（程序在 Windows 上使用系统默认设备播放，不单独指定声卡）。
+2. **设备端播放**：被测设备安装并运行 **AudioPlayer.apk**（包名 `com.player.demo`），与笔记本按同一条目同步播放；若未安装，点击「**开始测试**」前工具会尝试用 `wakeup_count/AudioPlayer.apk` 自动安装。
+3. **Freebox / Homa 语料**：除 AudioPlayer 外，还需在 **`wakeup_count/`** 目录下放置 **`ok_freebox_32.apk`** 或 **`ok_homa_31.apk`**（与 AudioPlayer 同目录）。开始测试时会 `install -r` 并尝试用 `adb shell monkey` 拉起对应应用；主包名可在 **`feature_config.py`** 中配置 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`，留空时若本机 PATH 有 **aapt/aapt2** 会尝试从 APK 解析包名。
+4. **采集与统计**：设备麦克风同时采集蓝牙音箱播放的唤醒词与设备扬声器播放的 AudioPlayer 音频，据此触发唤醒；工具通过独立 `adb logcat` 进程按当前语料匹配关键字并统计。
+5. **操作建议**：笔记本蓝牙配对音箱 → 系统声音输出选该音箱 → 音箱与被测设备距离适中（例如约 2 米）、勿遮挡设备麦克风、环境尽量安静。
+
+### 1.3 所需目录与文件（`wakeup_count`）
+
+资源目录位于 **可执行文件同目录** 或**上一级**下的 **`wakeup_count`**（与程序内解析逻辑一致）。至少需要 **`wakeup_count/AudioPlayer.apk`**。
+
+**语料与 wav 布局（界面「语料」下拉：ok_google / ok_freebox / ok_homa）**
+
+| 语料 | 说明 |
+|------|------|
+| **ok_google** | 优先使用 `wakeup_count/ok_google/art_100.txt` 列出文件名（与 wav 所在目录一致，通常为同目录下 wav）；**仍兼容旧版** `wakeup_count/art_100.txt` + `wakeup_count/selected_100/` 下放 wav。 |
+| **ok_freebox** | 使用 `wakeup_count/ok_freebox/` 下所有 `.wav`，**按文件名排序**依次播放（条数受「每档条数」上限约束）。勾选 **「Freebox 整轨」** 时，改为使用 `wakeup_count/ok_freebox_single/` 下的 wav（多个文件时取**排序后第一个**），**每个音量档整轨播放一次**；此时「每档条数」「间隔(s)」不可用，需在 **「整轨条数」** 填写该 wav 内大约含多少条唤醒句，作为该档唤醒率**分母**。 |
+| **ok_homa** | 使用 `wakeup_count/ok_homa/` 下 `.wav`，按文件名排序播放。 |
+
+**其它文件**
+
+- **`ok_freebox_32.apk`**、**`ok_homa_31.apk`**：放在 **`wakeup_count/`** 根目录，仅在对应语料开始测试时安装/更新并拉起（见 1.2）。
+
+### 1.4 界面操作（音频调试 → 唤醒监测）
+
+1. 打开 **音频调试** → **唤醒监测**。
+2. **仅监测唤醒次数（不跑批量播放）**  
+   - 点击 **「开始监测」**：后台清空 log 缓冲后启动 `logcat`，按当前「语料」匹配规则计数，并在「最近唤醒日志」中刷新提示。  
+   - 点击 **「停止监测」** 结束。  
+   - **「重置」** 可将计数清零（与停止监测配合使用）。
+3. **批量唤醒率测试**  
+   - **语料**：下拉选择 ok_google / ok_freebox / ok_homa；选 ok_freebox 时可勾选 **「Freebox 整轨」** 并填写 **「整轨条数」**。切换语料会联动默认 **「唤醒后」** 行为：Google 语料默认「关闭助手(force-stop)」，Freebox/Homa 默认 **「不关闭」**，以免打断前台语料应用（可自行改选返回键/Home 等）。  
+   - **统计行**：**全程合计** = 计划累计条数（与每档基准条数、音量档数、音效轮数有关；整轨模式下为「整轨条数 × 档数 × 音效轮数」等，详见界面「说明」按钮旁提示）；**基准** 为当前音量档的分母；**已唤醒** / **唤醒率** 实时更新。  
+   - **参数**：**音量** 区间为 `0～25`（与 `feature_config.py` 中 `MEDIA_VOLUME_MAX_INDEX` 一致，默认 25）；**每档条数**、**间隔(s)** 在整轨模式下禁用；**音效** 可填逗号分隔数值（如 `1,2,5`），工具按 **音效 → 音量档** 逐轮测试，留空则只按音量档测试；点 **「音效说明」** 查看 1～11 对应名称。  
+   - **「开始测试」**：检查/安装 AudioPlayer；Freebox/Homa 会额外安装对应语料 APK 并尝试拉起；读取并设置设备媒体音量后，按配置在笔记本与设备上同步播放并统计。  
+   - **「暂停」** / **「继续」**：暂停保留当前进度与计数，可从断点继续（整轨本机播放另有进度条「本机整轨」，计时为估算仅供参考）。  
+   - **「停止」**：停止播放与唤醒率流程，并停止唤醒监测、停止设备端相关播放。  
+   - **「保存」**：将结果按音效与音量档位等写入 **`output/wakeup_rate/`** 下带时间戳的文本文件（与 `output_paths` 一致）。  
+4. 辅助按钮：**「说明」**（唤醒率测试文件布局与整轨逻辑）、**「匹配规则」**（各语料 log 子串）。对外交付若只需 **ok_freebox + Freebox 整轨** 说明，可使用根目录 **[OK_FREEBOX_整轨_客户使用说明.md](OK_FREEBOX_整轨_客户使用说明.md)**。
 
 ### 遥控器
 1. 主界面选择“常用功能” → 子标签“遥控器”
