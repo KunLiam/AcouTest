@@ -20,6 +20,7 @@ DIR_AIRTIGHTNESS = "airtightness"  # 气密性测试录音（堵mic/不堵mic）
 DIR_LOOPBACK = "loopback"       # Loopback/Ref 测试录音
 DIR_HAL_DUMP = "hal_dump"       # HAL 录音拉取
 DIR_HAL_CUSTOM = "hal_custom"   # 自定义 HAL 录音拉取
+DIR_WAKEUP_KARDOME = "wakeup_kardome_hal"  # Freebox 整轨唤醒率测试：Kardome HAL setprop 分段录音 pull
 
 
 def get_output_dir(subdir: str) -> str:
@@ -54,5 +55,6 @@ def _ensure_output_readme():
             f.write("  loopback/        Loopback/Ref 测试录音\n")
             f.write("  hal_dump/        HAL 录音拉取\n")
             f.write("  hal_custom/      自定义 HAL 录音拉取\n")
+            f.write("  wakeup_kardome_hal/ Freebox 整轨分段录音（Kardome HAL）拉取\n")
     except Exception:
         pass

@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.1.0"
 
 # AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
 AUDIOPLAYER_APK_VERSION = "1.0.1"
@@ -62,9 +62,31 @@ AUDIO_PLAYER_ACTION_REPLAY = "com.player.demo.REPLAY"
 AUDIO_PLAYER_ACTION_RESUME = "com.player.demo.RESUME"
 AUDIO_PLAYER_EXTRA_TRACK = "com.player.demo.EXTRA_TRACK"
 # 唤醒率测试：安装 ok_freebox_32.apk / ok_homa_31.apk 后要 adb 拉起的主包名（adb shell monkey -p <包名> …）。
+# 若设备已安装 com.kardome.audiodemo（pm list），ok_freebox 将不再安装 ok_freebox_32.apk。
 # 留空时程序会尝试用本机 PATH 中的 aapt/aapt2 从 APK 解析包名；若解析失败请在下方填写包名。
 WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX = "com.nes.uevent.demo"
 WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA = "com.nes.uevent.demo"
+# 唤醒率 ok_freebox：将 Kardome Demo 拉到前台（adb shell am start -n <组件>）。留空则用下方默认。
+KARDOME_AUDIODEMO_MAIN_COMPONENT = "com.kardome.audiodemo/com.kardome.MainActivity"
+# Kardome HAL 分段录音：设备端落盘目录（adb pull / 轮询）。留空则用默认外置路径；若厂商改路径可填绝对路径（无末尾 /）。
+KARDOME_HAL_REMOTE_FILES_BASE = ""
+# HAL download_files 置 1 后、开始轮询子目录前多等一会（秒），给系统落盘时间。
+KARDOME_HAL_POST_DOWNLOAD_EDGE_SLEEP_SEC = 0.85
+# pull 前等待子目录内下列文件均存在且「各文件 stat 大小」连续 N 次检测相同（表示写完），避免未写完就 adb pull 导致缺文件/截断。
+KARDOME_HAL_PULL_WAIT_FILES_STABLE = True
+KARDOME_HAL_PULL_WAIT_EXPECTED_FILES = (
+    "keyword_detection_report.txt",
+    "mic_raw.wav",
+    "out_rt_usr.wav",
+    "refs_raw.wav",
+)
+KARDOME_HAL_PULL_MIN_BYTES_REPORT_TXT = 16
+KARDOME_HAL_PULL_MIN_BYTES_WAV = 262144
+KARDOME_HAL_PULL_STABLE_ROUNDS = 3
+KARDOME_HAL_PULL_STABLE_INTERVAL_SEC = 0.7
+KARDOME_HAL_PULL_READY_MAX_WAIT_SEC = 180.0
+# 本档 pull（及删设备端）结束后，再延迟秒数再进入下一音量档，避免档间竞态。
+KARDOME_HAL_AFTER_PULL_ROUND_DELAY_SEC = 3.0
 
 # 与 APK 文档一致：airtight=sweep_speech_48k.wav，vibration=80-1KHz-20S(-3dB).wav
 AUDIO_PLAYER_TRACK_AIRTIGHT = "airtight"

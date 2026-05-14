@@ -1,9 +1,9 @@
 {
-  "latest_version": "2.0.9",
-  "publish_date": "2026-05-13",
+  "latest_version": "2.1.0",
+  "publish_date": "2026-05-14",
   "notes": [
-    "HAL 录音：支持「定时循环」（每段到时自动停→拉取→清设备目录→再录下一段；「停止录音」结束整段流程）"
+    "唤醒监测 · Freebox 整轨 · Kardome HAL：每档先起播再让 Kardome 在前台后开录，整轨播完停录；等录音目录写全再拉到电脑，再进入下一音量档。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.0.9/AcouTest.v2.0.9.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.0/AcouTest.v2.1.0.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

@@ -36,6 +36,7 @@ from output_paths import (
     DIR_HAL_DUMP,
     DIR_HAL_CUSTOM,
     DIR_LOOPBACK,
+    DIR_WAKEUP_KARDOME,
 )
 
 # 功能开关：未找到 feature_config 或出错时默认全部显示
@@ -6333,6 +6334,8 @@ class UIComponents:
             "• ok_freebox / ok_homa：对应子目录下 wav，按文件名排序播放。\n"
             "• Freebox 整轨：语料选 ok_freebox 并勾选「整轨」后，使用 wakeup_count/ok_freebox_single/ 下 wav（多文件时取排序第一个），"
             "「整轨条数」为每一音量档内的唤醒率分母；整轨下「每档条数」「间隔」禁用。\n"
+            "• 可选「Kardome HAL 分段录音」：每音量档用 vendor.media.audiohal.kardome.recording / download_files 控制设备侧录音，"
+            "并在每档播完后 adb pull 到 output/wakeup_kardome_hal/ 下按 session 与音效、音量分子目录保存。\n"
             "界面「全程合计」= 整轨条数 × 音量档数 × 音效轮数（例如 150×6 档×1 轮音效=900），表示整轮测试若全部播完时的累计条数，不是「只播一遍 wav」的条数。\n"
             "整轨时本机用 winsound 播 wav，进度条按文件头里的时长做「已播/总长」估算（与设备端进度无关）。\n\n"
             "设备端需 wakeup_count/AudioPlayer.apk；Freebox/Homa 另需对应语料 APK，开始测试时会自动安装并拉起。\n"
@@ -6414,6 +6417,14 @@ class UIComponents:
                     w.config(state="disabled" if use_single else "normal")
                 except Exception:
                     pass
+        kd_cb = getattr(self, "hotword_kardome_hal_rec_cb", None)
+        if kd_cb is not None and kd_cb.winfo_exists():
+            try:
+                kd_cb.config(state="normal" if use_single else "disabled")
+                if not use_single and hasattr(self, "hotword_kardome_hal_rec_var"):
+                    self.hotword_kardome_hal_rec_var.set(False)
+            except Exception:
+                pass
 
     def _resolve_ok_freebox_single_wav_path(self, wakeup_dir):
         """
@@ -6429,6 +6440,745 @@ class UIComponents:
         if not names:
             return None, d
         return os.path.join(d, names[0]), d
+
+    def _kardome_hal_remote_files_base(self):
+        try:
+            import feature_config as _fc_kh
+
+            b = str(getattr(_fc_kh, "KARDOME_HAL_REMOTE_FILES_BASE", "") or "").strip()
+            if b:
+                return b.rstrip("/")
+        except Exception:
+            pass
+        return "/storage/emulated/0/Android/data/com.kardome.audiodemo/files"
+
+    def _kardome_hal_remote_scan(self, device_id, escalate=True):
+        """
+        列举 Kardome 包外置 files 目录下一级子目录与顶层音频文件。
+        Android 11+ 上普通 adb shell 常无法遍历 Android/data/...，故 escalate 时在空结果下依次尝试 su 0、adb root 后再 find。
+        """
+        serial = (device_id or "").strip()
+        empty = {"dirs": set(), "audio_files": set()}
+        if not serial:
+            return empty
+        base = self._kardome_hal_remote_files_base()
+        kw = dict(self._kardome_hal_subprocess_kwargs())
+        kw["timeout"] = max(35, int(kw.get("timeout") or 30))
+
+        def _parse_dir_lines(stdout):
+            s = set()
+            for line in (stdout or "").splitlines():
+                line = line.strip().rstrip("/")
+                if not line:
+                    continue
+                bn = os.path.basename(line)
+                if bn and bn != "files":
+                    s.add(bn)
+            return s
+
+        def _parse_file_basenames(stdout):
+            s = set()
+            for line in (stdout or "").splitlines():
+                line = line.strip().rstrip("/")
+                if not line:
+                    continue
+                bn = os.path.basename(line)
+                if not bn:
+                    continue
+                low = bn.lower()
+                if low.endswith((".pcm", ".raw", ".wav")):
+                    s.add(bn)
+            return s
+
+        def _find_block(shell_prefix):
+            """shell_prefix: [] = adb shell；['su','0'] = adb shell su 0。"""
+            dirs_out, files_out = set(), set()
+            adb = ["adb", "-s", serial, "shell"] + shell_prefix
+            try:
+                r1 = subprocess.run(adb + ["find", base, "-maxdepth", "1", "-mindepth", "1", "-type", "d"], **kw)
+                if r1.returncode == 0:
+                    dirs_out = _parse_dir_lines(r1.stdout or "")
+            except Exception:
+                pass
+            try:
+                r2 = subprocess.run(adb + ["find", base, "-maxdepth", "1", "-mindepth", "1", "-type", "f"], **kw)
+                if r2.returncode == 0:
+                    files_out = _parse_file_basenames(r2.stdout or "")
+            except Exception:
+                pass
+            return dirs_out, files_out
+
+        d0, f0 = _find_block([])
+        if d0 or f0:
+            return {"dirs": d0, "audio_files": f0}
+        if not escalate:
+            return {"dirs": d0, "audio_files": f0}
+        d1, f1 = _find_block(["su", "0"])
+        if d1 or f1:
+            if not d0 and not f0:
+                _fn = getattr(self, "_append_hotword_log", None)
+                if callable(_fn):
+                    _fn("Kardome HAL: 普通 shell 无法列出 %s，已用 su 0 find 枚举到目录/文件。" % base)
+            return {"dirs": d1, "audio_files": f1}
+        try:
+            self._kardome_hal_ensure_adb_root_once(serial)
+            time.sleep(0.7)
+        except Exception:
+            pass
+        d2, f2 = _find_block([])
+        if d2 or f2:
+            _fn = getattr(self, "_append_hotword_log", None)
+            if callable(_fn):
+                _fn("Kardome HAL: 已 adb root 后重新枚举 %s（Android/data 在部分机型上需 root 才可见）。" % base)
+            return {"dirs": d2, "audio_files": f2}
+        # 与旧逻辑一致：find 全空时再试 ls -1（个别环境 find 不可用）
+        out_dirs, out_files = set(), set()
+        try:
+            r = subprocess.run(["adb", "-s", serial, "shell", "ls", "-1", base], **kw)
+            if r.returncode == 0:
+                skip = {"keyword_detection_report.txt"}
+                for line in (r.stdout or "").splitlines():
+                    name = line.strip()
+                    if not name or name in skip or name.endswith(".txt"):
+                        continue
+                    if re.match(r"^[\w.-]+$", name):
+                        low = name.lower()
+                        if low.endswith((".pcm", ".raw", ".wav")):
+                            out_files.add(name)
+                        else:
+                            out_dirs.add(name)
+        except Exception:
+            pass
+        return {"dirs": out_dirs, "audio_files": out_files}
+
+    def _sanitize_filename_segment(self, s, max_len=56):
+        if not s:
+            return "x"
+        bad = '<>:"/\\|?*\r\n\t'
+        out = "".join("_" if c in bad else c for c in str(s)).strip().replace(" ", "_")
+        out = out[:max_len] if len(out) > max_len else out
+        return out or "x"
+
+    def _kardome_hal_effx_folder_label(self, effx_mode, effx_names):
+        if effx_mode is None:
+            return "no_effx"
+        try:
+            m = int(effx_mode)
+        except (TypeError, ValueError):
+            m = effx_mode
+        name = (effx_names or {}).get(m, str(m))
+        return "effx%s_%s" % (m, self._sanitize_filename_segment(name))
+
+    def _kardome_hal_list_remote_dirs(self, device_id):
+        return set(self._kardome_hal_remote_scan(device_id, escalate=True)["dirs"])
+
+    def _kardome_hal_delete_remote_subdir(self, device_id, dirname):
+        """删除设备上 com.kardome.audiodemo/files 下已 pull 的子目录（adb shell rm -rf）。"""
+        serial = (device_id or "").strip()
+        d = (dirname or "").strip().strip("/")
+        if not serial or not d or ".." in d or "/" in d or "\\" in d:
+            return False
+        base = self._kardome_hal_remote_files_base().rstrip("/")
+        remote = base + "/" + d
+        kw = {"capture_output": True, "text": True, "timeout": 120}
+        if platform.system() == "Windows":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(["adb", "-s", serial, "shell", "rm", "-rf", remote], **kw)
+            if r.returncode == 0:
+                self._append_hotword_log("Kardome HAL: 已删除设备端目录 %s" % remote)
+                return True
+            tail = ((r.stderr or "") + (r.stdout or "")).strip()
+            self._append_hotword_log("Kardome HAL: 删除设备端目录失败 %s — %s" % (remote, tail[:400]))
+        except Exception as e:
+            self._append_hotword_log("Kardome HAL: 删除设备端目录异常 %s — %s" % (remote, e))
+        return False
+
+    def _kardome_hal_delete_remote_file(self, device_id, basename):
+        """删除设备上 com.kardome.audiodemo/files 下的单个文件（adb shell rm -f）。"""
+        serial = (device_id or "").strip()
+        fn = (basename or "").strip()
+        if not serial or not fn or ".." in fn or "/" in fn or "\\" in fn:
+            return False
+        base = self._kardome_hal_remote_files_base().rstrip("/")
+        remote = base + "/" + fn
+        kw = {"capture_output": True, "text": True, "timeout": 60}
+        if platform.system() == "Windows":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(["adb", "-s", serial, "shell", "rm", "-f", remote], **kw)
+            if r.returncode == 0:
+                self._append_hotword_log("Kardome HAL: 已删除设备端文件 %s" % remote)
+                return True
+            tail = ((r.stderr or "") + (r.stdout or "")).strip()
+            self._append_hotword_log("Kardome HAL: 删除设备端文件失败 %s — %s" % (remote, tail[:400]))
+        except Exception as e:
+            self._append_hotword_log("Kardome HAL: 删除设备端文件异常 %s — %s" % (remote, e))
+        return False
+
+    def _kardome_hal_ensure_adb_root_once(self, device_id):
+        if not device_id:
+            return False
+        key = "_kardome_hal_adb_root_done_for"
+        if getattr(self, key, None) == device_id:
+            return True
+        try:
+            kw = self._kardome_hal_subprocess_kwargs()
+            subprocess.run(["adb", "-s", device_id, "root"], **kw)
+            time.sleep(1.2)
+            try:
+                subprocess.run(["adb", "-s", device_id, "wait-for-device"], **kw)
+            except Exception:
+                pass
+            setattr(self, key, device_id)
+            self._append_hotword_log("adb root（Kardome HAL 录音，同设备本会话仅执行一次）")
+            return True
+        except Exception as e:
+            self._append_hotword_log("adb root 失败（仍将尝试 setprop）: %s" % e)
+            setattr(self, key, device_id)
+            return False
+
+    def _kardome_hal_subprocess_kwargs(self):
+        kw = {"capture_output": True, "text": True, "timeout": 30}
+        if platform.system() == "Windows":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return kw
+
+    def _kardome_hal_setprop(self, device_id, prop_name, value):
+        """与 PC 上手敲「adb shell setprop」一致：优先普通 shell；失败再 su 0 / su root。"""
+        val = str(value)
+        serial = (device_id or "").strip()
+        if not serial:
+            return False
+        adb = ["adb", "-s", serial]
+        kwargs = self._kardome_hal_subprocess_kwargs()
+        attempts = [
+            adb + ["shell", "setprop", prop_name, val],
+            adb + ["shell", "su", "0", "setprop", prop_name, val],
+            adb + ["shell", "su", "root", "setprop", prop_name, val],
+        ]
+        last_tail = ""
+        for cmd in attempts:
+            try:
+                r = subprocess.run(cmd, **kwargs)
+                if r.returncode == 0:
+                    return True
+                last_tail = ((r.stderr or "") + (r.stdout or "")).strip()[:400]
+            except Exception as e:
+                last_tail = str(e)
+        if last_tail:
+            self._append_hotword_log("Kardome setprop 失败 %s=%s（已尝试 shell/su0/su）: %s" % (prop_name, val, last_tail))
+        return False
+
+    def _kardome_hal_getprop_line(self, device_id, prop_name):
+        serial = (device_id or "").strip()
+        if not serial:
+            return ""
+        try:
+            r = subprocess.run(
+                ["adb", "-s", serial, "shell", "getprop", str(prop_name)],
+                **self._kardome_hal_subprocess_kwargs(),
+            )
+            if r.returncode == 0 and (r.stdout or "").strip():
+                return (r.stdout or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _kardome_hal_recording_start_round(self, device_id):
+        if not device_id:
+            return False
+        scan = self._kardome_hal_remote_scan(device_id, escalate=True)
+        self._wakeup100_kardome_scan_at_rec_start = {
+            "dirs": set(scan["dirs"]),
+            "audio_files": set(scan["audio_files"]),
+        }
+        self._wakeup100_kardome_dirs_snapshot = set(scan["dirs"])
+        # 与手动测试一致：先普通 shell setprop；失败再 adb root 后重试（避免 adb root 后行为与交互 shell 不一致）
+        ok = self._kardome_hal_setprop(device_id, "vendor.media.audiohal.kardome.recording", "1")
+        if not ok:
+            self._kardome_hal_ensure_adb_root_once(device_id)
+            ok = self._kardome_hal_setprop(device_id, "vendor.media.audiohal.kardome.recording", "1")
+        self._wakeup100_kardome_hal_recording_armed = bool(ok)
+        if ok:
+            self._append_hotword_log("Kardome HAL: vendor.media.audiohal.kardome.recording = 1（本档开始）")
+            rv = self._kardome_hal_getprop_line(device_id, "vendor.media.audiohal.kardome.recording")
+            self._append_hotword_log("Kardome HAL: getprop recording=%r（置 1 后）" % rv)
+        return bool(ok)
+
+    def _kardome_local_pulled_dir_audio_bytes(self, local_dir):
+        """本机已 pull 子目录内 wav/pcm/raw 总字节数；用于判断是否空目录。"""
+        n = 0
+        try:
+            if not local_dir or not os.path.isdir(local_dir):
+                return 0
+            for dp, _, fns in os.walk(local_dir):
+                for fn in fns:
+                    low = fn.lower()
+                    if low.endswith(".wav") or low.endswith(".pcm") or low.endswith(".raw"):
+                        try:
+                            n += os.path.getsize(os.path.join(dp, fn))
+                        except OSError:
+                            pass
+        except Exception:
+            return 0
+        return int(n)
+
+    def _kardome_hal_fc_post_download_edge_sleep(self):
+        try:
+            import feature_config as _fc_ps
+
+            return float(getattr(_fc_ps, "KARDOME_HAL_POST_DOWNLOAD_EDGE_SLEEP_SEC", 0.85))
+        except Exception:
+            return 0.85
+
+    def _kardome_hal_fc_after_pull_round_delay_sec(self):
+        try:
+            import feature_config as _fc_ad
+
+            return max(0.0, float(getattr(_fc_ad, "KARDOME_HAL_AFTER_PULL_ROUND_DELAY_SEC", 3.0)))
+        except Exception:
+            return 3.0
+
+    def _kardome_hal_fc_pull_wait_and_expect(self):
+        """返回 (是否等待稳定, 期望文件名序列, 每文件最小字节 dict, stable_rounds, interval, max_wait)。"""
+        try:
+            import feature_config as _fc_pe
+
+            wait = bool(getattr(_fc_pe, "KARDOME_HAL_PULL_WAIT_FILES_STABLE", True))
+            exp = getattr(_fc_pe, "KARDOME_HAL_PULL_WAIT_EXPECTED_FILES", None)
+            if not exp or len(exp) == 0:
+                exp = (
+                    "keyword_detection_report.txt",
+                    "mic_raw.wav",
+                    "out_rt_usr.wav",
+                    "refs_raw.wav",
+                )
+            exp = tuple(exp)
+            mt = int(getattr(_fc_pe, "KARDOME_HAL_PULL_MIN_BYTES_REPORT_TXT", 16))
+            mw = int(getattr(_fc_pe, "KARDOME_HAL_PULL_MIN_BYTES_WAV", 262144))
+            mins = {}
+            for fn in exp:
+                low = fn.lower()
+                mins[fn] = mt if low.endswith(".txt") else mw
+            sr = max(2, int(getattr(_fc_pe, "KARDOME_HAL_PULL_STABLE_ROUNDS", 3)))
+            iv = max(0.15, float(getattr(_fc_pe, "KARDOME_HAL_PULL_STABLE_INTERVAL_SEC", 0.7)))
+            mx = max(5.0, float(getattr(_fc_pe, "KARDOME_HAL_PULL_READY_MAX_WAIT_SEC", 180.0)))
+            return wait, exp, mins, sr, iv, mx
+        except Exception:
+            exp = (
+                "keyword_detection_report.txt",
+                "mic_raw.wav",
+                "out_rt_usr.wav",
+                "refs_raw.wav",
+            )
+            return True, exp, {exp[0]: 16, exp[1]: 262144, exp[2]: 262144, exp[3]: 262144}, 3, 0.7, 180.0
+
+    def _kardome_hal_remote_stat_file_size(self, device_id, remote_file_path):
+        """设备端文件字节数；失败返回 -1。依次尝试普通 shell / su 0。"""
+        serial = (device_id or "").strip()
+        rp = (remote_file_path or "").strip()
+        if not serial or not rp or ".." in rp:
+            return -1
+        kw = self._kardome_hal_subprocess_kwargs()
+        for cmd in (
+            ["adb", "-s", serial, "shell", "stat", "-c", "%s", rp],
+            ["adb", "-s", serial, "shell", "su", "0", "stat", "-c", "%s", rp],
+        ):
+            try:
+                r = subprocess.run(cmd, **kw)
+                if r.returncode != 0:
+                    continue
+                s = (r.stdout or "").strip().splitlines()
+                s0 = (s[0] if s else "").strip()
+                if s0.isdigit():
+                    return int(s0)
+            except Exception:
+                pass
+        return -1
+
+    def _kardome_hal_wait_subdir_ready_for_pull(self, device_id, dirname):
+        """
+        在 adb pull 目录前，等待子目录内期望文件齐全且各文件 stat 大小连续稳定若干次。
+        超时返回 False（仍可由上层选择是否继续 pull）。
+        """
+        wait, exp, mins, stable_need, interval, max_wait = self._kardome_hal_fc_pull_wait_and_expect()
+        if not wait:
+            return True
+        d = (dirname or "").strip().strip("/")
+        if not d or "/" in d or "\\" in d or ".." in d:
+            return False
+        base = self._kardome_hal_remote_files_base().rstrip("/")
+        remote_dir = base + "/" + d
+        t0 = time.time()
+        prev = None
+        streak = 0
+        while time.time() - t0 < max_wait:
+            sizes = {}
+            ok = True
+            for fn in exp:
+                sz = self._kardome_hal_remote_stat_file_size(device_id, remote_dir + "/" + fn)
+                sizes[fn] = sz
+                if sz < mins.get(fn, 1):
+                    ok = False
+            if ok:
+                if prev == sizes:
+                    streak += 1
+                    if streak >= stable_need:
+                        self._append_hotword_log(
+                            "Kardome HAL: 子目录 %s 内 %d 个期望文件已就绪且体积连续 %d 次一致，开始 pull"
+                            % (d, len(exp), stable_need)
+                        )
+                        return True
+                else:
+                    prev = dict(sizes)
+                    streak = 1
+            else:
+                prev = None
+                streak = 0
+            time.sleep(interval)
+        self._append_hotword_log(
+            "Kardome HAL: 等待子目录 %s 内文件就绪超时（%.0fs），仍将尝试 pull（若不齐套则不删设备端）"
+            % (d, max_wait)
+        )
+        return False
+
+    def _kardome_hal_local_pulled_subdir_complete(self, local_sub):
+        """本机子目录是否含期望文件且达到最小字节。返回 (ok, reason)。"""
+        wait, exp, mins, _, _, _ = self._kardome_hal_fc_pull_wait_and_expect()
+        if not local_sub or not os.path.isdir(local_sub):
+            return False, "no_dir"
+        for fn in exp:
+            p = os.path.join(local_sub, fn)
+            if not os.path.isfile(p):
+                return False, "missing " + fn
+            try:
+                sz = os.path.getsize(p)
+            except OSError:
+                return False, "stat " + fn
+            if sz < mins.get(fn, 32):
+                return False, "small %s(%d)" % (fn, sz)
+        return True, ""
+
+    def _kardome_hal_recording_finish_round(self, device_id, effx_mode, vol, effx_names, partial=False):
+        if not device_id or not getattr(self, "_wakeup100_kardome_hal_recording_armed", False):
+            return
+        before = set(getattr(self, "_wakeup100_kardome_dirs_snapshot", set()) or set())
+        rec0 = getattr(self, "_wakeup100_kardome_scan_at_rec_start", None) or {"dirs": set(), "audio_files": set()}
+        before_files = set(rec0.get("audio_files") or set())
+        dev = device_id
+        kardome_aplayer_paused_ok = False
+        new_flat_pull = []
+        try:
+            self._wakeup100_kardome_hal_recording_armed = False
+            ok0 = self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.recording", "0")
+            if not ok0:
+                self._kardome_hal_ensure_adb_root_once(dev)
+                ok0 = self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.recording", "0")
+            self._append_hotword_log("Kardome HAL: vendor.media.audiohal.kardome.recording = 0（本档结束）")
+            # 停录后立即暂停设备端播放并停止本机唤醒音频（与 download 并行满足「同时停播」）
+            try:
+                import audio_player_apk as _apk_stoprec
+
+                _apk_stoprec.run_pause(dev)
+            except Exception:
+                pass
+            try:
+                self._hotword_stop_local_wakeup_playback()
+            except Exception:
+                pass
+            self._append_hotword_log("Kardome HAL: 停录后已 PAUSE AudioPlayer 并停止本机唤醒语料播放（如有）。")
+            time.sleep(2.05)
+            kardome_aplayer_paused_ok = True
+            try:
+                self._kardome_audiodemo_bring_to_foreground(dev, log_append=self._append_hotword_log)
+            except Exception:
+                pass
+            time.sleep(0.45)
+            dl_prev = str(self._kardome_hal_getprop_line(dev, "vendor.media.audiohal.kardome.download_files")).strip()
+            if dl_prev == "1":
+                self._append_hotword_log("Kardome HAL: download_files 已为 1，先置 0 以产生有效边沿。")
+                self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "0")
+                time.sleep(0.5)
+            scan_b = self._kardome_hal_remote_scan(dev, escalate=True)
+            dirs_before_download = set(scan_b["dirs"])
+            files_before_download = set(scan_b["audio_files"])
+            self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "0")
+            time.sleep(self._kardome_hal_fc_post_download_edge_sleep())
+            self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "1")
+            self._append_hotword_log(
+                "Kardome HAL: 已触发 vendor.media.audiohal.kardome.download_files（0→1），轮询等待新建子目录或顶层 pcm/raw/wav…"
+            )
+            pulled_sess = set(getattr(self, "_wakeup100_kardome_pulled_remote_dirs", set()) or set())
+            pulled_files_sess = set(getattr(self, "_wakeup100_kardome_pulled_remote_files", set()) or set())
+            new_dirs = []
+            new_flat_pull = []
+
+            def _poll_body():
+                sc = self._kardome_hal_remote_scan(dev, escalate=True)
+                current = set(sc["dirs"])
+                cur_files = set(sc["audio_files"])
+                not_pulled = sorted(x for x in current if x not in pulled_sess)
+                fresh = [x for x in not_pulled if x not in before]
+                if fresh:
+                    return [fresh[-1]], []
+                alt = [x for x in not_pulled if x not in dirs_before_download]
+                if alt:
+                    return [alt[-1]], []
+                legacy = sorted(x for x in current if x not in dirs_before_download)
+                if legacy:
+                    return [legacy[-1]], []
+                nf = sorted(x for x in cur_files if x not in pulled_files_sess and x not in before_files)
+                if nf:
+                    return [], nf
+                nfsd = sorted(x for x in cur_files if x not in pulled_files_sess and x not in files_before_download)
+                if nfsd:
+                    return [], nfsd
+                return [], []
+
+            t0 = time.time()
+            while time.time() - t0 < 48.0:
+                nds, fls = _poll_body()
+                if nds:
+                    new_dirs = nds
+                    break
+                if fls:
+                    new_flat_pull = fls
+                    break
+                time.sleep(0.45)
+            if not new_dirs and not new_flat_pull:
+                self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "0")
+                time.sleep(0.3)
+                self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "1")
+                self._append_hotword_log("Kardome HAL: 二次触发 download_files（0→1），继续轮询…")
+                t1 = time.time()
+                while time.time() - t1 < 20.0:
+                    nds, fls = _poll_body()
+                    if nds:
+                        new_dirs = nds
+                        break
+                    if fls:
+                        new_flat_pull = fls
+                        break
+                    time.sleep(0.45)
+            if not new_dirs and not new_flat_pull:
+                rp = self._kardome_hal_getprop_line(dev, "vendor.media.audiohal.kardome.download_files")
+                rr = self._kardome_hal_getprop_line(dev, "vendor.media.audiohal.kardome.recording")
+                self._append_hotword_log(
+                    "Kardome HAL: 仍未发现新建子目录或顶层音频。getprop download_files=%r recording=%r；路径 %s（若 PC 上 ls 为空可试 adb root 或 su 0）。"
+                    % (rp, rr, self._kardome_hal_remote_files_base())
+                )
+                after_sc = self._kardome_hal_remote_scan(dev, escalate=True)
+                after_fb = set(after_sc["dirs"])
+                cand_fb = sorted(x for x in after_fb if x not in pulled_sess and x not in before)
+                if cand_fb:
+                    new_dirs = [cand_fb[-1]]
+                    self._append_hotword_log("Kardome HAL: 改用「开录前」+ 未 pull 快照，将拉取目录: %s" % new_dirs[0])
+                else:
+                    cand_any = sorted(x for x in after_fb if x not in pulled_sess)
+                    if cand_any:
+                        new_dirs = [cand_any[-1]]
+                        self._append_hotword_log("Kardome HAL: 改用未 pull 目录: %s" % new_dirs[0])
+                if not new_dirs and not new_flat_pull:
+                    aff = sorted(
+                        x for x in after_sc["audio_files"]
+                        if x not in pulled_files_sess and x not in before_files
+                    )
+                    if aff:
+                        new_flat_pull = aff
+                        self._append_hotword_log("Kardome HAL: 改用开录后新增顶层文件: %s" % ", ".join(aff[:8]))
+                    if not new_flat_pull:
+                        aff2 = sorted(x for x in after_sc["audio_files"] if x not in pulled_files_sess)
+                        if aff2:
+                            new_flat_pull = aff2
+                            self._append_hotword_log(
+                                "Kardome HAL: 改用未 pull 顶层文件: %s" % ", ".join(aff2[:8])
+                            )
+            session = getattr(self, "_wakeup100_kardome_session_dir", None) or ""
+            if not session or not os.path.isdir(session):
+                self._append_hotword_log("Kardome HAL: 未设置本机 session 目录，跳过 pull。")
+                return
+            effx_lbl = self._kardome_hal_effx_folder_label(effx_mode, effx_names or {})
+            try:
+                vol_lbl = "vol%02d" % int(vol)
+            except (TypeError, ValueError):
+                vol_lbl = "vol_%s" % self._sanitize_filename_segment(str(vol))
+            folder = "%s_%s%s" % (effx_lbl, vol_lbl, "_partial" if partial else "")
+            dest_parent = os.path.join(session, self._sanitize_filename_segment(folder, max_len=120))
+            try:
+                os.makedirs(dest_parent, exist_ok=True)
+            except OSError as e:
+                self._append_hotword_log("Kardome HAL: 无法创建目录 %s — %s" % (dest_parent, e))
+                return
+            base = self._kardome_hal_remote_files_base()
+            if not new_dirs and not new_flat_pull:
+                self._append_hotword_log(
+                    "Kardome HAL: 无可 pull 的新目录或顶层音频（轮询与快照均无新增）。路径: %s" % base
+                )
+                return
+            pull_kw = {"capture_output": True, "text": True, "timeout": 600}
+            if platform.system() == "Windows":
+                pull_kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            for nd in new_dirs:
+                remote_path = base.rstrip("/") + "/" + nd
+                local_sub = os.path.join(dest_parent, nd)
+                try:
+                    self._kardome_hal_wait_subdir_ready_for_pull(dev, nd)
+                    pull_round_ok = False
+                    for attempt in range(2):
+                        if attempt > 0:
+                            self._append_hotword_log(
+                                "Kardome HAL: 本机子目录不齐套，2.2s 后重试 pull %s（第 %d 次）" % (nd, attempt + 1)
+                            )
+                            time.sleep(2.2)
+                            try:
+                                if os.path.isdir(local_sub):
+                                    shutil.rmtree(local_sub, ignore_errors=True)
+                            except Exception:
+                                pass
+                        pr = subprocess.run(
+                            ["adb", "-s", dev, "pull", remote_path, dest_parent],
+                            **pull_kw,
+                        )
+                        if pr.returncode != 0:
+                            tail = ((pr.stderr or "") + (pr.stdout or "")).strip()
+                            self._append_hotword_log("Kardome HAL: pull %s 失败 %s" % (nd, tail[:500]))
+                            break
+                        comp_ok, why = self._kardome_hal_local_pulled_subdir_complete(local_sub)
+                        ab = self._kardome_local_pulled_dir_audio_bytes(local_sub)
+                        if comp_ok and ab >= 4096:
+                            pull_round_ok = True
+                            break
+                        self._append_hotword_log(
+                            "Kardome HAL: pull 后本机校验未通过（%s），音频量 %d B" % (why, ab)
+                        )
+                    if not pull_round_ok:
+                        self._append_hotword_log(
+                            "Kardome HAL: 目录 %s 经重试仍未齐套（需四文件 txt+3 wav），不删设备端、不标记已 pull" % nd
+                        )
+                        continue
+                    if not os.path.isdir(local_sub):
+                        self._append_hotword_log(
+                            "Kardome HAL: 本机未找到已 pull 目录 %s，跳过删除设备端" % local_sub
+                        )
+                        continue
+                    ab2 = self._kardome_local_pulled_dir_audio_bytes(local_sub)
+                    comp2, why2 = self._kardome_hal_local_pulled_subdir_complete(local_sub)
+                    if not comp2 or ab2 < 4096:
+                        self._append_hotword_log(
+                            "Kardome HAL: 本机最终校验未通过（%s），音频量 %d B，不删设备端 %s"
+                            % (why2, ab2, nd)
+                        )
+                        continue
+                    self._append_hotword_log(
+                        "Kardome HAL: 已 pull %s → %s（本地音频约 %d B，四文件齐套），确认本机已落盘后删除设备端目录"
+                        % (nd, dest_parent, ab2)
+                    )
+                    try:
+                        ps = getattr(self, "_wakeup100_kardome_pulled_remote_dirs", None)
+                        if ps is not None:
+                            ps.add(nd)
+                    except Exception:
+                        pass
+                    self._kardome_hal_delete_remote_subdir(dev, nd)
+                except Exception as e:
+                    self._append_hotword_log("Kardome HAL: pull %s 异常 %s" % (nd, e))
+            for fn in new_flat_pull:
+                remote_f = base.rstrip("/") + "/" + fn
+                local_fp = os.path.join(dest_parent, fn)
+                try:
+                    pr = subprocess.run(
+                        ["adb", "-s", dev, "pull", remote_f, local_fp],
+                        **pull_kw,
+                    )
+                    if pr.returncode != 0:
+                        tail = ((pr.stderr or "") + (pr.stdout or "")).strip()
+                        self._append_hotword_log("Kardome HAL: pull 文件 %s 失败 %s" % (fn, tail[:500]))
+                        continue
+                    ab = 0
+                    try:
+                        if os.path.isfile(local_fp):
+                            ab = int(os.path.getsize(local_fp))
+                    except OSError:
+                        ab = 0
+                    if ab < 4096:
+                        self._append_hotword_log(
+                            "Kardome HAL: pull 文件 %s 后约 %d B，1s 后重试" % (fn, ab)
+                        )
+                        time.sleep(1.0)
+                        try:
+                            if os.path.isfile(local_fp):
+                                os.remove(local_fp)
+                        except Exception:
+                            pass
+                        pr2 = subprocess.run(
+                            ["adb", "-s", dev, "pull", remote_f, local_fp],
+                            **pull_kw,
+                        )
+                        if pr2.returncode == 0 and os.path.isfile(local_fp):
+                            ab = int(os.path.getsize(local_fp))
+                    if ab >= 4096:
+                        if not os.path.isfile(local_fp):
+                            self._append_hotword_log(
+                                "Kardome HAL: 本机未找到已 pull 文件 %s，跳过删除设备端" % local_fp
+                            )
+                            continue
+                        try:
+                            sz2 = os.path.getsize(local_fp)
+                        except OSError:
+                            sz2 = 0
+                        if sz2 < 4096:
+                            self._append_hotword_log(
+                                "Kardome HAL: 本机文件 %s 仅 %d B，不删设备端" % (fn, sz2)
+                            )
+                            continue
+                        self._append_hotword_log(
+                            "Kardome HAL: 已 pull 文件 %s → %s（%d B），确认本机已落盘后删除设备端文件"
+                            % (fn, dest_parent, sz2)
+                        )
+                        try:
+                            pfs = getattr(self, "_wakeup100_kardome_pulled_remote_files", None)
+                            if pfs is not None:
+                                pfs.add(fn)
+                        except Exception:
+                            pass
+                        self._kardome_hal_delete_remote_file(dev, fn)
+                    else:
+                        self._append_hotword_log(
+                            "Kardome HAL: pull 文件 %s 后仍过小(%d B)，不删设备端文件" % (fn, ab)
+                        )
+                except Exception as e:
+                    self._append_hotword_log("Kardome HAL: pull 文件 %s 异常 %s" % (fn, e))
+            if new_dirs or new_flat_pull:
+                _dpost = self._kardome_hal_fc_after_pull_round_delay_sec()
+                if _dpost > 0:
+                    self._append_hotword_log(
+                        "Kardome HAL: 本档 pull 结束，延时 %.1f s 便于 HAL/存储收尾后再进入下一档" % _dpost
+                    )
+                    time.sleep(_dpost)
+            try:
+                import audio_player_apk as _apk_after_pull
+
+                _apk_after_pull.run_pause(dev)
+                kardome_aplayer_paused_ok = True
+                self._append_hotword_log("Kardome HAL: pull 完成后已 PAUSE 设备端 AudioPlayer。")
+            except Exception:
+                pass
+        finally:
+            if dev:
+                try:
+                    self._kardome_hal_setprop(dev, "vendor.media.audiohal.kardome.download_files", "0")
+                except Exception:
+                    pass
+                time.sleep(0.15)
+                try:
+                    import audio_player_apk as _apk_end
+
+                    _apk_end.run_pause(dev)
+                    if not kardome_aplayer_paused_ok:
+                        self._append_hotword_log("Kardome HAL: 本档结束兜底 PAUSE 设备端 AudioPlayer。")
+                except Exception:
+                    pass
 
     def _wav_duration_seconds_riff(self, path):
         """不依赖 wave：由 data 块大小与 fmt 的 block_align、sample_rate 估算时长（兼容 IEEE float 等）。"""
@@ -6843,6 +7593,17 @@ class UIComponents:
         except Exception:
             pass
         self._sync_hotword_after_key_for_wakeup_corpus()
+
+        kardome_rec_row = ttk.Frame(rate_frame)
+        kardome_rec_row.pack(anchor="w", padx=6, pady=(2, 2))
+        self.hotword_kardome_hal_rec_var = tk.BooleanVar(value=False)
+        self.hotword_kardome_hal_rec_cb = ttk.Checkbutton(
+            kardome_rec_row,
+            text="Freebox 整轨：Kardome HAL 分段录音（每音量档停录并 pull）",
+            variable=self.hotword_kardome_hal_rec_var,
+            state="disabled",
+        )
+        self.hotword_kardome_hal_rec_cb.pack(side="left")
 
         self.hotword_wakeup100_effx_modes_var = tk.StringVar(value="")
         rate_settings = ttk.Frame(rate_frame)
@@ -7260,6 +8021,92 @@ class UIComponents:
                 return d, base_dir
         return None, base_dir
 
+    def _adb_device_has_package(self, device_id, package_name):
+        """判断设备是否已安装指定包（adb shell pm list packages <filter>）。"""
+        pkg = (package_name or "").strip()
+        serial = (device_id or "").strip()
+        if not pkg or not serial:
+            return False
+        kw = {"capture_output": True, "text": True, "timeout": 15}
+        if platform.system() == "Windows":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(
+                ["adb", "-s", serial, "shell", "pm", "list", "packages", pkg],
+                **kw,
+            )
+            if r.returncode != 0:
+                return False
+            return ("package:%s" % pkg) in (r.stdout or "")
+        except Exception:
+            return False
+
+    def _kardome_audiodemo_bring_to_foreground(self, device_id, log_append=None, ui_back_after_player=False, hal_recording_prearm=False):
+        """
+        ok_freebox 相关测试：将 com.kardome.audiodemo 主界面拉到前台（am start -n，见 feature_config KARDOME_AUDIODEMO_MAIN_COMPONENT），
+        失败时回退 monkey。随后再由 AudioPlayer PLAY/REPLAY/RESUME 播放。
+        ui_back_after_player：保留参数。
+        hal_recording_prearm=True：在即将下发 vendor recording=1 之前再置一次前台（PLAY 后常为 PlayerDemo 前台，与「在 Kardome APK 里手敲 setprop」一致）。
+        """
+        serial = (device_id or "").strip()
+        if not serial or not self._adb_device_has_package(serial, "com.kardome.audiodemo"):
+            return False
+        adb_base = ["adb", "-s", serial]
+        kwargs = {"capture_output": True, "text": True, "timeout": 45}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        comp = "com.kardome.audiodemo/com.kardome.MainActivity"
+        try:
+            import feature_config as _fc_kd
+
+            c = str(getattr(_fc_kd, "KARDOME_AUDIODEMO_MAIN_COMPONENT", "") or "").strip()
+            if c:
+                comp = c
+        except Exception:
+            pass
+        try:
+            if hal_recording_prearm and log_append:
+                log_append(
+                    "Kardome HAL: 在 vendor recording=1 前将 Kardome Demo 置前台（PLAY 后常为 PlayerDemo 前台；"
+                    "与在 APK 界面内再执行 setprop 一致）。"
+                )
+            r = subprocess.run(adb_base + ["shell", "am", "start", "-n", comp], **kwargs)
+            err_tail = ((r.stderr or "") + (r.stdout or "")).strip()
+            if r.returncode != 0:
+                if log_append:
+                    log_append("am start Kardome 失败(rc=%s)，尝试 monkey: %s" % (r.returncode, err_tail[:320]))
+                r2 = subprocess.run(
+                    adb_base
+                    + ["shell", "monkey", "-p", "com.kardome.audiodemo", "-c", "android.intent.category.LAUNCHER", "1"],
+                    **kwargs,
+                )
+                err2 = ((r2.stderr or "") + (r2.stdout or "")).strip()
+                if r2.returncode != 0:
+                    if log_append:
+                        log_append("拉起 com.kardome.audiodemo 仍失败(monkey): %s" % err2[:400])
+                    return False
+                if log_append:
+                    if hal_recording_prearm:
+                        log_append("Kardome HAL: Demo 已在前台（monkey），即将 setprop recording=1。")
+                    elif ui_back_after_player:
+                        log_append("界面已切回 Kardome Demo（monkey，PlayerDemo 在后台）。")
+                    else:
+                        log_append("已通过 monkey 将 com.kardome.audiodemo 拉到前台（am start 未成功）。")
+            else:
+                if log_append:
+                    if hal_recording_prearm:
+                        log_append("Kardome HAL: Demo 已在前台: am start -n %s，即将 setprop recording=1。" % comp)
+                    elif ui_back_after_player:
+                        log_append("PlayerDemo 已启动，界面已切回 Kardome Demo。")
+                    else:
+                        log_append("已将 Kardome Demo 拉到前台: am start -n %s" % comp)
+            time.sleep(0.58 if hal_recording_prearm else 0.4)
+            return True
+        except Exception as e:
+            if log_append:
+                log_append("拉起 com.kardome.audiodemo 异常: %s" % e)
+            return False
+
     def _resolve_wakeup_corpus_extra_apk(self, wakeup_dir, corpus_id):
         """
         唤醒率测试除必选 AudioPlayer.apk（com.player.demo）外，部分语料需在 wakeup_count 下额外安装的 APK（固定文件名）。
@@ -7372,8 +8219,9 @@ class UIComponents:
     def _ensure_audioplayer_apk_on_device(self, device_id, log_append=None, corpus_id=None, ui_silent=False):
         """
         始终使用 wakeup_count/AudioPlayer.apk 确保设备已安装 com.player.demo（本机+设备端播放）。
-        唤醒率测试且语料为 ok_freebox / ok_homa 时，再额外 adb install -r 对应语料 APK：
-        ok_freebox_32.apk、ok_homa_31.apk（与 AudioPlayer 独立，均在 wakeup_count 根目录）；安装成功后自动 monkey 拉起该应用（包名见 feature_config 或 aapt 解析）。
+        唤醒率测试且语料为 ok_freebox / ok_homa 时，可能再额外 adb install -r 对应语料 APK：
+        ok_freebox：若设备未安装 com.kardome.audiodemo 则安装 ok_freebox_32.apk；ok_homa：安装 ok_homa_31.apk（均在 wakeup_count 根目录）；安装成功后自动 monkey 拉起（包名见 feature_config 或 aapt 解析）。
+        ok_freebox 且设备已有 com.kardome.audiodemo：准备结束时会再将其拉到前台，优先于后续 AudioPlayer 的 PLAY/REPLAY。
         corpus_id 为 None（气密/震音等）：只处理 AudioPlayer.apk。
         log_append: 可选，接收 str，用于震音/气密/唤醒等各自的日志区。
         ui_silent=True 时不弹 messagebox，错误写入 _wakeup100_prepare_err 并打日志（供后台线程调用）。
@@ -7438,40 +8286,49 @@ class UIComponents:
 
         if corpus_id is not None:
             cid = (corpus_id or "ok_google").strip() or "ok_google"
-            extra_path, extra_label = self._resolve_wakeup_corpus_extra_apk(wakeup_dir, cid)
-            if extra_path:
-                if not os.path.isfile(extra_path):
-                    return _err(
-                        "当前语料为「%s」，需要额外 APK 文件:\n%s\n\n请放入 wakeup_count 目录后重试。" % (cid, extra_path)
-                    )
+            if cid == "ok_freebox" and self._adb_device_has_package(serial, "com.kardome.audiodemo"):
                 if log_append:
-                    log_append("额外安装语料 APK: %s ..." % extra_label)
-                if not ui_silent and hasattr(self, "status_var"):
+                    log_append(
+                        "ok_freebox：设备已安装 com.kardome.audiodemo，跳过 ok_freebox_32.apk 的安装（准备结束仍会将其拉到前台）。"
+                    )
+            else:
+                extra_path, extra_label = self._resolve_wakeup_corpus_extra_apk(wakeup_dir, cid)
+                if extra_path:
+                    if not os.path.isfile(extra_path):
+                        return _err(
+                            "当前语料为「%s」，需要额外 APK 文件:\n%s\n\n请放入 wakeup_count 目录后重试。" % (cid, extra_path)
+                        )
+                    if log_append:
+                        log_append("额外安装语料 APK: %s ..." % extra_label)
+                    if not ui_silent and hasattr(self, "status_var"):
+                        try:
+                            self.status_var.set("正在安装 %s..." % extra_label)
+                            self.root.update_idletasks()
+                        except Exception:
+                            pass
                     try:
-                        self.status_var.set("正在安装 %s..." % extra_label)
-                        self.root.update_idletasks()
-                    except Exception:
-                        pass
-                try:
-                    r = subprocess.run(
-                        adb_base + ["install", "-r", extra_path],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                    )
-                    if r.returncode != 0:
-                        err = (r.stderr or r.stdout or "").strip()
-                        return _err("%s 安装失败:\n%s" % (extra_label, err[:500]))
-                except subprocess.TimeoutExpired:
-                    return _err("%s 安装超时(120s)。" % extra_label)
-                except Exception as e:
-                    return _err(str(e))
-                if log_append:
-                    log_append("%s 安装完成。" % extra_label)
-                if not self._launch_wakeup_corpus_extra_app(serial, extra_path, cid, log_append=log_append, ui_silent=ui_silent):
-                    if ui_silent and not (getattr(self, "_wakeup100_prepare_err", None) or "").strip():
-                        self._wakeup100_prepare_err = "语料 APK 已安装但未能自动拉起前台应用，请查看日志或核对 feature_config 包名。"
-                    return False
+                        r = subprocess.run(
+                            adb_base + ["install", "-r", extra_path],
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        if r.returncode != 0:
+                            err = (r.stderr or r.stdout or "").strip()
+                            return _err("%s 安装失败:\n%s" % (extra_label, err[:500]))
+                    except subprocess.TimeoutExpired:
+                        return _err("%s 安装超时(120s)。" % extra_label)
+                    except Exception as e:
+                        return _err(str(e))
+                    if log_append:
+                        log_append("%s 安装完成。" % extra_label)
+                    if not self._launch_wakeup_corpus_extra_app(serial, extra_path, cid, log_append=log_append, ui_silent=ui_silent):
+                        if ui_silent and not (getattr(self, "_wakeup100_prepare_err", None) or "").strip():
+                            self._wakeup100_prepare_err = "语料 APK 已安装但未能自动拉起前台应用，请查看日志或核对 feature_config 包名。"
+                        return False
+        cid_tail = (corpus_id or "").strip() if corpus_id is not None else ""
+        if cid_tail == "ok_freebox" and self._adb_device_has_package(serial, "com.kardome.audiodemo"):
+            self._kardome_audiodemo_bring_to_foreground(serial, log_append=log_append)
         return True
 
     def _wakeup100_corpus_ui_busy(self, busy):
@@ -7498,6 +8355,13 @@ class UIComponents:
             try:
                 if busy:
                     seg.config(state="disabled")
+            except Exception:
+                pass
+        kd = getattr(self, "hotword_kardome_hal_rec_cb", None)
+        if kd is not None and kd.winfo_exists():
+            try:
+                if busy:
+                    kd.config(state="disabled")
             except Exception:
                 pass
         for w in (getattr(self, "hotword_wakeup100_per_count_entry", None), getattr(self, "hotword_wakeup100_interval_entry", None)):
@@ -7923,6 +8787,33 @@ class UIComponents:
         volume_levels = list(range(v_from, v_to + 1))
         effx_modes_list = self._wakeup100_effx_modes or []
 
+        self._wakeup100_kardome_session_dir = None
+        self._wakeup100_kardome_hal_recording_armed = False
+        try:
+            if (
+                single_fb
+                and device_id_for_replay
+                and getattr(self, "hotword_kardome_hal_rec_var", None)
+                and bool(self.hotword_kardome_hal_rec_var.get())
+            ):
+                _kts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                _kbase = ensure_output_dir(DIR_WAKEUP_KARDOME)
+                self._wakeup100_kardome_session_dir = os.path.join(_kbase, "session_%s" % _kts)
+                os.makedirs(self._wakeup100_kardome_session_dir, exist_ok=True)
+                self._append_hotword_log("Kardome HAL 分段录音已启用，本机根目录: %s" % self._wakeup100_kardome_session_dir)
+                try:
+                    _sc0 = self._kardome_hal_remote_scan(device_id_for_replay, escalate=True)
+                    self._wakeup100_kardome_pulled_remote_dirs = set(_sc0["dirs"])
+                    self._wakeup100_kardome_pulled_remote_files = set(_sc0["audio_files"])
+                except Exception:
+                    self._wakeup100_kardome_pulled_remote_dirs = set()
+                    self._wakeup100_kardome_pulled_remote_files = set()
+        except Exception as _kse:
+            self._wakeup100_kardome_session_dir = None
+            self._wakeup100_kardome_pulled_remote_dirs = set()
+            self._wakeup100_kardome_pulled_remote_files = set()
+            self._append_hotword_log("Kardome HAL: 创建本机保存目录失败 — %s" % _kse)
+
         def _set_effx_on_device(mode):
             """设置设备音效: param_set 0 \"tvsdx_mode=<mode>\" """
             if not device_id_for_replay:
@@ -7948,6 +8839,14 @@ class UIComponents:
             modes_to_run = effx_modes_list if effx_modes_list else [None]
             mode_start = getattr(self, "_wakeup100_resume_mode_start", 0)
             round_start = getattr(self, "_wakeup100_resume_round_start", 0)
+            corpus_ok_fb = (getattr(self, "_wakeup100_corpus_id", None) or "").strip() == "ok_freebox"
+
+            def _prio_kardome_demo():
+                if corpus_ok_fb and device_id_for_replay:
+                    self._kardome_audiodemo_bring_to_foreground(
+                        device_id_for_replay, log_append=self._append_hotword_log
+                    )
+
             for mode_idx, effx_mode in enumerate(modes_to_run):
                 if mode_idx < mode_start:
                     continue
@@ -7971,6 +8870,7 @@ class UIComponents:
                         continue
                     if stop():
                         break
+                    kardome_started = False
                     self._wakeup100_current_vol = str(vol)
                     if effx_mode is not None:
                         self._wakeup100_current_effx_display = f"{effx_mode} ({effx_names.get(effx_mode, '')})"
@@ -8004,6 +8904,8 @@ class UIComponents:
                     if stop():
                         break
                     if device_id_for_replay:
+                        _set_volume_on_device(vol)
+                        _prio_kardome_demo()
                         is_first_round = (round_index == 0 and mode_idx == 0)
                         resume_from_pause = getattr(self, "_wakeup100_resume_from_pause", False)
                         if resume_from_pause:
@@ -8049,17 +8951,107 @@ class UIComponents:
                             self._append_hotword_log("打开设备端 App 并播放: am start -a com.player.demo.PLAY ...")
                             time.sleep(0.5)
                         else:
-                            try:
-                                subprocess.run(
-                                    ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.REPLAY", "-n", "com.player.demo/.MainActivity"],
-                                    capture_output=True, timeout=10,
-                                )
-                            except Exception:
-                                pass
-                            if round_index == 0:
-                                self._append_hotword_log("换音效，设备端重播: am start -a com.player.demo.REPLAY ...")
+                            new_effx_first_vol = bool(mode_idx > 0 and round_index == 0)
+                            use_resume_between_vols = bool(
+                                single_fb
+                                and device_id_for_replay
+                                and not new_effx_first_vol
+                                and getattr(self, "hotword_kardome_hal_rec_var", None)
+                                and bool(self.hotword_kardome_hal_rec_var.get())
+                            )
+                            if use_resume_between_vols:
+                                try:
+                                    import audio_player_apk as _apk_vol_next
+
+                                    rr = _apk_vol_next.run_resume(device_id_for_replay)
+                                    if rr.returncode == 0:
+                                        self._append_hotword_log("设备端整轨下一音量档：RESUME（从暂停处继续）。")
+                                    else:
+                                        subprocess.run(
+                                            [
+                                                "adb",
+                                                "-s",
+                                                device_id_for_replay,
+                                                "shell",
+                                                "am",
+                                                "start",
+                                                "-a",
+                                                "com.player.demo.REPLAY",
+                                                "-n",
+                                                "com.player.demo/.MainActivity",
+                                            ],
+                                            capture_output=True,
+                                            timeout=10,
+                                        )
+                                        self._append_hotword_log(
+                                            "设备端 RESUME 未成功，已回退 REPLAY（可能从头播）；请确认 PlayerDemo 支持 com.player.demo.RESUME。"
+                                        )
+                                except Exception:
+                                    try:
+                                        subprocess.run(
+                                            [
+                                                "adb",
+                                                "-s",
+                                                device_id_for_replay,
+                                                "shell",
+                                                "am",
+                                                "start",
+                                                "-a",
+                                                "com.player.demo.REPLAY",
+                                                "-n",
+                                                "com.player.demo/.MainActivity",
+                                            ],
+                                            capture_output=True,
+                                            timeout=10,
+                                        )
+                                    except Exception:
+                                        pass
+                            else:
+                                try:
+                                    subprocess.run(
+                                        [
+                                            "adb",
+                                            "-s",
+                                            device_id_for_replay,
+                                            "shell",
+                                            "am",
+                                            "start",
+                                            "-a",
+                                            "com.player.demo.REPLAY",
+                                            "-n",
+                                            "com.player.demo/.MainActivity",
+                                        ],
+                                        capture_output=True,
+                                        timeout=10,
+                                    )
+                                except Exception:
+                                    pass
+                                if round_index == 0:
+                                    self._append_hotword_log("换音效，设备端重播: am start -a com.player.demo.REPLAY ...")
                             time.sleep(0.3)
-                        _set_volume_on_device(vol)
+                        # 先 PLAY 起音轨；vendor recording=1 需在 Kardome 界面在前台时下发（与在 APK 内手敲 setprop 一致）
+                        if (
+                            single_fb
+                            and getattr(self, "_wakeup100_kardome_session_dir", None)
+                            and getattr(self, "hotword_kardome_hal_rec_var", None)
+                            and bool(self.hotword_kardome_hal_rec_var.get())
+                            and not stop()
+                        ):
+                            time.sleep(0.4)
+                            self._kardome_audiodemo_bring_to_foreground(
+                                device_id_for_replay,
+                                log_append=self._append_hotword_log,
+                                hal_recording_prearm=True,
+                            )
+                            time.sleep(0.5)
+                            try:
+                                kardome_started = bool(
+                                    self._kardome_hal_recording_start_round(device_id_for_replay)
+                                )
+                            except Exception as _kst:
+                                self._append_hotword_log("Kardome HAL 录音启动异常: %s" % _kst)
+                            if kardome_started:
+                                time.sleep(0.45)
                     elif getattr(self, "_wakeup100_resume_from_pause", False):
                         self._wakeup100_resume_from_pause = False
                     # 记录本档开始时的唤醒次数；同一档从暂停恢复时不重置基准（否则唤醒率从 0 重算）
@@ -8217,6 +9209,17 @@ class UIComponents:
                                     break
                                 time.sleep(0.1)
                     _defer_single_fb = bool(getattr(self, "_wakeup100_single_fb_defer_round_result", False))
+                    if kardome_started:
+                        try:
+                            self._kardome_hal_recording_finish_round(
+                                device_id_for_replay,
+                                effx_mode,
+                                vol,
+                                effx_names,
+                                partial=(_defer_single_fb or bool(stop())),
+                            )
+                        except Exception as _kfe:
+                            self._append_hotword_log("Kardome HAL 停录/pull 异常: %s" % _kfe)
                     if _defer_single_fb:
                         self._wakeup100_single_fb_defer_round_result = False
                         self._append_hotword_log(
