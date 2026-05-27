@@ -49,6 +49,20 @@ except Exception:
         return True
     APP_VERSION = "1.6"
 
+# ok_freebox：仅在「同源双 log」组内做交替时间窗去重，避免 Kardome 与 Elevoc 两栈日志互相误伤
+_HOTWORD_FREEBOX_KARDOME_DUP_MARKERS = frozenset(
+    ("Received wake-up event: 1", "KardomeJni: Keyword recognized!")
+)
+_HOTWORD_FREEBOX_ELEVOC_DUP_MARKERS = frozenset(
+    (
+        "Report wakeup phrase by current_kws_type=1 -> ok_freebox",
+        "kws wakeup",
+        "Report wakeup phrase",
+        "Received wake-up event: 1",
+        "VOICE_PREPROCESS_WAKEUP sent phrase=ok_freebox",
+    )
+)
+
 
 def fix_wav_header_after_tinycap(file_path, channels, sample_rate, bits_per_sample):
     """
@@ -6347,7 +6361,11 @@ class UIComponents:
             "日志匹配规则",
             "以下日志各计为一次唤醒（短时间内的重复行会去重）：\n\n"
             "• Google：Detected hotword 或 LIBAS_HOTWORD_DETECTION_RECEIVED\n"
-            "• Freebox：Received wake-up event: 1 或 KardomeJni: Keyword recognized!\n"
+            "• Freebox（两版软件）：\n"
+            "  — B 版 Kardome：KardomeJni: Keyword recognized!（必配）\n"
+            "  — A 版 Elevoc+预处理：建议以 Report wakeup phrase by current_kws_type=1 -> ok_freebox 为代表"
+            "（同次唤醒还有 kws wakeup / Received wake-up event: 1 等，工具会去重只计 1 次）；"
+            "亦可匹配 VOICE_PREPROCESS_WAKEUP sent phrase=ok_freebox\n"
             "• Homa：Received wake-up event: 1",
         )
 
@@ -7542,7 +7560,8 @@ class UIComponents:
             stat_row,
             "「全程合计」= 整次测试计划累计条数：每档基准条数 × 音量档数 × 音效轮数。"
             "整轨时：每档基准 = 你填的整轨条数；例 150 条 × 音量 5～10 共 6 档 × 1 轮音效 = 900。"
-            "「基准」是当前音量档的分母（整轨时即整轨条数）。唤醒率 = 已唤醒÷基准。",
+            "「基准」是当前音量档的分母（整轨时即整轨条数）。唤醒率 = 本档已唤醒÷基准（显示上限 100%）；"
+            "ok_freebox 若同次唤醒打出两路 log，工具会合并计数。",
         )
 
         corpus_row = ttk.Frame(rate_frame)
@@ -7745,6 +7764,10 @@ class UIComponents:
         self._hotword_log_max_lines = 200
         self._hotword_last_detected_time = 0.0  # 用于同一唤醒只计一次（去重时间窗）
         self._hotword_debounce_seconds = 2.5   # 一次唤醒常会打多条相近日志，放宽一些可避免重复计数
+        # ok_freebox：A/B 两路 log 间隔可能大于上面去重窗，仍属同一次唤醒，用另一套「交替子串」时间窗抑制重复 +1
+        self._hotword_freebox_dual_marker_gap_sec = 5.5
+        self._hotword_freebox_last_awaken_marker = None
+        self._hotword_freebox_last_awaken_marker_time = 0.0
 
     def start_hotword_monitor(self, keep_state=False):
         """开始唤醒监测：先清空设备 log 缓冲再拉 logcat，A/B 两类唤醒日志统一按一次唤醒记 1 次。
@@ -7775,6 +7798,8 @@ class UIComponents:
                 self.hotword_log_text.delete("1.0", "end")
                 self.hotword_log_text.config(state="disabled")
         self._hotword_last_detected_time = 0.0
+        self._hotword_freebox_last_awaken_marker = None
+        self._hotword_freebox_last_awaken_marker_time = 0.0
         self._hotword_monitor_start_time = time.time()  # 启动后前 1 秒内忽略，避免旧缓冲被计入
         try:
             clear_argv = ["adb", "-s", device_id, "logcat", "-c"]
@@ -7840,6 +7865,8 @@ class UIComponents:
         """重置唤醒次数为 0。clear_log=True 时清空最近唤醒日志，多轮测试时传 False 仅重置计数。"""
         self.hotword_count = 0
         self._hotword_last_appended_count = 0
+        self._hotword_freebox_last_awaken_marker = None
+        self._hotword_freebox_last_awaken_marker_time = 0.0
         if hasattr(self, "hotword_count_var"):
             self.hotword_count_var.set("0")
         if clear_log and hasattr(self, "hotword_log_text") and self.hotword_log_text.winfo_exists():
@@ -8575,6 +8602,13 @@ class UIComponents:
 
     def _wakeup100_run_after_apk_ready(self, resume, device_id, corpus_id, wakeup_dir, audio_dir, list_file, use_art, v_from, v_to):
         """APK 已就绪且音量已读：启动 logcat 监测并起播放线程（原 _start_wakeup100_test 后半段）。"""
+        # 新开一轮唤醒率测试（非「继续」）时：若用户先前已点「开始监测」且累计了次数，直接复用进程会导致
+        # _wakeup100_round_start_count 与 hotword_count 同值，界面「本档已唤醒」恒为 0；故先停再起并 logcat -c。
+        if not resume:
+            _hm = getattr(self, "hotword_monitor_process", None)
+            if _hm is not None and _hm.poll() is None:
+                self.stop_hotword_monitor()
+                self._pump_tk_idletasks_ms(400)
         if not getattr(self, "hotword_monitor_process", None) or self.hotword_monitor_process.poll() is not None:
             self.start_hotword_monitor(keep_state=resume)  # 继续测试时保留暂停前的唤醒次数与日志
             self._pump_tk_idletasks_ms(500)
@@ -8582,6 +8616,7 @@ class UIComponents:
                 return
         self._wakeup100_stop_requested = False
         self._wakeup100_paused = False
+        self._wakeup100_autosave_done = False
         self._wakeup100_device_id = device_id
         if not resume:
             self._wakeup100_round_results = []
@@ -9240,8 +9275,15 @@ class UIComponents:
                     except (TypeError, ValueError):
                         start_count = 0.0
                     round_count = max(0, int(round(count_val - start_count)))
+                    if actual_played > 0 and round_count > actual_played:
+                        self._append_hotword_log(
+                            "说明：本档原始唤醒日志计数为 %d，已超过已播放条数 %d（多为同次唤醒间隔较长的多条 log），"
+                            "已按条数上限截断后计算唤醒率。"
+                            % (round_count, actual_played)
+                        )
+                        round_count = actual_played
                     denom = max(1, actual_played)  # 按实际已播放条数计算唤醒率，支持中途停止
-                    round_rate = (round_count / float(denom) * 100) if round_count is not None else 0.0
+                    round_rate = min(100.0, (round_count / float(denom) * 100) if denom else 0.0)
                     self._wakeup100_cumulative_wake = getattr(self, "_wakeup100_cumulative_wake", 0) + round_count
                     if actual_played > 0:
                         replace_resumed = getattr(self, "_wakeup100_round_was_resumed", False)
@@ -9279,6 +9321,11 @@ class UIComponents:
             current_round_wake = float(getattr(self, "hotword_count", 0)) if isinstance(getattr(self, "hotword_count", 0), (int, float)) else 0.0
         except Exception:
             current_round_wake = 0.0
+        try:
+            round_start = float(getattr(self, "_wakeup100_round_start_count", 0) or 0)
+        except (TypeError, ValueError):
+            round_start = 0.0
+        wake_this_round = max(0, int(round(current_round_wake - round_start)))
         single_fb = bool(getattr(self, "_wakeup100_freebox_single_wav_mode", False))
         try:
             cid_ui = (getattr(self, "hotword_wakeup_corpus_var", None) and self.hotword_wakeup_corpus_var.get() or "").strip()
@@ -9302,7 +9349,10 @@ class UIComponents:
         else:
             denominator = max(1, current_round_played)
             total_display = str(current_round_played)
-        pct = (current_round_wake / float(denominator) * 100.0) if denominator else 0.0
+        pct = min(
+            100.0,
+            (min(wake_this_round, int(denominator)) / float(denominator) * 100.0) if denominator else 0.0,
+        )
         if hasattr(self, "hotword_rate_effx_var"):
             self.hotword_rate_effx_var.set(getattr(self, "_wakeup100_current_effx_display", "-"))
         if hasattr(self, "hotword_rate_vol_var"):
@@ -9310,7 +9360,7 @@ class UIComponents:
         if hasattr(self, "hotword_rate_total_var"):
             self.hotword_rate_total_var.set(total_display)
         if hasattr(self, "hotword_rate_count_var"):
-            self.hotword_rate_count_var.set(str(int(round(current_round_wake))))
+            self.hotword_rate_count_var.set(str(wake_this_round))
         if hasattr(self, "hotword_rate_pct_var"):
             self.hotword_rate_pct_var.set(f"{pct:.1f}%")
         if th is None or not th.is_alive():
@@ -9332,21 +9382,39 @@ class UIComponents:
             self._wakeup100_update_after_id = None
             self.stop_hotword_monitor()
             device_id = getattr(self, "_wakeup100_device_id", None)
+            _autosave_path = None
             if device_id:
                 try:
                     subprocess.run(
                         ["adb", "-s", device_id, "shell", "am", "force-stop", "com.player.demo"],
                         capture_output=True, timeout=10,
                     )
-                    if not is_paused:
-                        self._append_hotword_log("播放结束，已停止唤醒监测与设备端 AudioPlayer 播放。")
                 except Exception:
                     pass
+            if not is_paused:
+                self._append_hotword_log(
+                    "播放结束，已停止唤醒监测"
+                    + ("与设备端 AudioPlayer 播放。" if device_id else "。")
+                )
+                try:
+                    _autosave_path = self._wakeup100_persist_result_to_disk()
+                    self._wakeup100_autosave_done = True
+                    self._append_hotword_log("唤醒率结果已自动保存: %s" % _autosave_path)
+                    self._wakeup100_open_rate_result_folder(os.path.dirname(_autosave_path))
+                except Exception as _se:
+                    self._append_hotword_log("唤醒率结果自动保存失败: %s" % _se)
             if hasattr(self, "status_var"):
                 if is_paused:
                     self.status_var.set("已暂停，可点「继续」接着测或「保存」导出数据")
                 else:
-                    self.status_var.set(f"播放结束，最终唤醒率: {pct:.1f}%")
+                    if _autosave_path:
+                        self.status_var.set(
+                            "播放结束，最终唤醒率 %.1f%%，已自动保存至 output/wakeup_rate" % pct
+                        )
+                    else:
+                        self.status_var.set(
+                            "播放结束，最终唤醒率 %.1f%%（自动保存失败，请点「保存」）" % pct
+                        )
             return
         self._wakeup100_update_after_id = root.after(1000, self._wakeup100_schedule_rate_update)
 
@@ -9436,9 +9504,36 @@ class UIComponents:
                 pass
         if hasattr(self, "status_var"):
             self.status_var.set("已停止 100 条播放与唤醒监测")
+        if not getattr(self, "_wakeup100_autosave_done", False):
+            try:
+                _sp = self._wakeup100_persist_result_to_disk()
+                self._wakeup100_autosave_done = True
+                self._append_hotword_log("唤醒率结果已自动保存: %s" % _sp)
+                self._wakeup100_open_rate_result_folder(os.path.dirname(_sp))
+            except Exception as _e:
+                self._append_hotword_log("唤醒率结果自动保存失败: %s" % _e)
 
-    def _save_wakeup100_result(self):
-        """将当前唤醒率测试结果保存到文件：按音效+系统音量隔离，每档单独计算唤醒率。"""
+    def _wakeup100_open_rate_result_folder(self, save_dir):
+        """打开唤醒率结果所在目录（Windows: 资源管理器）。"""
+        if not save_dir:
+            return
+        try:
+            if not os.path.isdir(save_dir):
+                return
+        except Exception:
+            return
+        try:
+            if platform.system() == "Windows":
+                os.startfile(save_dir)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", save_dir], check=False)
+            else:
+                subprocess.run(["xdg-open", save_dir], check=False)
+        except Exception:
+            pass
+
+    def _wakeup100_persist_result_to_disk(self):
+        """将当前唤醒率统计写入 output/wakeup_rate/wakeup_rate_*.txt；成功返回文件绝对路径。"""
         played = getattr(self, "_wakeup100_played_count", 0)
         round_results = getattr(self, "_wakeup100_round_results", [])
         results_by_mode = getattr(self, "_wakeup100_results_by_mode", None) or {}
@@ -9458,7 +9553,7 @@ class UIComponents:
             os.makedirs(save_dir, exist_ok=True)
         except OSError:
             save_dir = OUTPUT_ROOT
-        path = os.path.join(save_dir, f"wakeup_rate_{fname_ts}.txt")
+        path = os.path.join(save_dir, "wakeup_rate_%s.txt" % fname_ts)
         playback_mode = getattr(self, "_wakeup100_last_playback_mode", "") or "本机扬声器"
         volume_level = getattr(self, "_wakeup100_last_volume", None)
         per_vol = max(1, getattr(self, "_wakeup100_per_volume_count", 100))
@@ -9467,114 +9562,111 @@ class UIComponents:
         lines = [
             "100 条唤醒率测试结果",
             "=" * 40,
-            f"时间: {ts}",
-            f"语料库: {corpus_line}",
-            f"播放方式: {playback_mode}",
-            f"音量档位区间: {volume_level if volume_level is not None else '-'}（每档预期 {per_vol} 条，唤醒率按该档实际已播放条数计算）",
-            f"全程合计(条): {getattr(self, '_wakeup100_expected', 100)}（= 每档基准×音量档数×音效轮数）",
-            f"已播放: {played} 条",
-            f"合计唤醒次数: {total_wake}",
+            "时间: %s" % ts,
+            "语料库: %s" % corpus_line,
+            "播放方式: %s" % playback_mode,
+            "音量档位区间: %s（每档预期 %s 条，唤醒率按该档实际已播放条数计算）"
+            % (volume_level if volume_level is not None else "-", per_vol),
+            "全程合计(条): %s（= 每档基准×音量档数×音效轮数）" % getattr(self, "_wakeup100_expected", 100),
+            "已播放: %s 条" % played,
+            "合计唤醒次数: %s" % total_wake,
             "",
         ]
         if results_by_mode:
             lines.append("各音效+各档音量结果（唤醒率按该档实际已播放条数计算）:")
             for mode in sorted(results_by_mode.keys()):
                 name = effx_names.get(mode, str(mode))
-                lines.append(f"  音效 {mode} ({name}):")
+                lines.append("  音效 %s (%s):" % (mode, name))
                 for item in results_by_mode[mode]:
                     if len(item) >= 4:
-                        vol, cnt, rate, played = item[0], item[1], item[2], item[3]
-                        lines.append(f"    音量 {vol}: 已播放 {played} 条, 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                        vol, cnt, rate, played_r = item[0], item[1], item[2], item[3]
+                        lines.append("    音量 %s: 已播放 %s 条, 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, played_r, cnt, rate))
                     elif len(item) >= 3:
                         vol, cnt, rate = item[0], item[1], item[2]
-                        lines.append(f"    音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                        lines.append("    音量 %s: 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, cnt, rate))
                     else:
                         vol, cnt = item[0], item[1]
                         rate = (cnt / float(per_vol) * 100) if cnt is not None else 0.0
-                        lines.append(f"    音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                        lines.append("    音量 %s: 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, cnt, rate))
             lines.append("")
         elif round_results:
             lines.append("各档音量结果（唤醒率按该档实际已播放条数计算，按系统音量隔离）:")
             for item in round_results:
                 if len(item) >= 4:
-                    vol, cnt, rate, played = item[0], item[1], item[2], item[3]
-                    lines.append(f"  音量 {vol}: 已播放 {played} 条, 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                    vol, cnt, rate, played_r = item[0], item[1], item[2], item[3]
+                    lines.append("  音量 %s: 已播放 %s 条, 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, played_r, cnt, rate))
                 elif len(item) >= 3:
                     vol, cnt, rate = item[0], item[1], item[2]
-                    lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                    lines.append("  音量 %s: 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, cnt, rate))
                 else:
                     vol, cnt = item[0], item[1]
                     rate = (cnt / float(per_vol) * 100) if cnt is not None else 0.0
-                    lines.append(f"  音量 {vol}: 唤醒 {cnt} 次, 唤醒率 {rate:.1f}%")
+                    lines.append("  音量 %s: 唤醒 %s 次, 唤醒率 %.1f%%" % (vol, cnt, rate))
             lines.append("")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return path
+
+    def _save_wakeup100_result(self):
+        """将当前唤醒率测试结果保存到文件：按音效+系统音量隔离，每档单独计算唤醒率。"""
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-            if getattr(self, "status_var", None):
-                self.status_var.set(f"已保存: {path}")
-            # 弹窗：与之前好看版本一致（左侧蓝色圆形 i、文案单行），底部「打开所在文件夹」+「确定」
-            root_win = getattr(self, "root", None) or getattr(self, "parent", None)
-            dlg = tk.Toplevel(root_win)
-            dlg.title("保存成功")
-            dlg.transient(root_win)
-            dlg.grab_set()
-            dlg.resizable(False, False)
-            self._apply_window_icon(dlg)
-            # 主内容区：浅灰背景贴近系统对话框
-            content = tk.Frame(dlg, bg="#f0f0f0", padx=24, pady=20)
-            content.pack(fill="both", expand=True)
-            # 左侧：蓝色圆形信息图标（与之前好看版本一致）
-            icon_canvas = tk.Canvas(content, width=32, height=32, highlightthickness=0, bg="#f0f0f0")
-            icon_canvas.pack(side="left", padx=(0, 16))
-            icon_canvas.create_oval(2, 2, 30, 30, fill="#0078d4", outline="#0078d4")
-            icon_canvas.create_text(16, 16, text="i", fill="white", font=("Segoe UI", 14, "bold"))
-            # 右侧：两行文案
-            msg_frame = tk.Frame(content, bg="#f0f0f0")
-            msg_frame.pack(side="left", fill="both", expand=True)
-            tk.Label(msg_frame, text="唤醒率结果已保存至:", fg="black", bg="#f0f0f0", font=("Segoe UI", 10)).pack(anchor="w")
-            path_lbl = tk.Label(msg_frame, text=path, fg="black", bg="#f0f0f0", font=("Segoe UI", 9), justify=tk.LEFT)
-            path_lbl.pack(anchor="w", pady=(4, 0))
-            # 底部按钮行
-            btn_frame = tk.Frame(dlg, bg="#f0f0f0", pady=12)
-            btn_frame.pack(fill="x", padx=24)
-            def _open_folder():
-                try:
-                    if platform.system() == "Windows":
-                        os.startfile(save_dir)
-                    elif platform.system() == "Darwin":
-                        subprocess.run(["open", save_dir], check=False)
-                    else:
-                        subprocess.run(["xdg-open", save_dir], check=False)
-                except Exception:
-                    pass
-            ttk.Button(btn_frame, text="打开所在文件夹", command=_open_folder).pack(side="right", padx=(8, 0))
-            ttk.Button(btn_frame, text="确定", command=dlg.destroy).pack(side="right")
-            dlg.update_idletasks()
-            # 保证宽度足够，路径单行显示（与上面截图一致）
-            min_w = max(dlg.winfo_reqwidth(), 520)
-            dlg.minsize(min_w, 0)
-            h = dlg.winfo_reqheight()
-            x = (dlg.winfo_screenwidth() - min_w) // 2
-            y = (dlg.winfo_screenheight() - h) // 2
-            dlg.geometry(f"{min_w}x{h}+{x}+{y}")
+            path = self._wakeup100_persist_result_to_disk()
         except Exception as e:
             messagebox.showerror("保存失败", str(e))
+            return
+        save_dir = os.path.dirname(path)
+        if getattr(self, "status_var", None):
+            self.status_var.set("已保存: %s" % path)
+        root_win = getattr(self, "root", None) or getattr(self, "parent", None)
+        dlg = tk.Toplevel(root_win)
+        dlg.title("保存成功")
+        dlg.transient(root_win)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        self._apply_window_icon(dlg)
+        content = tk.Frame(dlg, bg="#f0f0f0", padx=24, pady=20)
+        content.pack(fill="both", expand=True)
+        icon_canvas = tk.Canvas(content, width=32, height=32, highlightthickness=0, bg="#f0f0f0")
+        icon_canvas.pack(side="left", padx=(0, 16))
+        icon_canvas.create_oval(2, 2, 30, 30, fill="#0078d4", outline="#0078d4")
+        icon_canvas.create_text(16, 16, text="i", fill="white", font=("Segoe UI", 14, "bold"))
+        msg_frame = tk.Frame(content, bg="#f0f0f0")
+        msg_frame.pack(side="left", fill="both", expand=True)
+        tk.Label(msg_frame, text="唤醒率结果已保存至:", fg="black", bg="#f0f0f0", font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(msg_frame, text=path, fg="black", bg="#f0f0f0", font=("Segoe UI", 9), justify=tk.LEFT).pack(anchor="w", pady=(4, 0))
+        btn_frame = tk.Frame(dlg, bg="#f0f0f0", pady=12)
+        btn_frame.pack(fill="x", padx=24)
+        ttk.Button(btn_frame, text="打开所在文件夹", command=lambda: self._wakeup100_open_rate_result_folder(save_dir)).pack(
+            side="right", padx=(8, 0)
+        )
+        ttk.Button(btn_frame, text="确定", command=dlg.destroy).pack(side="right")
+        dlg.update_idletasks()
+        min_w = max(dlg.winfo_reqwidth(), 520)
+        dlg.minsize(min_w, 0)
+        h = dlg.winfo_reqheight()
+        x = (dlg.winfo_screenwidth() - min_w) // 2
+        y = (dlg.winfo_screenheight() - h) // 2
+        dlg.geometry("%dx%d+%d+%d" % (min_w, h, x, y))
 
     def _hotword_log_markers_for_corpus(self, corpus_id):
-        """与「唤醒语料库」下拉一致：返回若干子串，log 行包含其中任意一个则视为一次可计数的唤醒候选（仍受去重时间窗约束）。"""
+        """与「唤醒语料库」下拉一致：返回若干子串，log 行包含其中任意一个则视为一次可计数的唤醒候选（通用去重窗 + ok_freebox 组内交替窗）。"""
         cid = (corpus_id or "ok_google").strip() or "ok_google"
         if cid == "ok_freebox":
-            # 两版软件二选一：A 版 audio_preprocess_speech；B 版 KardomeJni。不会同时出现，命中任一则计数（仍受去重时间窗约束）
+            # B 版 Kardome 放首；A 版长句先于短串；同次唤醒多行由去重窗 + ELEVOC 组交替抑制
             return (
-                "Received wake-up event: 1",
                 "KardomeJni: Keyword recognized!",
+                "Report wakeup phrase by current_kws_type=1 -> ok_freebox",
+                "Received wake-up event: 1",
+                "kws wakeup",
+                "VOICE_PREPROCESS_WAKEUP sent phrase=ok_freebox",
+                "Report wakeup phrase",
             )
         if cid == "ok_homa":
             return ("Received wake-up event: 1",)
         return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
 
     def _read_hotword_logcat(self):
-        """按语料匹配 logcat 子串；时间窗去重：一次唤醒只计 1 次，避免同次唤醒多条日志重复加数。"""
+        """按语料匹配 logcat 子串；时间窗去重 + ok_freebox 双路 log 交替抑制，避免同一次唤醒被计两次。"""
         root = getattr(self, "root", None) or getattr(self, "parent", None)
 
         def _ui_append(display_count, line_text):
@@ -9637,15 +9729,32 @@ class UIComponents:
                 except Exception:
                     corpus_id = "ok_google"
                 markers = self._hotword_log_markers_for_corpus(corpus_id)
-                if not any(m in line for m in markers):
+                hit_m = None
+                for m in markers:
+                    if m in line:
+                        hit_m = m
+                        break
+                if hit_m is None:
                     continue
                 now = time.time()
                 if now - getattr(self, "_hotword_monitor_start_time", 0) < 1.0:
                     continue
+                if corpus_id == "ok_freebox":
+                    lm = getattr(self, "_hotword_freebox_last_awaken_marker", None)
+                    lt = float(getattr(self, "_hotword_freebox_last_awaken_marker_time", 0) or 0)
+                    gap = float(getattr(self, "_hotword_freebox_dual_marker_gap_sec", 5.5) or 5.5)
+                    if lm and hit_m != lm and (now - lt) < gap:
+                        same_k = lm in _HOTWORD_FREEBOX_KARDOME_DUP_MARKERS and hit_m in _HOTWORD_FREEBOX_KARDOME_DUP_MARKERS
+                        same_e = lm in _HOTWORD_FREEBOX_ELEVOC_DUP_MARKERS and hit_m in _HOTWORD_FREEBOX_ELEVOC_DUP_MARKERS
+                        if same_k or same_e:
+                            continue
                 debounce = getattr(self, "_hotword_debounce_seconds", 2.5)
                 if now - getattr(self, "_hotword_last_detected_time", 0) < debounce:
                     continue
                 self._hotword_last_detected_time = now
+                if corpus_id == "ok_freebox":
+                    self._hotword_freebox_last_awaken_marker = hit_m
+                    self._hotword_freebox_last_awaken_marker_time = now
                 self.hotword_count += 1.0
                 # 仅当“第 N 次”的 N 真正增加时追加一行，避免 A 款一次唤醒两条 log 打两行
                 current_n = int(round(self.hotword_count))
