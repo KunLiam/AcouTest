@@ -6345,7 +6345,8 @@ class UIComponents:
             "本机扬声器与设备端 AudioPlayer 同步播放唤醒语料，logcat 统计设备唤醒次数。\n\n"
             "语料目录：与 exe 同目录的 wakeup_count 文件夹。\n"
             "• ok_google：ok_google/art_100.txt + wav；\n"
-            "• ok_freebox / ok_homa：对应子目录下 wav，按文件名排序播放。\n"
+            "• ok_freebox / ok_homa / magenta：对应子目录下 wav；magenta 按 001~200 文件名顺序播放"
+            "（有 manifest.json 时按 index 字段；否则按文件名自然排序）。\n"
             "• Freebox 整轨：语料选 ok_freebox 并勾选「整轨」后，使用 wakeup_count/ok_freebox_single/ 下 wav（多文件时取排序第一个），"
             "「整轨条数」为每一音量档内的唤醒率分母；整轨下「每档条数」「间隔」禁用。\n"
             "• 可选「Kardome HAL 分段录音」：每音量档用 vendor.media.audiohal.kardome.recording / download_files 控制设备侧录音，"
@@ -6366,11 +6367,13 @@ class UIComponents:
             "  — A 版 Elevoc+预处理：建议以 Report wakeup phrase by current_kws_type=1 -> ok_freebox 为代表"
             "（同次唤醒还有 kws wakeup / Received wake-up event: 1 等，工具会去重只计 1 次）；"
             "亦可匹配 VOICE_PREPROCESS_WAKEUP sent phrase=ok_freebox\n"
-            "• Homa：Received wake-up event: 1",
+            "• Homa：Received wake-up event: 1\n"
+            "• magenta（KeywordSpotter）：[KS] Keyword recognized: magenta\n"
+            "  （Debug 级，监测用 logcat *:D；唤醒后按延迟(s)发返回键，不关语音助手、不重发 PLAY）",
         )
 
     def _sync_hotword_after_key_for_wakeup_corpus(self, *_args):
-        """语料为 ok_google 时默认「关闭助手(force-stop)」；其它语料默认「不关闭」（切换语料时同步，避免误关 Freebox/Homa 前台）。"""
+        """语料联动「唤醒后」：Google 关助手；magenta 播完每条语料后延迟 2s 返回；其它默认不关闭。"""
         if not hasattr(self, "hotword_after_key_var") or not hasattr(self, "hotword_wakeup_corpus_var"):
             return
         try:
@@ -6380,6 +6383,10 @@ class UIComponents:
         try:
             if cid == "ok_google":
                 self.hotword_after_key_var.set("关闭助手(force-stop)")
+            elif cid == "magenta":
+                self.hotword_after_key_var.set("返回键(KEYCODE_BACK)")
+                if hasattr(self, "hotword_back_delay_var"):
+                    self.hotword_back_delay_var.set("2")
             else:
                 self.hotword_after_key_var.set("不关闭")
         except Exception:
@@ -6397,6 +6404,82 @@ class UIComponents:
             pass
         try:
             self._sync_freebox_single_ui_state()
+        except Exception:
+            pass
+        try:
+            self._sync_hotword_per_count_for_wakeup_corpus(cid)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _wakeup100_natural_sort_key(path_or_name):
+        """文件名自然排序：magenta_2.wav < magenta_10.wav，001.wav < 200.wav。"""
+        import re
+
+        s = os.path.basename(path_or_name).lower()
+        return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]
+
+    def _load_wakeup100_files_magenta(self, audio_dir):
+        """magenta：优先 manifest.json 的 index(1~200)；否则目录内 .wav 按文件名自然排序。无需 AudioFiles.txt。"""
+        import json
+
+        files = []
+        manifest = os.path.join(audio_dir, "manifest.json")
+        if os.path.isfile(manifest):
+            try:
+                with open(manifest, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+                if isinstance(items, list):
+                    rows = [x for x in items if isinstance(x, dict)]
+                    rows.sort(key=lambda x: int(x.get("index", 0) or 0))
+                    for row in rows:
+                        fn = str(row.get("file") or "").strip()
+                        if not fn:
+                            continue
+                        cand = os.path.normpath(os.path.join(audio_dir, fn))
+                        if os.path.isfile(cand):
+                            files.append(cand)
+                            continue
+                        cand2 = os.path.join(audio_dir, os.path.basename(fn))
+                        if os.path.isfile(cand2):
+                            files.append(cand2)
+            except Exception:
+                files = []
+        if not files:
+            wavs = [
+                os.path.join(audio_dir, n)
+                for n in os.listdir(audio_dir)
+                if n.lower().endswith(".wav") and os.path.isfile(os.path.join(audio_dir, n))
+            ]
+            wavs.sort(key=self._wakeup100_natural_sort_key)
+            files = wavs
+        return files
+
+    def _count_magenta_corpus_wavs(self, wakeup_dir=None):
+        """magenta 目录内可播放 wav 条数（manifest 或自然排序），缺省 200。"""
+        if wakeup_dir is None:
+            wakeup_dir, _ = self._find_wakeup_count_dir()
+            wakeup_dir = wakeup_dir or ""
+        sub = os.path.join(wakeup_dir, "magenta")
+        if not os.path.isdir(sub):
+            return 200
+        n = len(self._load_wakeup100_files_magenta(sub))
+        return n if n > 0 else 200
+
+    def _sync_hotword_per_count_for_wakeup_corpus(self, corpus_id=None):
+        """magenta 默认每档 200 条（目录内 wav 条数）；ok_google 默认 100。"""
+        var = getattr(self, "hotword_wakeup100_per_count_var", None)
+        if var is None:
+            return
+        try:
+            cid = corpus_id
+            if cid is None:
+                cid = (getattr(self, "hotword_wakeup_corpus_var", None) or tk.StringVar(value="ok_google")).get()
+            cid = (cid or "ok_google").strip() or "ok_google"
+            if cid == "magenta":
+                var.set(str(self._count_magenta_corpus_wavs()))
+            elif cid == "ok_google":
+                var.set("100")
         except Exception:
             pass
 
@@ -7529,7 +7612,7 @@ class UIComponents:
         delay_entry.pack(side="left")
         self._attach_hover_tooltip(
             key_combo,
-            "唤醒后如何处理助手弹窗。选 Google 语料时默认 force-stop 仅结束 katniss，不退出播放器；Freebox/Homa 建议「不关闭」以免打断前台语料应用。",
+            "唤醒后操作。Google 默认 force-stop；magenta 在监测到唤醒 log 后按「延迟(s)」再按返回键（与界面计数同步，不等到 wav 播完）。",
         )
 
         # 单行统计 +「说明」紧跟其后，避免子 Frame expand 造成中间大块留白
@@ -7571,7 +7654,7 @@ class UIComponents:
         self.hotword_wakeup_corpus_combo = ttk.Combobox(
             corpus_row,
             textvariable=self.hotword_wakeup_corpus_var,
-            values=["ok_google", "ok_freebox", "ok_homa"],
+            values=["ok_google", "ok_freebox", "ok_homa", "magenta"],
             state="readonly",
             width=11,
         )
@@ -7601,7 +7684,7 @@ class UIComponents:
         )
         self._attach_hover_tooltip(
             self.hotword_wakeup_corpus_combo,
-            "切换语料会联动日志关键字与默认「唤醒后」行为（Google 默认关助手，其它默认不关闭）。",
+            "切换语料会联动日志关键字与「唤醒后」默认（Google 关助手，magenta 返回键+2s，其它不关闭）。",
         )
         try:
             self.hotword_freebox_single_wav_var.trace_add("write", self._sync_freebox_single_ui_state)
@@ -7661,7 +7744,7 @@ class UIComponents:
         self.hotword_wakeup100_interval_entry.pack(side="left", padx=(2, 0))
         self._attach_hover_tooltip(
             self.hotword_wakeup100_per_count_entry,
-            "每音量档最多播放多少条 wav（不超过目录内文件数）。",
+            "每音量档最多播放多少条 wav。magenta 切换语料时自动填目录内 wav 条数（约 200，按 001~200 顺序）。",
         )
         self._attach_hover_tooltip(self.hotword_wakeup100_interval_entry, "相邻 wav 之间的等待秒数。")
         self.hotword_wakeup100_multi_opts_frame.pack(anchor="w", pady=(2, 0))
@@ -7804,7 +7887,13 @@ class UIComponents:
         try:
             clear_argv = ["adb", "-s", device_id, "logcat", "-c"]
             subprocess.run(clear_argv, shell=False, capture_output=True, timeout=5)
-            argv = ["adb", "-s", device_id, "logcat", "-v", "threadtime", "*:I"]
+            try:
+                cv = getattr(self, "hotword_wakeup_corpus_var", None)
+                corpus_id = (cv.get() if cv is not None else None) or "ok_google"
+            except Exception:
+                corpus_id = "ok_google"
+            log_min = self._hotword_logcat_min_level_for_corpus(corpus_id)
+            argv = ["adb", "-s", device_id, "logcat", "-v", "threadtime", "*:%s" % log_min]
             # 与日志查看器一致：Windows 下用 shell + CREATE_NO_WINDOW 启动，避免 adb 子进程被立即关闭（当时 patch 里只有 LogcatViewer 做了该处理，唤醒监测未做，会导致“没有任何反应”）
             kwargs = {
                 "stdout": subprocess.PIPE,
@@ -8408,7 +8497,7 @@ class UIComponents:
         """
         解析唤醒率测试语料目录。
         - ok_google：优先 wakeup_count/ok_google/art_100.txt + 同目录 wav；否则兼容旧版 art_100.txt + selected_100。
-        - ok_freebox / ok_homa：wakeup_count/<语料名>/ 下所有 .wav，按路径排序播放。
+        - ok_freebox / ok_homa / magenta：wakeup_count/<语料名>/ 下 .wav；magenta 按 manifest.json 的 index 或文件名 001~200 自然排序。
         返回 dict: ok, audio_dir, list_file(可选), use_art, err(可选)
         """
         cid = (corpus_id or "ok_google").strip()
@@ -8642,6 +8731,13 @@ class UIComponents:
         self._wakeup100_freebox_single_wav_mode = False
         self._wakeup100_items_per_round = None
         list_path = list_file
+        list_line_count = None
+        if use_art and list_path and os.path.isfile(list_path):
+            try:
+                with open(list_path, "r", encoding="utf-8") as f:
+                    list_line_count = sum(1 for ln in f if ln.strip())
+            except Exception:
+                list_line_count = None
         files = []
         use_single_freebox = False
         try:
@@ -8680,6 +8776,8 @@ class UIComponents:
                         )
                 except Exception:
                     pass
+            elif corpus_id == "magenta":
+                files = self._load_wakeup100_files_magenta(audio_dir)
             elif use_art and list_path:
                 files = self._load_wakeup100_files_art(list_path, audio_dir)
             else:
@@ -8696,13 +8794,23 @@ class UIComponents:
         if getattr(self, "_wakeup100_freebox_single_wav_mode", False):
             items_per_round = int(self._wakeup100_items_per_round)
         else:
+            resolved_wav_count = len(files)
+            default_per = "200" if corpus_id == "magenta" else "100"
+            per_count_raw = default_per
             try:
-                per_count_raw = (getattr(self, "hotword_wakeup100_per_count_var", None) or tk.StringVar(value="100")).get().strip()
-                per_volume_count = max(1, min(len(files), int(per_count_raw or "100")))
+                per_count_raw = (
+                    getattr(self, "hotword_wakeup100_per_count_var", None) or tk.StringVar(value=default_per)
+                ).get().strip()
+                per_volume_count = max(1, min(resolved_wav_count, int(per_count_raw or default_per)))
             except (ValueError, TypeError):
-                per_volume_count = min(100, len(files))
+                per_volume_count = resolved_wav_count
             files = files[:per_volume_count]
             items_per_round = len(files)
+            if corpus_id == "magenta" and items_per_round < resolved_wav_count:
+                self._append_hotword_log(
+                    "提示: 「每档条数」为 %s，目录共 %d 个 wav，本档只播 %d 条。"
+                    % (per_count_raw or default_per, resolved_wav_count, items_per_round)
+                )
         num_rounds = v_to - v_from + 1
         num_effx = len(self._wakeup100_effx_modes) if self._wakeup100_effx_modes else 1
         self._wakeup100_expected = items_per_round * num_rounds * num_effx
@@ -8797,6 +8905,12 @@ class UIComponents:
             self.status_var.set("100 条唤醒率测试：本机+设备端同时播放中，按音量档位逐轮测试")
         if use_art and list_path:
             self._append_hotword_log(f"语料: {self._wakeup100_corpus_id}，列表: {list_path}")
+        elif self._wakeup100_corpus_id == "magenta":
+            order_src = "manifest.json" if os.path.isfile(os.path.join(audio_dir, "manifest.json")) else "文件名 001~200"
+            self._append_hotword_log(
+                "语料: magenta，目录: %s，按 %s 顺序，本档播放 %d 条 wav"
+                % (audio_dir, order_src, items_per_round)
+            )
         elif getattr(self, "_wakeup100_freebox_single_wav_mode", False):
             self._append_hotword_log(
                 "语料: ok_freebox 单文件整轨，%s（计 %s 条，整轨播一次/每档）"
@@ -8976,25 +9090,76 @@ class UIComponents:
                             self._wakeup100_resume_from_pause = False
                             time.sleep(0.3)
                         elif is_first_round and not is_resume:
+                            # 新开测试第一档：优先 REPLAY 从头开始，避免沿用上一次残留播放进度。
+                            replay_ok = False
                             try:
-                                subprocess.run(
-                                    ["adb", "-s", device_id_for_replay, "shell", "am", "start", "-a", "com.player.demo.PLAY", "-n", "com.player.demo/.MainActivity"],
-                                    capture_output=True, timeout=10,
+                                rr0 = subprocess.run(
+                                    [
+                                        "adb",
+                                        "-s",
+                                        device_id_for_replay,
+                                        "shell",
+                                        "am",
+                                        "start",
+                                        "-a",
+                                        "com.player.demo.REPLAY",
+                                        "-n",
+                                        "com.player.demo/.MainActivity",
+                                    ],
+                                    capture_output=True,
+                                    timeout=10,
                                 )
+                                replay_ok = rr0.returncode == 0
                             except Exception:
-                                pass
-                            self._append_hotword_log("打开设备端 App 并播放: am start -a com.player.demo.PLAY ...")
+                                replay_ok = False
+                            if not replay_ok:
+                                try:
+                                    subprocess.run(
+                                        [
+                                            "adb",
+                                            "-s",
+                                            device_id_for_replay,
+                                            "shell",
+                                            "am",
+                                            "start",
+                                            "-a",
+                                            "com.player.demo.PLAY",
+                                            "-n",
+                                            "com.player.demo/.MainActivity",
+                                        ],
+                                        capture_output=True,
+                                        timeout=10,
+                                    )
+                                except Exception:
+                                    pass
+                                self._append_hotword_log("打开设备端 App 并播放: REPLAY 失败，已回退 PLAY。")
+                            else:
+                                self._append_hotword_log("打开设备端 App 并从头播放: am start -a com.player.demo.REPLAY ...")
                             time.sleep(0.5)
                         else:
-                            new_effx_first_vol = bool(mode_idx > 0 and round_index == 0)
+                            corpus_magenta_vol = (
+                                (getattr(self, "_wakeup100_corpus_id", None) or "").strip() == "magenta"
+                            )
+                            if corpus_magenta_vol and (round_index > 0 or mode_idx > 0):
+                                self._append_hotword_log(
+                                    "magenta: 音量 %s，仅改系统音量，不 REPLAY AudioPlayer（保持背景循环）。"
+                                    % vol
+                                )
+                            elif not corpus_magenta_vol:
+                                new_effx_first_vol = bool(mode_idx > 0 and round_index == 0)
+                            else:
+                                new_effx_first_vol = False
                             use_resume_between_vols = bool(
-                                single_fb
+                                not corpus_magenta_vol
+                                and single_fb
                                 and device_id_for_replay
                                 and not new_effx_first_vol
                                 and getattr(self, "hotword_kardome_hal_rec_var", None)
                                 and bool(self.hotword_kardome_hal_rec_var.get())
                             )
-                            if use_resume_between_vols:
+                            if corpus_magenta_vol and (round_index > 0 or mode_idx > 0):
+                                pass
+                            elif use_resume_between_vols:
                                 try:
                                     import audio_player_apk as _apk_vol_next
 
@@ -9135,6 +9300,10 @@ class UIComponents:
                                 self._append_hotword_log(f"[整轨 1 文件 / 计 {total_files} 条] Playing: {basename}")
                         else:
                             self._append_hotword_log(f"[{i + 1}/{len(files)}] Playing: {basename}")
+                        try:
+                            self._wakeup100_utterance_start_count = float(getattr(self, "hotword_count", 0))
+                        except (TypeError, ValueError):
+                            self._wakeup100_utterance_start_count = 0.0
                         if single_fb and path and r_ui and r_ui.winfo_exists():
                             seg_dur = max(0.35, float(self._wav_duration_seconds(play_path) or (full_dur - base_off_sec)))
 
@@ -9237,6 +9406,23 @@ class UIComponents:
                         else:
                             self._wakeup100_played_count = base_offset + (i + 1)
                             self._wakeup100_current_round_played = i + 1
+                        if (
+                            not single_fb
+                            and (getattr(self, "_wakeup100_corpus_id", None) or "").strip() == "magenta"
+                            and device_id_for_replay
+                            and not stop()
+                        ):
+                            try:
+                                import feature_config as _fc_mg
+
+                                if not bool(getattr(_fc_mg, "WAKEUP_MAGENTA_BACK_ON_LOG_DETECT", True)):
+                                    self._hotword_magenta_dismiss_after_utterance(
+                                        device_id_for_replay,
+                                        log_append=self._append_hotword_log,
+                                        utterance_start_count=getattr(self, "_wakeup100_utterance_start_count", 0.0),
+                                    )
+                            except Exception:
+                                pass
                         if i < len(files) - 1 and not stop() and not single_fb:
                             self._append_hotword_log(f"  Waiting {interval} sec...")
                             for _ in range(steps):
@@ -9423,6 +9609,7 @@ class UIComponents:
         self._append_hotword_log("正在暂停…")
         self._wakeup100_paused = True
         self._wakeup100_stop_requested = True
+        self._magenta_back_schedule_token = int(getattr(self, "_magenta_back_schedule_token", 0) or 0) + 1
         # 先让播放线程看到 stop 并写入整轨位移，再 PURGE/terminate，避免本机 winsound 先停而线程仍认为未暂停
         self._pump_tk_idletasks_ms(150)
         try:
@@ -9473,6 +9660,7 @@ class UIComponents:
             pass
         self._wakeup100_paused = False  # 停止不算暂停，不显示「继续测试」
         self._wakeup100_stop_requested = True
+        self._magenta_back_schedule_token = int(getattr(self, "_magenta_back_schedule_token", 0) or 0) + 1
         self._wakeup100_single_local_offset_sec = 0.0
         self._wakeup100_single_fb_defer_round_result = False
         aid = getattr(self, "_wakeup100_update_after_id", None)
@@ -9648,6 +9836,302 @@ class UIComponents:
         y = (dlg.winfo_screenheight() - h) // 2
         dlg.geometry("%dx%d+%d+%d" % (min_w, h, x, y))
 
+    def _hotword_logcat_min_level_for_corpus(self, corpus_id):
+        """magenta 的 KeywordSpotter 唤醒行多为 Debug(D)；监测用 *:I 会整行收不到。"""
+        cid = (corpus_id or "ok_google").strip() or "ok_google"
+        if cid == "magenta":
+            return "D"
+        return "I"
+
+    def _hotword_ensure_audioplayer_play_after_back(self, device_id, log_append=None):
+        """返回键后补发 PLAY（与唤醒率测试开头一致），尽量让背景音继续；不使用 RESUME 以免误切换为暂停。"""
+        dev_id = (device_id or "").strip()
+        if not dev_id:
+            return False
+        try:
+            import feature_config as _fc
+
+            if not bool(getattr(_fc, "WAKEUP_MAGENTA_AFTER_BACK_ENSURE_PLAY", True)):
+                return False
+            pause = float(getattr(_fc, "WAKEUP_MAGENTA_AFTER_BACK_PLAY_DELAY_SEC", 0.4) or 0.4)
+        except Exception:
+            pause = 0.4
+        if pause > 0:
+            time.sleep(max(0.0, min(2.0, pause)))
+        try:
+            import feature_config as _fc
+
+            action = str(getattr(_fc, "AUDIO_PLAYER_ACTION_PLAY", "com.player.demo.PLAY") or "com.player.demo.PLAY")
+            component = str(
+                getattr(_fc, "AUDIO_PLAYER_COMPONENT", "com.player.demo/.MainActivity") or "com.player.demo/.MainActivity"
+            )
+        except Exception:
+            action = "com.player.demo.PLAY"
+            component = "com.player.demo/.MainActivity"
+        kwargs = {"capture_output": True, "timeout": 12}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            r = subprocess.run(
+                ["adb", "-s", dev_id, "shell", "am", "start", "-a", action, "-n", component],
+                **kwargs,
+            )
+            ok = r.returncode == 0
+            if log_append:
+                if ok:
+                    log_append("AudioPlayer: 返回后已补发 PLAY，尽量保持背景音播放（未使用 RESUME）。")
+                else:
+                    log_append("AudioPlayer: 返回后补发 PLAY 未成功(returncode=%s)。" % r.returncode)
+            return ok
+        except Exception as e:
+            if log_append:
+                log_append("AudioPlayer: 返回后补发 PLAY 异常 — %s" % e)
+            return False
+
+    def _hotword_magenta_schedule_back_on_wakeup(self, root, device_id):
+        """magenta：监测到唤醒 log 后，按界面「延迟(s)」在 root 计时再发返回键（不阻塞播 wav 线程）。"""
+        if not root or not root.winfo_exists():
+            return
+        try:
+            key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+        except Exception:
+            key_choice = "不关闭"
+        if not key_choice or str(key_choice).strip() in ("不关闭", "不发送"):
+            return
+        try:
+            raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
+            delay_sec = float(str(raw).strip() or "2")
+        except (ValueError, TypeError):
+            delay_sec = 2.0
+        delay_sec = max(0.0, min(60.0, delay_sec))
+        dev_id = (device_id or "").strip()
+        token = int(getattr(self, "_magenta_back_schedule_token", 0) or 0) + 1
+        self._magenta_back_schedule_token = token
+
+        def _job(d=dev_id, ds=delay_sec, tk_token=token):
+            try:
+                if getattr(self, "_wakeup100_stop_requested", False):
+                    return
+                if tk_token != int(getattr(self, "_magenta_back_schedule_token", 0) or 0):
+                    return
+                t = threading.Thread(
+                    target=self._hotword_magenta_execute_back_key,
+                    args=(d, ds, self._append_hotword_log),
+                    daemon=True,
+                )
+                t.start()
+            except Exception:
+                pass
+
+        try:
+            root.after(int(delay_sec * 1000), _job)
+        except Exception:
+            pass
+
+    def _hotword_magenta_execute_back_key(self, device_id, delay_sec, log_append=None):
+        """仅发送返回键（或 Home），不 force-stop 语音助手、不 PLAY/RESUME AudioPlayer。"""
+        dev_id = (device_id or "").strip()
+        if not dev_id:
+            return
+        if getattr(self, "_wakeup100_stop_requested", False):
+            return
+        try:
+            key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+        except Exception:
+            key_choice = "返回键(KEYCODE_BACK)"
+        adb_prefix = ["adb", "-s", dev_id]
+        kwargs = {"capture_output": True, "timeout": 12}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            if "Home" in key_choice or "KEYCODE_HOME" in key_choice:
+                subprocess.run(adb_prefix + ["shell", "input", "keyevent", "KEYCODE_HOME"], **kwargs)
+                if log_append:
+                    log_append(
+                        "magenta: 监测到唤醒，延迟 %.1fs 后已发送 KEYCODE_HOME" % delay_sec
+                    )
+            else:
+                subprocess.run(adb_prefix + ["shell", "input", "keyevent", "KEYCODE_BACK"], **kwargs)
+                if log_append:
+                    log_append(
+                        "magenta: 监测到唤醒，延迟 %.1fs 后已发送 KEYCODE_BACK"
+                        % delay_sec
+                    )
+        except Exception as e:
+            if log_append:
+                log_append("magenta: 发送返回键失败 — %s" % e)
+
+    def _hotword_magenta_dismiss_after_utterance(self, device_id, log_append=None, utterance_start_count=0.0):
+        """
+        magenta 每条语料本机播完后：若本句已唤醒则延迟后按返回退出语音 UI（不 force-stop 语音助手）。
+        未唤醒不按返回，避免 AudioPlayer 仍在前台时被误退出。不操作 AudioPlayer 播放控制。
+        """
+        dev_id = (device_id or "").strip()
+        if not dev_id:
+            return
+        try:
+            key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+        except Exception:
+            key_choice = "不关闭"
+        if not key_choice or str(key_choice).strip() in ("不关闭", "不发送"):
+            return
+        try:
+            import feature_config as _fc
+
+            only_after_wake = bool(getattr(_fc, "WAKEUP_MAGENTA_BACK_ONLY_AFTER_WAKEUP", True))
+        except Exception:
+            only_after_wake = True
+        try:
+            start_c = float(utterance_start_count)
+            cur_c = float(getattr(self, "hotword_count", 0))
+        except (TypeError, ValueError):
+            start_c = 0.0
+            cur_c = 0.0
+        if only_after_wake and cur_c <= start_c:
+            if log_append:
+                log_append("magenta: 本句未检测到唤醒，跳过返回键（保持 AudioPlayer 背景循环）")
+            return
+        try:
+            import feature_config as _fc
+
+            mode = str(getattr(_fc, "WAKEUP_MAGENTA_DISMISS_VOICE_MODE", "back") or "back").strip().lower()
+            va_pkg = str(
+                getattr(_fc, "WAKEUP_MAGENTA_VOICE_ASSISTANT_PACKAGE", "de.telekom.magentatv.voiceassistant.debug") or ""
+            ).strip()
+        except Exception:
+            mode = "back"
+            va_pkg = "de.telekom.magentatv.voiceassistant.debug"
+        if "Home" in key_choice or "KEYCODE_HOME" in key_choice:
+            mode = "home"
+        elif "返回" in key_choice or "BACK" in key_choice.upper():
+            mode = "back"
+        elif "force-stop" in key_choice or "关闭助手" in key_choice:
+            mode = "force_stop_voice"
+        try:
+            raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
+            delay_sec = float(str(raw).strip() or "2")
+        except (ValueError, TypeError):
+            delay_sec = 2.0
+        delay_sec = max(0.0, min(60.0, delay_sec))
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+        adb_prefix = ["adb", "-s", dev_id]
+        kwargs = {"capture_output": True, "timeout": 12}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            if mode == "force_stop_voice" and va_pkg:
+                subprocess.run(adb_prefix + ["shell", "am", "force-stop", va_pkg], **kwargs)
+                if log_append:
+                    log_append(
+                        "magenta: 延迟 %.1fs 已 force-stop %s（语音助手将无法再次唤醒，一般不推荐）"
+                        % (delay_sec, va_pkg)
+                    )
+            elif mode == "home":
+                subprocess.run(adb_prefix + ["shell", "input", "keyevent", "KEYCODE_HOME"], **kwargs)
+                if log_append:
+                    log_append("magenta: 延迟 %.1fs 已发送 KEYCODE_HOME（未操作 AudioPlayer）" % delay_sec)
+                if bool(getattr(_fc, "WAKEUP_MAGENTA_AFTER_BACK_ENSURE_PLAY", False)):
+                    self._hotword_ensure_audioplayer_play_after_back(dev_id, log_append=log_append)
+            elif mode == "back_then_resume":
+                subprocess.run(adb_prefix + ["shell", "input", "keyevent", "KEYCODE_BACK"], **kwargs)
+                if log_append:
+                    log_append("magenta: 延迟 %.1fs 已发送 KEYCODE_BACK（随后 RESUME，可能误暂停）" % delay_sec)
+                self._hotword_restore_audioplayer_background(dev_id, log_append=log_append)
+            else:
+                subprocess.run(adb_prefix + ["shell", "input", "keyevent", "KEYCODE_BACK"], **kwargs)
+                if log_append:
+                    log_append(
+                        "magenta: 延迟 %.1fs 已发送 KEYCODE_BACK（不关语音助手；不操作 AudioPlayer 背景循环）"
+                        % delay_sec
+                    )
+                try:
+                    import feature_config as _fc2
+
+                    if bool(getattr(_fc2, "WAKEUP_MAGENTA_AFTER_BACK_ENSURE_PLAY", False)):
+                        self._hotword_ensure_audioplayer_play_after_back(dev_id, log_append=log_append)
+                except Exception:
+                    pass
+        except Exception as e:
+            if log_append:
+                log_append("magenta: 退出语音界面失败 — %s" % e)
+
+    def _hotword_restore_audioplayer_background(self, device_id, log_append=None):
+        """返回键后恢复 com.player.demo 背景播放（RESUME，失败仅记日志，不 REPLAY 以免从头播）。"""
+        dev_id = (device_id or "").strip()
+        if not dev_id:
+            return False
+        try:
+            import feature_config as _fc
+            if not bool(getattr(_fc, "WAKEUP_MAGENTA_RESTORE_AUDIOPLAYER_AFTER_KEY", True)):
+                return False
+            pause = float(getattr(_fc, "WAKEUP_MAGENTA_AFTER_KEY_RESUME_DELAY_SEC", 0.35) or 0.35)
+        except Exception:
+            pause = 0.35
+        if pause > 0:
+            time.sleep(max(0.0, min(2.0, pause)))
+        try:
+            import audio_player_apk as _apk
+
+            rr = _apk.run_resume(dev_id)
+            ok = rr.returncode == 0
+            if log_append:
+                if ok:
+                    log_append("AudioPlayer: 已 RESUME，背景音轨继续在后台播放。")
+                else:
+                    tail = ((rr.stderr or "") + (rr.stdout or "")).strip()[:200]
+                    log_append(
+                        "AudioPlayer: RESUME 未成功(returncode=%s)，背景音可能已停；请确认 PlayerDemo 支持 RESUME。%s"
+                        % (rr.returncode, (" " + tail) if tail else "")
+                    )
+            return ok
+        except Exception as e:
+            if log_append:
+                log_append("AudioPlayer: RESUME 异常 — %s" % e)
+            return False
+
+    def _hotword_send_after_key(self, device_id, delay_sec=None, log_append=None, restore_audioplayer_after=False):
+        """按界面「唤醒后」与「延迟(s)」向设备发送返回/Home 或 force-stop（在调用线程内 sleep 后同步执行）。"""
+        try:
+            key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+        except Exception:
+            key_choice = "不关闭"
+        if not key_choice or str(key_choice).strip() in ("不关闭", "不发送"):
+            return
+        if delay_sec is None:
+            try:
+                raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
+                delay_sec = float(str(raw).strip() or "2")
+            except (ValueError, TypeError):
+                delay_sec = 2.0
+        try:
+            delay_sec = max(0.0, min(60.0, float(delay_sec)))
+        except (TypeError, ValueError):
+            delay_sec = 2.0
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+        dev_id = (device_id or "").strip()
+        adb_prefix = ["adb", "-s", dev_id] if dev_id else ["adb"]
+        kwargs = {"capture_output": True, "timeout": 8}
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            if "force-stop" in key_choice or "关闭助手" in key_choice:
+                cmd = adb_prefix + ["shell", "am", "force-stop", "com.google.android.katniss"]
+                label = "force-stop katniss"
+            else:
+                keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
+                cmd = adb_prefix + ["shell", "input", "keyevent", keycode]
+                label = keycode
+            subprocess.run(cmd, **kwargs)
+            if log_append:
+                log_append("唤醒后: 延迟 %.1fs 已发送 %s" % (delay_sec, label))
+            if restore_audioplayer_after and not ("force-stop" in key_choice or "关闭助手" in key_choice):
+                self._hotword_restore_audioplayer_background(dev_id, log_append=log_append)
+        except Exception as e:
+            if log_append:
+                log_append("唤醒后: 发送按键失败 — %s" % e)
+
     def _hotword_log_markers_for_corpus(self, corpus_id):
         """与「唤醒语料库」下拉一致：返回若干子串，log 行包含其中任意一个则视为一次可计数的唤醒候选（通用去重窗 + ok_freebox 组内交替窗）。"""
         cid = (corpus_id or "ok_google").strip() or "ok_google"
@@ -9663,6 +10147,8 @@ class UIComponents:
             )
         if cid == "ok_homa":
             return ("Received wake-up event: 1",)
+        if cid == "magenta":
+            return ("[KS] Keyword recognized: magenta",)
         return ("Detected hotword", "LIBAS_HOTWORD_DETECTION_RECEIVED")
 
     def _read_hotword_logcat(self):
@@ -9762,47 +10248,61 @@ class UIComponents:
                 if current_n > last_appended:
                     self._hotword_last_appended_count = current_n
                     _ui_append(self.hotword_count, f"监测到唤醒，计数+1（当前：第 {current_n} 次）")
-                # 可选：唤醒后延迟 N 秒再关闭助手（force-stop katniss / 返回键 / Home 键）
-                key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
-                if not key_choice or key_choice.strip() in ("不关闭", "不发送") or not root or not root.winfo_exists():
-                    pass
-                else:
-                    try:
-                        raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
-                        delay_sec = 2.0
-                        if raw is not None:
-                            try:
-                                delay_sec = float(str(raw).strip())
-                                delay_sec = max(0.0, min(60.0, delay_sec))
-                            except (ValueError, TypeError):
-                                pass
-                        device_id = (getattr(self, "selected_device", None) or "").strip() or (getattr(self, "device_var", None) and self.device_var.get() or "").strip()
+                    if corpus_id == "magenta" and root and root.winfo_exists():
+                        try:
+                            import feature_config as _fc_mg2
 
-                        use_force_stop = "force-stop" in key_choice or "关闭助手" in key_choice
-
-                        def _close_assistant_later(dev_id, force_stop_only, keycode):
-                            try:
-                                if force_stop_only:
-                                    if dev_id:
-                                        cmd = f"adb -s {dev_id} shell am force-stop com.google.android.katniss"
-                                    else:
-                                        cmd = "adb shell am force-stop com.google.android.katniss"
-                                else:
-                                    if dev_id:
-                                        cmd = f"adb -s {dev_id} shell input keyevent {keycode}"
-                                    else:
-                                        cmd = f"adb shell input keyevent {keycode}"
-                                subprocess.run(cmd, shell=True, timeout=5, capture_output=True)
-                            except Exception:
-                                pass
-
-                        if use_force_stop:
-                            root.after(int(delay_sec * 1000), lambda d=device_id: _close_assistant_later(d, True, None))
-                        else:
-                            keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
-                            root.after(int(delay_sec * 1000), lambda d=device_id, c=keycode: _close_assistant_later(d, False, c))
-                    except Exception:
+                            if bool(getattr(_fc_mg2, "WAKEUP_MAGENTA_BACK_ON_LOG_DETECT", True)):
+                                device_id_mg = (getattr(self, "selected_device", None) or "").strip() or (
+                                    getattr(self, "device_var", None) and self.device_var.get() or ""
+                                ).strip()
+                                device_id_mg = device_id_mg or getattr(self, "_wakeup100_device_id", None) or ""
+                                self._hotword_magenta_schedule_back_on_wakeup(root, device_id_mg)
+                        except Exception:
+                            pass
+                if corpus_id != "magenta":
+                    key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
+                    if not key_choice or key_choice.strip() in ("不关闭", "不发送") or not root or not root.winfo_exists():
                         pass
+                    else:
+                        try:
+                            raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
+                            delay_sec = 2.0
+                            if raw is not None:
+                                try:
+                                    delay_sec = float(str(raw).strip())
+                                    delay_sec = max(0.0, min(60.0, delay_sec))
+                                except (ValueError, TypeError):
+                                    pass
+                            device_id = (getattr(self, "selected_device", None) or "").strip() or (
+                                getattr(self, "device_var", None) and self.device_var.get() or ""
+                            ).strip()
+
+                            use_force_stop = "force-stop" in key_choice or "关闭助手" in key_choice
+
+                            def _close_assistant_later(dev_id, force_stop_only, keycode):
+                                try:
+                                    if force_stop_only:
+                                        if dev_id:
+                                            cmd = f"adb -s {dev_id} shell am force-stop com.google.android.katniss"
+                                        else:
+                                            cmd = "adb shell am force-stop com.google.android.katniss"
+                                    else:
+                                        if dev_id:
+                                            cmd = f"adb -s {dev_id} shell input keyevent {keycode}"
+                                        else:
+                                            cmd = f"adb shell input keyevent {keycode}"
+                                    subprocess.run(cmd, shell=True, timeout=5, capture_output=True)
+                                except Exception:
+                                    pass
+
+                            if use_force_stop:
+                                root.after(int(delay_sec * 1000), lambda d=device_id: _close_assistant_later(d, True, None))
+                            else:
+                                keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
+                                root.after(int(delay_sec * 1000), lambda d=device_id, c=keycode: _close_assistant_later(d, False, c))
+                        except Exception:
+                            pass
         except Exception:
             pass
         finally:

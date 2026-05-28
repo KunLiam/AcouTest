@@ -1,9 +1,9 @@
 {
-  "latest_version": "2.1.1",
-  "publish_date": "2026-05-27",
+  "latest_version": "2.1.2",
+  "publish_date": "2026-05-28",
   "notes": [
-    "唤醒率 · ok_freebox：兼容 Elevoc 与 Kardome 两路 log，组内交替去重同次只计 1 次；本档已唤醒与唤醒率显示修正（上限 100%、不超过已播条数）；新开测试自动重启监测避免本档恒为 0；播放结束自动保存并打开结果目录。"
+    "语音唤醒：添加 magenta 唤醒语料，播放顺序调整为 `wakeup_count/magenta/` 目录内 `001~200` 顺序。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.1/AcouTest.v2.1.1.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.2/AcouTest.v2.1.2.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

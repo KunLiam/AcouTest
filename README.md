@@ -57,7 +57,7 @@
   - 结果输出：日志文件落盘；支持日志查看器实时筛选查看。
 - **唤醒监测**
   - 功能用途：监测唤醒关键词相关日志并统计命中次数；支持按语料与音量/音效的批量唤醒率测试（本机与设备端同步播放）。**分步操作、目录结构与按钮说明**见下文 [AcouTest 唤醒率测试操作说明](#acoutest-唤醒率测试操作说明)。
-  - 可配置项：与「唤醒语料库」联动的 logcat 匹配规则（Google：`Detected hotword` / `LIBAS_HOTWORD…`；Freebox：B 版 `KardomeJni: Keyword recognized!`，A 版 `Report wakeup phrase…-> ok_freebox` / `Received wake-up event: 1` / `kws wakeup` / `VOICE_PREPROCESS_WAKEUP…` 等，带去重；**Homa**：仅 **`Received wake-up event: 1`**）；唤醒后关闭方式、关闭延迟及语料默认联动同前。
+  - 可配置项：与「唤醒语料库」联动的 logcat 匹配规则（Google：`Detected hotword` / `LIBAS_HOTWORD…`；Freebox：B 版 `KardomeJni: Keyword recognized!`，A 版 `Report wakeup phrase…-> ok_freebox` / `Received wake-up event: 1` / `kws wakeup` / `VOICE_PREPROCESS_WAKEUP…` 等，带去重；**Homa**：仅 **`Received wake-up event: 1`**；**magenta**：**`[KS] Keyword recognized: magenta`**（KeywordSpotterService））；唤醒后关闭方式、关闭延迟及语料默认联动同前。
   - 100 条测试：在 exe 同目录或上一级放置 **wakeup_count** 文件夹。**ok_google**：`wakeup_count/ok_google/art_100.txt`（播放顺序）与同目录（或子目录）下的 wav；仍兼容旧版 `wakeup_count/art_100.txt` + `selected_100/`。**ok_freebox / ok_homa**：`wakeup_count/<语料名>/` 下放入 wav，按路径排序播放。**Freebox 整轨目录**：语料选 ok_freebox 并勾选「Freebox 整轨目录 ok_freebox_single/」时，使用 **`wakeup_count/ok_freebox_single/`** 内的一个 wav（可任意命名、直接替换；若有多个 wav 则按文件名排序取第一个），整轨每档播一次；在界面 **「整轨条数」** 填写该 wav 内含多少条唤醒句，作为唤醒率分母（无需改代码或 feature_config）；整轨时「每档播放条数」「播放间隔」会禁用且不参与流程，状态栏预期条数与唤醒率按整轨条数×音量档数计算，避免长文件未播完时出现总次数为 0、唤醒率异常。不勾选则仍按 `ok_freebox/` 多 wav 与「每档播放条数」逻辑。可选勾选 **「Kardome HAL 分段录音」**：每档顺序为设音量 → Kardome 前台 → AudioPlayer（PLAY/RESUME/REPLAY）→ **再次 Kardome 前台**（与在 APK 内手敲 `setprop` 时界面一致）→ **`vendor recording=1`** → 本机整轨 wav（**`recording=1` 之后至本档停录前勿再 `am start` 切 Activity**，以免 HAL 不落盘或 pull 空）；停录时 `recording=0` 后立即 PAUSE AudioPlayer 并停本机唤醒音频，再 `download_files` / 轮询 / `adb pull`（本会话已 pull 集合辅助识别新目录）；pull 后若本地过小会重试一次；**pull 前等四文件齐全且体积稳定再拉取，本机齐套后才删设备端子目录/文件，不对已 pull 内容做格式改写**；`finally` 将 `download_files` 置 `0`。`setprop` 先 `adb shell setprop` 再 `su`/`adb root` 重试。输出 **`output/wakeup_kardome_hal/session_*/`**。界面「唤醒语料库」下拉框切换语料。**设备端 APK**：`wakeup_count/AudioPlayer.apk`（`com.player.demo`，必选）与气密/震音共用；开始唤醒率测试时若选 **ok_freebox**：若设备未安装 **com.kardome.audiodemo**，会再 `install -r` **`wakeup_count/ok_freebox_32.apk`** 并 **自动启动**；若已安装 **com.kardome.audiodemo** 则跳过该语料 APK 安装；**ok_homa** 同理安装 **`ok_homa_31.apk`** 并启动。主包名可在 **`feature_config.py`** 中填写 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`；留空时若本机 PATH 有 **aapt/aapt2**，会尝试从 APK 解析包名。
   - 结果输出：实时显示命中状态与计数；100 条测试时显示预期条数、当前唤醒次数与唤醒率。
 - **系统指令**
@@ -239,6 +239,7 @@
 - **ok_google（Google）**：行中含 `Detected hotword` 或 `LIBAS_HOTWORD_DETECTION_RECEIVED`。
 - **ok_freebox（Freebox）**：**B 版**行中含 `KardomeJni: Keyword recognized!`（必配）。**A 版（Elevoc + audio_preprocess_speech）** 行中含以下**任一**即候选：`Report wakeup phrase by current_kws_type=1 -> ok_freebox`（推荐作代表句）、`Received wake-up event: 1`、`kws wakeup`、`VOICE_PREPROCESS_WAKEUP sent phrase=ok_freebox`；同次唤醒往往连续多行，工具用**通用去重窗** + **A 版组内交替窗**（约 5.5s）只计 1 次；`Received wake-up event: 1` 与 `KardomeJni` 若同次先后出现且落在 Kardome 组交替窗内也只计 1 次。每档写入结果时唤醒次数仍**上限钳到该档已播放条数**。若先前已单独「开始监测」再点「开始测试」，工具会**先停再起 logcat** 以免本档「已唤醒」从旧累计里减成 0。
 - **ok_homa（Homa）**：行中含 `Received wake-up event: 1`。
+- **magenta**：行中含 `[KS] Keyword recognized: magenta`（`KeywordSpotterService`，**Debug/D 级**）；开始监测时对该语料使用 **`logcat *:D`**，否则 `*:I` 会漏掉该行。
 
 「最近唤醒日志」区域在监测到有效唤醒时主要显示**计数提示**（如「监测到唤醒，计数+1（当前：第 N 次）」），与原始 log 行不一定逐字一致；需核对原始行时请用「音频调试 → Logcat 日志」单独抓取。
 
@@ -260,13 +261,14 @@
 
 资源目录位于 **可执行文件同目录** 或**上一级**下的 **`wakeup_count`**（与程序内解析逻辑一致）。至少需要 **`wakeup_count/AudioPlayer.apk`**。
 
-**语料与 wav 布局（界面「语料」下拉：ok_google / ok_freebox / ok_homa）**
+**语料与 wav 布局（界面「语料」下拉：ok_google / ok_freebox / ok_homa / magenta）**
 
 | 语料 | 说明 |
 |------|------|
 | **ok_google** | 优先使用 `wakeup_count/ok_google/art_100.txt` 列出文件名（与 wav 所在目录一致，通常为同目录下 wav）；**仍兼容旧版** `wakeup_count/art_100.txt` + `wakeup_count/selected_100/` 下放 wav。 |
 | **ok_freebox** | 使用 `wakeup_count/ok_freebox/` 下所有 `.wav`，**按文件名排序**依次播放（条数受「每档条数」上限约束）。勾选 **「Freebox 整轨」** 时，改为使用 `wakeup_count/ok_freebox_single/` 下的 wav（多个文件时取**排序后第一个**），**每个音量档整轨播放一次**；此时「每档条数」「间隔(s)」不可用，需在 **「整轨条数」** 填写该 wav 内大约含多少条唤醒句，作为该档唤醒率**分母**。 |
 | **ok_homa** | 使用 `wakeup_count/ok_homa/` 下 `.wav`，按文件名排序播放。 |
+| **magenta** | `wakeup_count/magenta/` 下放 `magenta_001.wav`…`magenta_200.wav`（可有 `manifest.json` 按 `index` 排序，**不需要 AudioFiles.txt**）。设备端 **PLAY 一次** 后背景循环；换音量 **不 REPLAY**；唤醒后按延迟按返回。仅需 **AudioPlayer.apk**。 |
 
 **其它文件**
 

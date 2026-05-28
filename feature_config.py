@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 
 # AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
 AUDIOPLAYER_APK_VERSION = "1.0.1"
@@ -61,6 +61,20 @@ AUDIO_PLAYER_ACTION_REPLAY = "com.player.demo.REPLAY"
 # 唤醒率测试「继续」且暂停时未 force-stop 本 APK 时优先下发（与 PlayerDemo MainActivity 一致则设备可从暂停处续播）
 AUDIO_PLAYER_ACTION_RESUME = "com.player.demo.RESUME"
 AUDIO_PLAYER_EXTRA_TRACK = "com.player.demo.EXTRA_TRACK"
+# magenta 批量测试：每条语料播完后退出语音界面（须保持语音助手进程存活，不可 force-stop）。
+# back（默认）：仅在本条语料期间 log 已计到唤醒时，延迟后按返回；未唤醒不按返回（避免误退 AudioPlayer）。
+# 不 PLAY/RESUME/PAUSE AudioPlayer（背景音测试开始时 PLAY 一次后循环）；换音量档不 REPLAY。
+# WAKEUP_MAGENTA_AFTER_BACK_ENSURE_PLAY=True 时返回后再发 PLAY（会打断循环，一般保持 False）。
+WAKEUP_MAGENTA_BACK_ONLY_AFTER_WAKEUP = True
+# True：log 判定唤醒后按界面「延迟(s)」计时再按返回（与计数同时，不等到 wav 播完）。False 则改在每条 wav 播完后判断。
+WAKEUP_MAGENTA_BACK_ON_LOG_DETECT = True
+# back_then_resume / home / force_stop_voice 见名。
+WAKEUP_MAGENTA_DISMISS_VOICE_MODE = "back"
+WAKEUP_MAGENTA_AFTER_BACK_ENSURE_PLAY = False
+WAKEUP_MAGENTA_AFTER_BACK_PLAY_DELAY_SEC = 0.4
+WAKEUP_MAGENTA_VOICE_ASSISTANT_PACKAGE = "de.telekom.magentatv.voiceassistant.debug"
+WAKEUP_MAGENTA_RESTORE_AUDIOPLAYER_AFTER_KEY = False
+WAKEUP_MAGENTA_AFTER_KEY_RESUME_DELAY_SEC = 0.35
 # 唤醒率测试：安装 ok_freebox_32.apk / ok_homa_31.apk 后要 adb 拉起的主包名（adb shell monkey -p <包名> …）。
 # 若设备已安装 com.kardome.audiodemo（pm list），ok_freebox 将不再安装 ok_freebox_32.apk。
 # 留空时程序会尝试用本机 PATH 中的 aapt/aapt2 从 APK 解析包名；若解析失败请在下方填写包名。
