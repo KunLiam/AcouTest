@@ -60,6 +60,10 @@
   - 可配置项：与「唤醒语料库」联动的 logcat 匹配规则（Google：`Detected hotword` / `LIBAS_HOTWORD…`；Freebox：B 版 `KardomeJni: Keyword recognized!`，A 版 `Report wakeup phrase…-> ok_freebox` / `Received wake-up event: 1` / `kws wakeup` / `VOICE_PREPROCESS_WAKEUP…` 等，带去重；**Homa**：仅 **`Received wake-up event: 1`**；**magenta**：**`[KS] Keyword recognized: magenta`**（KeywordSpotterService））；唤醒后关闭方式、关闭延迟及语料默认联动同前。
   - 100 条测试：在 exe 同目录或上一级放置 **wakeup_count** 文件夹。**ok_google**：`wakeup_count/ok_google/art_100.txt`（播放顺序）与同目录（或子目录）下的 wav；仍兼容旧版 `wakeup_count/art_100.txt` + `selected_100/`。**ok_freebox / ok_homa**：`wakeup_count/<语料名>/` 下放入 wav，按路径排序播放。**Freebox 整轨目录**：语料选 ok_freebox 并勾选「Freebox 整轨目录 ok_freebox_single/」时，使用 **`wakeup_count/ok_freebox_single/`** 内的一个 wav（可任意命名、直接替换；若有多个 wav 则按文件名排序取第一个），整轨每档播一次；在界面 **「整轨条数」** 填写该 wav 内含多少条唤醒句，作为唤醒率分母（无需改代码或 feature_config）；整轨时「每档播放条数」「播放间隔」会禁用且不参与流程，状态栏预期条数与唤醒率按整轨条数×音量档数计算，避免长文件未播完时出现总次数为 0、唤醒率异常。不勾选则仍按 `ok_freebox/` 多 wav 与「每档播放条数」逻辑。可选勾选 **「Kardome HAL 分段录音」**：每档顺序为设音量 → Kardome 前台 → AudioPlayer（PLAY/RESUME/REPLAY）→ **再次 Kardome 前台**（与在 APK 内手敲 `setprop` 时界面一致）→ **`vendor recording=1`** → 本机整轨 wav（**`recording=1` 之后至本档停录前勿再 `am start` 切 Activity**，以免 HAL 不落盘或 pull 空）；停录时 `recording=0` 后立即 PAUSE AudioPlayer 并停本机唤醒音频，再 `download_files` / 轮询 / `adb pull`（本会话已 pull 集合辅助识别新目录）；pull 后若本地过小会重试一次；**pull 前等四文件齐全且体积稳定再拉取，本机齐套后才删设备端子目录/文件，不对已 pull 内容做格式改写**；`finally` 将 `download_files` 置 `0`。`setprop` 先 `adb shell setprop` 再 `su`/`adb root` 重试。输出 **`output/wakeup_kardome_hal/session_*/`**。界面「唤醒语料库」下拉框切换语料。**设备端 APK**：`wakeup_count/AudioPlayer.apk`（`com.player.demo`，必选）与气密/震音共用；开始唤醒率测试时若选 **ok_freebox**：若设备未安装 **com.kardome.audiodemo**，会再 `install -r` **`wakeup_count/ok_freebox_32.apk`** 并 **自动启动**；若已安装 **com.kardome.audiodemo** 则跳过该语料 APK 安装；**ok_homa** 同理安装 **`ok_homa_31.apk`** 并启动。主包名可在 **`feature_config.py`** 中填写 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`；留空时若本机 PATH 有 **aapt/aapt2**，会尝试从 APK 解析包名。
   - 结果输出：实时显示命中状态与计数；100 条测试时显示预期条数、当前唤醒次数与唤醒率。
+- **语料生成**
+  - 功能用途：在「音频调试 → 语料生成」内按指定唤醒词批量生成 `.wav` 语料（Edge TTS 多音色），并写入 `manifest.json`（**纯本地功能，不依赖设备连接**）。
+  - 可配置项：唤醒词、总条数、已生成条数（可从下一条续生成）、输出根目录（默认 `wakeup_count/`）和语料目录名。
+  - 结果输出：生成 `prefix_001.wav...`（或续生 index）及 `manifest.json`，便于直接放入 `wakeup_count/<语料名>/` 用于唤醒率测试。
 - **系统指令**
   - 功能用途：执行常用系统指令（如 `dumpsys`、`tinymix`、`getprop`）与自定义命令。
   - 可配置项：预设指令、自定义 shell 指令。
@@ -227,6 +231,35 @@
 3. 弹窗中可使用 **Ctrl+F** 搜索内容，点击“刷新”重新执行命令，点击“保存”将结果保存为文件
 4. 在“自定义指令”输入框中输入任意 adb shell 命令（如 `dumpsys media.audio`），点击“运行”执行
 5. 设备解锁等敏感操作在“设备解锁”区域，使用前请注意提示（可能清数据）
+
+### 语料生成
+1. 主界面选择“音频调试” → 子标签“语料生成”
+2. 填写「唤醒词」（如 `MAGENTA` / `OK Freebox`）和「总条数」
+3. 若此前已生成过，填写「已生成条数」，工具会从下一条续生成（例如已 150，下一次从 151 开始）
+4. 选择输出根目录（默认 `wakeup_count/`），语料会输出到 `wakeup_count/<语料目录名>/`
+5. 点击「开始生成」，完成后可直接在「唤醒监测」中选择对应语料目录使用
+2. 点击预设按钮（如 dumpsys media.audio_policy、tinymix、getprop 等）执行对应命令，结果在弹窗中显示
+3. 弹窗中可使用 **Ctrl+F** 搜索内容，点击“刷新”重新执行命令，点击“保存”将结果保存为文件
+4. 在“自定义指令”输入框中输入任意 adb shell 命令（如 `dumpsys media.audio`），点击“运行”执行
+5. 设备解锁等敏感操作在“设备解锁”区域，使用前请注意提示（可能清数据）
+
+### 语料生成
+1. 主界面选择“音频调试” → 子标签“语料生成”
+2. 填写「唤醒词」（如 `MAGENTA` / `OK Freebox`）和「总条数」
+3. 若此前已生成过，填写「已生成条数」，工具会从下一条续生成（例如已 150，下一次从 151 开始）
+4. 选择输出根目录（默认 `wakeup_count/`），语料会输出到 `wakeup_count/<语料目录名>/`
+5. 点击「开始生成」，完成后可直接在「唤醒监测」中选择对应语料目录使用
+2. 点击预设按钮（如 dumpsys media.audio_policy、tinymix、getprop 等）执行对应命令，结果在弹窗中显示
+3. 弹窗中可使用 **Ctrl+F** 搜索内容，点击“刷新”重新执行命令，点击“保存”将结果保存为文件
+4. 在“自定义指令”输入框中输入任意 adb shell 命令（如 `dumpsys media.audio`），点击“运行”执行
+5. 设备解锁等敏感操作在“设备解锁”区域，使用前请注意提示（可能清数据）
+
+### 语料生成
+1. 主界面选择“音频调试” → 子标签“语料生成”
+2. 填写「唤醒词」（如 `MAGENTA` / `OK Freebox`）和「总条数」
+3. 若此前已生成过，填写「已生成条数」，工具会从下一条续生成（例如已 150，下一次从 151 开始）
+4. 选择输出根目录（默认 `wakeup_count/`），语料会输出到 `wakeup_count/<语料目录名>/`
+5. 点击「开始生成」，完成后可直接在「唤醒监测」中选择对应语料目录使用
 
 ## AcouTest 唤醒率测试操作说明
 

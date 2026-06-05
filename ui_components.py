@@ -19,6 +19,7 @@ import datetime
 import json
 import sys
 import ctypes
+import traceback
 from ctypes import c_int, c_char_p, c_void_p, POINTER, c_char
 import tempfile
 import textwrap
@@ -904,6 +905,7 @@ class UIComponents:
             "• HAL录音：HAL 录音与拉取\n"
             "• Logcat日志：日志抓取与查看\n"
             "• 唤醒监测：Google语音助手唤醒监测\n"
+            "• 语料生成：按唤醒词批量生成 wav 语料\n"
             "• 系统指令：常用dumpsys/tinymix 及自定义 shell指令\n\n"
             "【常用功能】\n"
             "• 遥控器：常用遥控器按键模拟\n"
@@ -1935,6 +1937,11 @@ class UIComponents:
             hotword_frame = ttk.Frame(debug_notebook)
             debug_notebook.add(hotword_frame, text="唤醒监测")
             self.setup_hotword_monitor_tab(hotword_frame)
+
+        if is_sub_tab_enabled("音频调试", "语料生成"):
+            corpus_gen_frame = ttk.Frame(debug_notebook)
+            debug_notebook.add(corpus_gen_frame, text="语料生成")
+            self.setup_wake_corpus_generator_tab(corpus_gen_frame)
 
         if is_sub_tab_enabled("音频调试", "系统指令"):
             syscmd_frame = ttk.Frame(debug_notebook)
@@ -10319,6 +10326,341 @@ class UIComponents:
         if hasattr(self, "hotword_stop_btn") and self.hotword_stop_btn.winfo_exists():
             self.hotword_stop_btn.config(state="disabled")
         self.hotword_monitor_process = None
+
+    @staticmethod
+    def _wake_corpus_safe_prefix(text):
+        """按唤醒词生成安全前缀：OK Freebox -> ok_freebox。"""
+        s = (text or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "_", s, flags=re.ASCII)
+        s = re.sub(r"_+", "_", s).strip("_")
+        return s or "corpus"
+
+    def _wake_corpus_default_root(self):
+        wakeup_dir, base_dir = self._find_wakeup_count_dir()
+        return wakeup_dir or os.path.join(base_dir, "wakeup_count")
+
+    def setup_wake_corpus_generator_tab(self, parent):
+        """语料生成：按唤醒词批量生成 wav（支持从已生成条数继续）。"""
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        if not hasattr(self, "_wake_corpus_text_var"):
+            self._wake_corpus_text_var = tk.StringVar(value="MAGENTA")
+        if not hasattr(self, "_wake_corpus_total_var"):
+            self._wake_corpus_total_var = tk.StringVar(value="200")
+        if not hasattr(self, "_wake_corpus_done_var"):
+            self._wake_corpus_done_var = tk.StringVar(value="0")
+        if not hasattr(self, "_wake_corpus_out_root_var"):
+            self._wake_corpus_out_root_var = tk.StringVar(value=self._wake_corpus_default_root())
+        if not hasattr(self, "_wake_corpus_prefix_var"):
+            self._wake_corpus_prefix_var = tk.StringVar(value=self._wake_corpus_safe_prefix(self._wake_corpus_text_var.get()))
+        self._wake_corpus_preview_var = getattr(self, "_wake_corpus_preview_var", tk.StringVar(value=""))
+
+        tip = ttk.Label(
+            frame,
+            text=(
+                "按唤醒词批量生成 wav 语料；可填写“已生成条数”，从下一条继续生成。\n"
+                "默认输出到 wakeup_count/<语料名>/，可自定义目录。"
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        )
+        tip.pack(anchor="w", pady=(0, 8))
+
+        row0 = ttk.Frame(frame)
+        row0.pack(fill="x", pady=(0, 6))
+        ttk.Label(row0, text="唤醒词:").pack(side="left")
+        ttk.Entry(row0, textvariable=self._wake_corpus_text_var, width=22).pack(side="left", padx=(6, 14))
+        ttk.Label(row0, text="语料目录名:").pack(side="left")
+        ttk.Entry(row0, textvariable=self._wake_corpus_prefix_var, width=20).pack(side="left", padx=(6, 0))
+
+        row1 = ttk.Frame(frame)
+        row1.pack(fill="x", pady=(0, 6))
+        ttk.Label(row1, text="总条数:").pack(side="left")
+        ttk.Entry(row1, textvariable=self._wake_corpus_total_var, width=8).pack(side="left", padx=(6, 14))
+        ttk.Label(row1, text="已生成条数:").pack(side="left")
+        ttk.Entry(row1, textvariable=self._wake_corpus_done_var, width=8).pack(side="left", padx=(6, 0))
+
+        row2 = ttk.Frame(frame)
+        row2.pack(fill="x", pady=(0, 6))
+        ttk.Label(row2, text="输出根目录:").pack(side="left")
+        ttk.Entry(row2, textvariable=self._wake_corpus_out_root_var).pack(side="left", fill="x", expand=True, padx=(6, 6))
+        ttk.Button(row2, text="选择目录", style="Small.TButton", command=self._browse_wake_corpus_output_root).pack(side="left")
+
+        row3 = ttk.Frame(frame)
+        row3.pack(fill="x", pady=(0, 8))
+        ttk.Label(row3, text="最终输出:").pack(side="left")
+        ttk.Label(row3, textvariable=self._wake_corpus_preview_var, style="Muted.TLabel").pack(side="left", padx=(6, 0))
+
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill="x", pady=(0, 8))
+        self._wake_corpus_start_btn = ttk.Button(
+            btn_row, text="开始生成", style="Small.TButton", command=self._start_wake_corpus_generation
+        )
+        self._wake_corpus_start_btn.pack(side="left")
+        ttk.Button(btn_row, text="打开目录", style="Small.TButton", command=self._open_wake_corpus_output_folder).pack(side="left", padx=(8, 0))
+
+        log_lf = ttk.LabelFrame(frame, text="生成日志")
+        log_lf.pack(fill="both", expand=True)
+        text_wrap = ttk.Frame(log_lf)
+        text_wrap.pack(fill="both", expand=True, padx=6, pady=6)
+        self._wake_corpus_log_text = tk.Text(text_wrap, height=14, wrap="word", state="disabled", font=("Consolas", 9))
+        log_vsb = ttk.Scrollbar(text_wrap, orient="vertical", command=self._wake_corpus_log_text.yview)
+        self._wake_corpus_log_text.configure(yscrollcommand=log_vsb.set)
+        log_vsb.pack(side="right", fill="y")
+        self._wake_corpus_log_text.pack(side="left", fill="both", expand=True)
+
+        def _refresh_prefix(*_):
+            auto = self._wake_corpus_safe_prefix(self._wake_corpus_text_var.get())
+            # 唤醒词变化时自动同步目录名：空格->下划线，小写化，无需手动再输入一次。
+            self._wake_corpus_prefix_var.set(auto)
+            self._refresh_wake_corpus_preview()
+
+        self._wake_corpus_text_var.trace_add("write", _refresh_prefix)
+        self._wake_corpus_prefix_var.trace_add("write", lambda *_: self._refresh_wake_corpus_preview())
+        self._wake_corpus_out_root_var.trace_add("write", lambda *_: self._refresh_wake_corpus_preview())
+        self._refresh_wake_corpus_preview()
+
+    def _refresh_wake_corpus_preview(self):
+        root_dir = (getattr(self, "_wake_corpus_out_root_var", tk.StringVar(value="")).get() or "").strip()
+        phrase = (getattr(self, "_wake_corpus_text_var", tk.StringVar(value="")).get() or "").strip()
+        prefix = (getattr(self, "_wake_corpus_prefix_var", tk.StringVar(value="")).get() or "").strip()
+        if not prefix:
+            prefix = self._wake_corpus_safe_prefix(phrase)
+            try:
+                self._wake_corpus_prefix_var.set(prefix)
+            except Exception:
+                pass
+        out_dir = os.path.join(root_dir or ".", prefix)
+        try:
+            self._wake_corpus_preview_var.set(os.path.normpath(out_dir))
+        except Exception:
+            pass
+
+    def _append_wake_corpus_log(self, msg):
+        txt = getattr(self, "_wake_corpus_log_text", None)
+        if txt is None or not txt.winfo_exists():
+            return
+        txt.config(state="normal")
+        txt.insert("end", (msg or "") + "\n")
+        txt.see("end")
+        txt.config(state="disabled")
+
+    def _set_wake_corpus_done_value(self, value):
+        try:
+            v = max(0, int(value))
+        except Exception:
+            return
+        var = getattr(self, "_wake_corpus_done_var", None)
+        if var is not None:
+            try:
+                var.set(str(v))
+            except Exception:
+                pass
+
+    def _browse_wake_corpus_output_root(self):
+        init_dir = (getattr(self, "_wake_corpus_out_root_var", tk.StringVar(value="")).get() or "").strip()
+        if not init_dir:
+            init_dir = self._wake_corpus_default_root()
+        selected = filedialog.askdirectory(title="选择语料输出根目录", initialdir=init_dir)
+        if selected:
+            self._wake_corpus_out_root_var.set(selected)
+
+    def _open_wake_corpus_output_folder(self):
+        out_dir = (getattr(self, "_wake_corpus_preview_var", tk.StringVar(value="")).get() or "").strip()
+        if not out_dir:
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if platform.system() == "Windows":
+                os.startfile(out_dir)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", out_dir])
+            else:
+                subprocess.Popen(["xdg-open", out_dir])
+        except Exception as e:
+            messagebox.showerror("错误", f"打开目录失败: {e}")
+
+    def _find_python_cmd_for_wake_generator(self):
+        """返回可用的 Python 解释器命令（优先 python，其次 py -3）。"""
+        candidates = [["python"], ["py", "-3"], ["py"]]
+        kw = {"capture_output": True, "text": True, "timeout": 8}
+        if platform.system() == "Windows":
+            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for cmd in candidates:
+            try:
+                r = subprocess.run(cmd + ["-c", "import sys;print(sys.version)"], **kw)
+                if r.returncode == 0:
+                    return cmd
+            except Exception:
+                pass
+        return None
+
+    def _resolve_wake_generator_script_path(self):
+        """定位 generate_wake_word.py（开发态兜底，交付态不依赖）。"""
+        base = self._get_runtime_base_dir()
+        cands = [
+            os.path.join(base, "generate_wake_word.py"),
+            os.path.join(os.path.dirname(base), "generate_wake_word.py"),
+        ]
+        for p in cands:
+            if os.path.isfile(p):
+                return p
+        return ""
+
+    def _resolve_wake_generator_command(self, phrase, prefix, remain, start_index, out_dir):
+        """
+        解析语料生成执行命令（仅一个 exe）：
+        - 交付态：AcouTest.exe --wake-corpus-worker ...（无界面子进程，不弹第二个主窗口）
+        - 开发态：python generate_wake_word.py ...
+        返回 (cmd:list|None, err_msg:str)
+        """
+        common_args = [
+            "--text",
+            phrase,
+            "--prefix",
+            prefix,
+            "--count",
+            str(remain),
+            "--start-index",
+            str(start_index),
+            "--out",
+            out_dir,
+        ]
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--wake-corpus-worker"] + common_args, ""
+
+        script_path = self._resolve_wake_generator_script_path()
+        if not os.path.isfile(script_path):
+            return None, f"未找到脚本:\n{script_path}"
+        py_cmd = self._find_python_cmd_for_wake_generator()
+        if not py_cmd:
+            return None, (
+                "未找到可用的 Python 解释器（python / py）。\n"
+                "开发模式下语料生成功能需要本机可调用 Python 环境。"
+            )
+        return py_cmd + [script_path] + common_args, ""
+
+    def _start_wake_corpus_generation(self):
+        phrase = (self._wake_corpus_text_var.get() or "").strip()
+        out_root = (self._wake_corpus_out_root_var.get() or "").strip()
+        prefix = (self._wake_corpus_prefix_var.get() or "").strip()
+        if not phrase:
+            messagebox.showerror("错误", "请填写唤醒词，例如 MAGENTA 或 OK Freebox。")
+            return
+        if not prefix:
+            prefix = self._wake_corpus_safe_prefix(phrase)
+            self._wake_corpus_prefix_var.set(prefix)
+        if not out_root:
+            out_root = self._wake_corpus_default_root()
+            self._wake_corpus_out_root_var.set(out_root)
+        try:
+            total = int((self._wake_corpus_total_var.get() or "200").strip())
+            done = int((self._wake_corpus_done_var.get() or "0").strip())
+        except Exception:
+            messagebox.showerror("错误", "「总条数」和「已生成条数」必须是整数。")
+            return
+        if total <= 0:
+            messagebox.showerror("错误", "「总条数」必须大于 0。")
+            return
+        if done < 0 or done > total:
+            messagebox.showerror("错误", "「已生成条数」必须在 0 到总条数之间。")
+            return
+        remain = total - done
+        if remain == 0:
+            messagebox.showinfo("提示", "已生成条数等于总条数，无需继续生成。")
+            return
+
+        out_dir = os.path.join(out_root, prefix)
+        start_index = done + 1
+        self._wake_corpus_start_btn.config(state="disabled")
+        self._append_wake_corpus_log(
+            f"开始生成: phrase={phrase}, 总条数={total}, 已生成={done}, 本次生成={remain}, 目标目录={os.path.normpath(out_dir)}"
+        )
+        if hasattr(self, "status_var"):
+            self.status_var.set("语料生成中...")
+
+        cmd, cmd_err = self._resolve_wake_generator_command(phrase, prefix, remain, start_index, out_dir)
+        if not cmd:
+            self._wake_corpus_start_btn.config(state="normal")
+            if hasattr(self, "status_var"):
+                self.status_var.set("就绪")
+            messagebox.showerror("错误", cmd_err or "语料生成器不可用。")
+            return
+
+        self._append_wake_corpus_log(f"执行命令: {' '.join(cmd[:2])} ...")
+        threading.Thread(
+            target=self._wake_corpus_generation_worker_subprocess,
+            args=(cmd, out_dir, done, total),
+            daemon=True,
+        ).start()
+
+    def _wake_corpus_generation_worker_subprocess(self, cmd, out_dir, done_base=0, total_target=0):
+        kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "bufsize": 0,
+        }
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        kwargs["env"] = env
+        if platform.system() == "Windows":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        rc = -1
+        done_now = int(done_base or 0)
+        try:
+            proc = subprocess.Popen(cmd, **kwargs)
+            self._wake_corpus_gen_proc = proc
+            stream = proc.stdout
+            if stream is not None:
+                for raw in iter(stream.readline, b""):
+                    msg = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not msg:
+                        continue
+                    self.root.after(0, lambda m=msg: self._append_wake_corpus_log(m))
+                    if "-> " in msg and ".wav" in msg.lower():
+                        done_now += 1
+                        self.root.after(0, lambda n=done_now: self._set_wake_corpus_done_value(n))
+                        self.root.after(
+                            0,
+                            lambda n=done_now, t=total_target: self.status_var.set(
+                                f"语料生成中...（已生成 {n}/{t or '?'}）"
+                            )
+                            if hasattr(self, "status_var")
+                            else None,
+                        )
+            rc = proc.wait()
+        except Exception as e:
+            self.root.after(0, lambda: self._append_wake_corpus_log(f"执行失败: {type(e).__name__}: {e}"))
+            rc = -1
+        finally:
+            self._wake_corpus_gen_proc = None
+
+        final_done = total_target if rc == 0 and total_target > 0 else done_now
+        self._wake_corpus_finish_job(rc, out_dir, "", final_done=final_done)
+
+    def _wake_corpus_finish_job(self, rc, out_dir, err_msg="", final_done=None):
+        def _done():
+            if hasattr(self, "_wake_corpus_start_btn") and self._wake_corpus_start_btn.winfo_exists():
+                self._wake_corpus_start_btn.config(state="normal")
+            if final_done is not None:
+                self._set_wake_corpus_done_value(final_done)
+            if hasattr(self, "status_var"):
+                self.status_var.set("就绪")
+            if rc == 0:
+                self._append_wake_corpus_log("生成完成。")
+                messagebox.showinfo("完成", f"语料生成完成。\n输出目录：{os.path.normpath(out_dir)}")
+            else:
+                self._append_wake_corpus_log(f"生成失败，退出码: {rc}")
+                if err_msg:
+                    self._append_wake_corpus_log(f"失败原因: {err_msg}")
+                messagebox.showerror("错误", "语料生成失败，请查看日志。")
+
+        self.root.after(0, _done)
 
     def setup_system_cmd_tab(self, parent):
         """系统指令（独立子标签页）：整体可滚动，避免被固定界面遮住"""
