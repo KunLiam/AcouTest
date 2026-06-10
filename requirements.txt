@@ -1,0 +1,12 @@
+# 声测大师(AcouTest) — Python 依赖
+# 安装: pip install -r requirements.txt
+
+# 本地播放（可选，失败不影响其它功能）
+pygame
+
+# 语料生成（音频调试 → 语料生成）
+edge-tts
+imageio-ffmpeg
+
+# HTTPS 更新检查（开发/打包均可用）
+certifi

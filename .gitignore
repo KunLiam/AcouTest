@@ -12,6 +12,7 @@ dist/
 release/
 release_notes.txt
 *.spec
+.packager-venv/
 
 # 测试生成数据统一目录（见 output_paths.py）
 output/
@@ -24,5 +25,7 @@ elevoc_ukey/elevoc_log.txt
 .idea/
 Thumbs.db
 Desktop.ini
+.DS_Store
+.venv/
 
 

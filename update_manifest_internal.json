@@ -1,11 +1,10 @@
 {
-  "latest_version": "2.1.3",
-  "publish_date": "2026-06-05",
+  "latest_version": "2.1.4",
+  "publish_date": "2026-06-10",
   "notes": [
-    "新增 magenta 唤醒语料支持；logcat 匹配 `[KS] Keyword recognized: magenta`（Debug 级）。",
-    "新增「语料生成」子页签，支持指定唤醒词、总条数、已生成条数。",
-    "修复语料生成时 ffmpeg 转码闪屏（控制台窗口闪烁）。"
+    "macOS 适配：Packager.sh 打包 .app，修复空白窗、触摸板滚动与本机播放。",
+    "波形 10 通道/dBFS 显示优化；HAL/Logcat 属性支持双击或右键改值；系统指令布局收紧。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.3/AcouTest.v2.1.3.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.4/AcouTest.v2.1.4.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

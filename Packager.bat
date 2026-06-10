@@ -76,6 +76,7 @@ if not exist "dist" mkdir "dist"
 
 set "PI_MODE=--onefile"
 if "!USE_ONEDIR!"=="1" set "PI_MODE=--onedir"
+for /f "delims=" %%A in ('python pack_pyinstaller_excludes.py') do set "PI_EXCLUDE=%%A"
 python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTest.ico" ^
     --add-data "logo;logo" ^
     --hidden-import certifi ^
@@ -88,7 +89,7 @@ python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTes
     --hidden-import asyncio.windows_events ^
     --hidden-import asyncio.windows_utils ^
     --hidden-import aiohttp ^
-    --exclude-module numpy ^
+    !PI_EXCLUDE! ^
     --name "%EXE_NAME%" ^
     main.py
 

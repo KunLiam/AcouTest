@@ -97,6 +97,11 @@
   - 可配置项：SN 读取、写入策略、覆盖确认。
   - 结果输出：写入结果反馈与可追溯日志。
 
+## 最近更新（V2.1.4）
+
+- **macOS**：`Packager.sh` 打包 `.app`；修复空白窗、触摸板滚动、`afplay` 播放（U 盘烧 key 仍仅 Windows）。
+- **体验**：10 通道波形/dBFS；HAL/Logcat 属性双击或右键改值；系统指令间距优化。
+
 ## 最近更新（V1.6）
 
 - **唤醒监测 · Freebox 整轨 Kardome HAL 分段录音（可选）**：语料 ok_freebox 且勾选「Freebox 整轨」时，可勾选「Kardome HAL 分段录音」。**每档顺序**：设系统音量 → Kardome Demo 前台 → AudioPlayer → **再次 Kardome 前台** → **`vendor recording=1`** → 本机整轨 wav（**`recording=1` 之后至停录前勿再切前台**）；**停录**：`recording=0` 后立即 PAUSE AudioPlayer 并停本机唤醒音频，`sleep` 约 2s 后**再将 Kardome Demo 置前台**，然后 `download_files` 与轮询 **`adb pull`**；Android 11+ 上普通 shell 常列不出 `Android/data/.../files`，工具会依次尝试 **`su 0` find**、**`adb root`** 后再枚举；除**新建子目录**外也支持 **`files/` 顶层** 新增的 `.pcm/.raw/.wav` 单文件拉取；本会话 **已 pull 集合**（目录名 + 顶层文件名）避免重复；pull 后若本地音频过小会 **重试 pull**，仍过小则 **不删设备端**；有数据则删除设备端对应子目录或文件；`finally` 将 `download_files` 置 `0`。档间 AudioPlayer 优先 **RESUME**。设备落盘路径非默认时可在 **`feature_config.KARDOME_HAL_REMOTE_FILES_BASE`** 配置。**adb pull 保持 APK/HAL 原始文件内容，不改写采样率或 WAV 头**；`download_files` 边沿后会多等片刻再轮询；**pull 目录前**默认等待子目录内 **keyword_detection_report.txt + 三个 wav** 均存在且各文件 **stat 体积连续多次不变** 再 `adb pull`，pull 后本机再校验四文件齐套，不通过则重试一次且**不删设备端**；仅在 **确认本机已落盘且齐套** 后再 `rm` 设备端。本档 pull 结束后按 **`KARDOME_HAL_AFTER_PULL_ROUND_DELAY_SEC`** 延迟再进入下一音量档（见 `feature_config.py`）。
@@ -284,7 +289,7 @@
 
 ### 1.2 批量测试时的播放方式与连接
 
-1. **唤醒词（本机侧）**：由笔记本通过蓝牙连接蓝牙音箱，并将 **Windows 默认播放设备** 设为该蓝牙音箱；本机播放的 WAV 经系统默认输出从蓝牙音箱出声（程序在 Windows 上使用系统默认设备播放，不单独指定声卡）。
+1. **唤醒词（本机侧）**：由笔记本通过蓝牙连接蓝牙音箱，并将 **系统默认播放设备** 设为该蓝牙音箱；本机播放的 WAV 经系统默认输出从蓝牙音箱出声（Windows 使用 winsound；**macOS 使用 afplay**，走系统默认输出设备，不单独指定声卡）。
 2. **设备端播放**：被测设备安装并运行 **AudioPlayer.apk**（包名 `com.player.demo`），与笔记本按同一条目同步播放；若未安装，点击「**开始测试**」前工具会尝试用 `wakeup_count/AudioPlayer.apk` 自动安装。
 3. **Freebox / Homa 语料**：**Homa** 须在 **`wakeup_count/`** 放置 **`ok_homa_31.apk`**。**ok_freebox** 若设备上**尚未安装** **`com.kardome.audiodemo`**，则需在 `wakeup_count/` 放置 **`ok_freebox_32.apk`**；若设备已带 **com.kardome.audiodemo**（系统预装），则无需该 APK。开始测试时对需要的 APK 会 `install -r` 并尝试 `adb shell monkey` 拉起；主包名可在 **`feature_config.py`** 中配置 `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_FREEBOX` / `WAKEUP_EXTRA_APK_LAUNCH_PACKAGE_OK_HOMA`，留空时若本机 PATH 有 **aapt/aapt2** 会尝试从 APK 解析包名。**ok_freebox** 且设备已安装 **com.kardome.audiodemo** 时：准备结束及每次设备端 **PLAY / REPLAY / 暂停后继续** 前，会先用 **`am start -n`**（`feature_config.KARDOME_AUDIODEMO_MAIN_COMPONENT`，默认 `com.kardome.audiodemo/com.kardome.MainActivity`）将 Kardome Demo 拉到前台，失败再尝试 `monkey`，再启动 AudioPlayer。**勾选 Kardome HAL 分段录音且整轨测试时**：在 AudioPlayer 已启动、**`vendor recording=1` 之前** 会再 `am start` 一次 Kardome（与在 APK 界面内再 `setprop` 一致）；**`recording=1` 之后至本档 `recording=0` 之前** 不再 `am start` 切换前台，避免打断 HAL 录音。
 4. **采集与统计**：设备麦克风同时采集蓝牙音箱播放的唤醒词与设备扬声器播放的 AudioPlayer 音频，据此触发唤醒；工具通过独立 `adb logcat` 进程按当前语料匹配关键字并统计。
@@ -402,7 +407,7 @@
 
 **给客户发版本时，只需打包「dist 目录」里的内容**（或把整个 dist 打成 zip 发给客户）。
 
-运行 **`Packager.bat`** 成功后，`dist` 中会**自动**放入：`AcouTest.v<版本号>.exe`（版本号来自 `feature_config.py` 的 `APP_VERSION`，与发布页、更新清单命名一致）、`logo/`、`audio/`（整目录）、`output/` 及与 `output_paths.py` 一致的子目录与说明、`elevoc_ukey/`（若源码根目录存在）、`wakeup_count/`（若存在）、`启动测试工具.bat`（由 `pack_dist_client_files.py` 生成）。无需再手工拷贝上述资源。
+运行 **`Packager.bat`**（Windows）或 **`Packager.sh`**（macOS）成功后，`dist` 中会**自动**放入：`AcouTest.v<版本号>.exe`（版本号来自 `feature_config.py` 的 `APP_VERSION`，与发布页、更新清单命名一致）、`logo/`、`audio/`（整目录）、`output/` 及与 `output_paths.py` 一致的子目录与说明、`elevoc_ukey/`（若源码根目录存在）、`wakeup_count/`（若存在）、`启动测试工具.bat`（由 `pack_dist_client_files.py` 生成）。无需再手工拷贝上述资源。
 
 - **说明**：脚本使用 `!DIST_EXE!` 等形式，避免复杂文件名在 `if (...)` 块内被 CMD 误解析。**exe 每次都会重新 PyInstaller 生成**（与当前源码、`APP_VERSION` 一致）。打包命令已带 **`--noupx`**（禁用 UPX），避免 onefile 解压 `libcrypto-3.dll` 等 OpenSSL 库时报 *Failed to extract libcrypto-3.dll*。**logo、audio、elevoc_ukey、wakeup_count** 默认用 `robocopy /XO` 增量同步：dist 里已有且**不比源文件旧**的同名文件会跳过拷贝，省时间、少写盘；你在工程里改新了源文件仍会覆盖 dist。若需对资源做一次「不按时间跳过」的全量同步，打包前在命令行先执行 `set PACKAGER_FULL_RESYNC=1` 再运行 `Packager.bat`。
 - **若启动报「Failed to extract …」或解压相关错误**：单文件 exe 会把内容解压到 **系统盘临时目录**（`%TEMP%\_MEI*`）。**最常见是 C 盘 / 临时盘空间不足**，请先清理磁盘。其次：关闭 exe 后删掉 `_MEI` 开头的临时文件夹、杀毒对 exe 目录设排除、勿从网盘内直接运行。**可选**：打包前执行 `set PACKAGER_ONEDIR=1` 再运行 `Packager.bat`，生成 `dist\AcouTest.v<版本>\` 子目录版 exe，对临时盘压力更小；把整个 **dist** 发给客户，`启动测试工具.bat` 会自动识别子目录 exe。
@@ -461,21 +466,60 @@
 
 ## 技术要求
 
-- 操作系统：Windows 7/10/11
-- Python 3.6 或更高版本
-- 依赖库：tkinter, pygame, subprocess, threading
-- ADB工具（Android Debug Bridge）
+- 操作系统：**Windows 7/10/11** 或 **macOS 10.15+**（Intel / Apple Silicon）
+- Python 3.8 或更高版本（macOS 开发运行时使用 `python3`）
+- 依赖库：tkinter（macOS 自带）、pygame（可选，本地播放）、edge-tts（语料生成）
+- ADB 工具（Android Debug Bridge）
+- macOS 额外说明：
+  - 唤醒率测试本机播放使用系统自带的 **afplay**
+  - **U 盘烧 key** 依赖 Windows 版 `soft_encryption.dll`，macOS 上不可用；**sn烧key**（adb 读写 unifykeys）仍可用
+  - 安装 adb：`brew install --cask android-platform-tools`
 
 ## 安装方法
 
-1. 安装Python 3.6或更高版本
+### Windows
+
+1. 安装 Python 3.6 或更高版本
 2. 安装必要的依赖库：
    ```
-   pip install pygame
+   pip install -r requirements.txt
    ```
-3. 确保ADB工具已安装并添加到系统PATH
+3. 确保 ADB 工具已安装并添加到系统 PATH
 4. 下载本工具的源代码
-5. 运行main.py启动工具
+5. 运行 `python main.py` 启动工具
+
+### macOS
+
+1. 安装 [Python 3](https://www.python.org/downloads/)（或使用系统自带的 `python3`）
+2. 安装 Android Platform Tools（adb）：
+   ```bash
+   brew install --cask android-platform-tools
+   ```
+3. 在项目根目录执行（会自动创建虚拟环境并安装依赖）：
+   ```bash
+   ./run_mac.sh
+   ```
+   或手动：
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   python3 main.py
+   ```
+4. 首次运行若提示无法打开，可在「系统设置 → 隐私与安全性」中允许，或对 `run_mac.sh` 执行 `chmod +x ./run_mac.sh`
+
+### macOS 打包
+
+Mac 无法运行 `.bat`，请使用项目根目录的 **`Packager.sh`**（逻辑与 `Packager.bat` 对应）：
+
+```bash
+chmod +x Packager.sh
+./Packager.sh
+```
+
+**macOS 空白窗口说明**：请使用 **`Packager.sh` 自动选择的 Homebrew Python 3.12** 打包（脚本会创建 `.packager-venv` 并打入 Tcl/Tk 9.x）。若用 Apple 自带 Python 3.9 打包，窗口可能只有标题栏、内容区全灰。首次打包若缺少依赖，脚本会尝试 `brew install python@3.12 python-tk@3.12`。
+
+产物在 **`dist/`** 目录：请双击 **`AcouTest.v<版本>.app`**（应用程序）或 **`启动测试工具.command`** 启动；`AcouTest.v<版本>/` 文件夹内的同名文件是程序本体（Finder 可能显示为「文稿」），请勿直接双击。
 
 ## 常见问题
 

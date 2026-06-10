@@ -1,6 +1,6 @@
 import queue
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 import os
 import struct
 import math
@@ -24,6 +24,22 @@ from ctypes import c_int, c_char_p, c_void_p, POINTER, c_char
 import tempfile
 import textwrap
 from typing import Optional
+
+from platform_utils import (
+    configure_macos_ttk_style,
+    elevoc_platform_error,
+    elevoc_supported,
+    find_python_cmd,
+    get_ui_font,
+    load_tk_photoimage,
+    open_folder,
+    open_path,
+    play_local_wav_blocking,
+    popen_local_wav,
+    stop_local_wav_playback,
+    subprocess_no_window_kwargs,
+    terminate_process,
+)
 
 from output_paths import (
     OUTPUT_ROOT,
@@ -764,11 +780,81 @@ class LogcatViewerWindow(tk.Toplevel):
 
 
 class UIComponents:
+    _scroll_regions = []
+    # Tk 9 / macOS 触摸板双指滑动发 TouchpadScroll，不是 MouseWheel（滚轮仍走 MouseWheel）
+    _WHEEL_EVENTS = ("<MouseWheel>", "<TouchpadScroll>")
+    _LINUX_WHEEL_EVENTS = ("<Button-4>", "<Button-5>")
+    _TOUCHPAD_SCROLL_TYPE = "39"  # Tk 9 TouchpadScroll（Python EventType 尚未收录）
+    _TOUCHPAD_THROTTLE = 5        # 与 Tk 内置 Listbox 一致：每 N 次触摸板事件滚动一次
+    _TOUCHPAD_UNIT_DIVISOR = 10   # 将触摸板 deltaY 折算为「行」
+    _TOUCHPAD_MAX_STEP = 1        # 单次最多滚动行数（触摸板）
+
     def __init__(self, parent):
         self.parent = parent
+
+    def _ensure_app_ttk_style(self):
+        """复用主窗口 Style；禁止在子页面里 new Style()（macOS 会把主题切回 aqua 导致空白窗）。"""
+        style = getattr(self, "style", None)
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if style is None:
+            style = ttk.Style(root)
+            self.style = style
+        if root is not None:
+            configure_macos_ttk_style(style, root)
+        return style
+
+    def _wrap_tab_scroll(self, parent):
+        """内容超出时才显示滚动条，避免短页面出现大块空白和多余滚动条。"""
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
+        bg = "#ffffff"
+        try:
+            bg = ttk.Style().lookup("TFrame", "background") or bg
+        except Exception:
+            pass
+        canvas = tk.Canvas(container, highlightthickness=0, borderwidth=0, bg=bg, takefocus=True)
+        vbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        body = ttk.Frame(canvas)
+        body_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _sync_scrollbar(_event=None):
+            canvas.update_idletasks()
+            view_w = max(canvas.winfo_width(), 1)
+            view_h = max(canvas.winfo_height(), 1)
+            natural_h = body.winfo_reqheight()
+            # 内容不足一屏时拉高内层，使 fill=both 的子面板能铺满，避免下方大块空白
+            use_h = max(natural_h, view_h)
+            canvas.itemconfigure(body_id, width=view_w, height=use_h)
+            canvas.configure(scrollregion=(0, 0, view_w, use_h))
+            need = natural_h > view_h + 2
+            if need:
+                if not vbar.winfo_ismapped():
+                    vbar.pack(side="right", fill="y")
+            else:
+                vbar.pack_forget()
+                canvas.yview_moveto(0)
+
+        def _on_canvas_configure(event):
+            _sync_scrollbar()
+
+        body.bind("<Configure>", _sync_scrollbar)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        container._acoutest_scroll_canvas = canvas
+        body._tab_scroll_canvas = canvas
+        body.after_idle(lambda: self._bind_mousewheel_to_canvas(container, canvas))
+        return body
+
+    def _add_scroll_sub_tab(self, notebook, title, setup_fn):
+        tab = ttk.Frame(notebook)
+        notebook.add(tab, text=title)
+        body = self._wrap_tab_scroll(tab)
+        setup_fn(body)
     
     def create_main_ui(self, parent):
         """创建主界面UI - 改进的分类标签页设计"""
+        self._ensure_global_mousewheel()
         # 创建主选项卡控件
         self.main_notebook = ttk.Notebook(parent)
         self.main_notebook.pack(fill="both", expand=True)
@@ -923,23 +1009,19 @@ class UIComponents:
     def setup_keyburn_tab(self, parent):
         """设置烧大象key标签页"""
         nb = ttk.Notebook(parent)
-        nb.pack(fill="both", expand=True, padx=10, pady=10)
+        nb.pack(fill="both", expand=True, padx=6, pady=6)
 
         if is_sub_tab_enabled("烧大象key", "u盘烧key"):
-            ukey_frame = ttk.Frame(nb)
-            nb.add(ukey_frame, text="u盘烧key")
-            self.setup_ukey_burn_tab(ukey_frame)
+            self._add_scroll_sub_tab(nb, "u盘烧key", self.setup_ukey_burn_tab)
 
         if is_sub_tab_enabled("烧大象key", "sn烧key"):
-            sn_frame = ttk.Frame(nb)
-            nb.add(sn_frame, text="sn烧key")
-            self.setup_sn_key_burn_tab(sn_frame)
+            self._add_scroll_sub_tab(nb, "sn烧key", self.setup_sn_key_burn_tab)
 
     def _get_runtime_base_dir(self) -> str:
-        """返回运行时基准目录（支持 PyInstaller onefile）"""
-        if getattr(sys, "frozen", False):
-            return os.path.dirname(sys.executable)
-        return os.path.dirname(os.path.abspath(__file__))
+        """返回运行时基准目录（支持 PyInstaller onefile / macOS .app）"""
+        from platform_utils import get_runtime_base_dir
+
+        return get_runtime_base_dir(os.path.abspath(__file__))
 
     def _apply_window_icon(self, win):
         """给弹窗统一设置与主程序一致的图标（优先 exe 同级资源）。"""
@@ -953,7 +1035,7 @@ class UIComponents:
             for path in png_paths:
                 if path and os.path.exists(path):
                     try:
-                        icon_img = tk.PhotoImage(file=path)
+                        icon_img = load_tk_photoimage(win, path)
                         win.iconphoto(True, icon_img)
                         win._icon_image = icon_img
                         break
@@ -976,29 +1058,435 @@ class UIComponents:
             pass
 
     @staticmethod
-    def _bind_mousewheel_to_canvas(widget, canvas):
-        """为 widget 及其子控件绑定鼠标滚轮，使 canvas 可滚轮滚动（Windows: MouseWheel, Linux: Button-4/5）"""
-        def _on_mousewheel(event):
+    def _bind_vertical_wheel_events(widget, callback):
+        """绑定纵向滚轮/触摸板事件（Win 滚轮 + macOS 触摸板 + Linux Button-4/5）。"""
+        for seq in UIComponents._WHEEL_EVENTS:
             try:
-                if hasattr(event, "delta"):
-                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                elif event.num == 4:
-                    canvas.yview_scroll(-3, "units")
-                elif event.num == 5:
-                    canvas.yview_scroll(3, "units")
+                widget.bind(seq, callback, add="+")
             except Exception:
                 pass
+        for seq in UIComponents._LINUX_WHEEL_EVENTS:
+            try:
+                widget.bind(seq, callback, add="+")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _bind_vertical_wheel_class(root, class_name, callback):
+        for seq in UIComponents._WHEEL_EVENTS + UIComponents._LINUX_WHEEL_EVENTS:
+            try:
+                root.bind_class(class_name, seq, callback, add="+")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _bind_vertical_wheel_all(root, callback):
+        for seq in UIComponents._WHEEL_EVENTS:
+            try:
+                root.bind_all(seq, callback, add="+")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _widget_depth(widget):
+        depth = 0
+        w = widget
+        while w is not None:
+            try:
+                w = w.master
+            except Exception:
+                break
+            if w is None:
+                break
+            depth += 1
+        return depth
+
+    @staticmethod
+    def _unregister_scroll_region(container):
+        UIComponents._scroll_regions = [
+            r for r in UIComponents._scroll_regions
+            if r.get("container") is not container
+        ]
+
+    @staticmethod
+    def _register_scroll_region(container, canvas=None, yview_widget=None):
+        UIComponents._unregister_scroll_region(container)
+        region = {"container": container, "canvas": canvas, "yview": yview_widget}
+        UIComponents._scroll_regions.append(region)
         try:
-            widget.bind("<MouseWheel>", _on_mousewheel)
+            container.bind(
+                "<Destroy>",
+                lambda _e, c=container: UIComponents._unregister_scroll_region(c),
+                add="+",
+            )
         except Exception:
             pass
+        UIComponents._bind_scroll_wheel_tree(region)
         try:
-            widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-            widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+            container.bind(
+                "<Configure>",
+                lambda _e, r=region: container.after_idle(
+                    lambda: UIComponents._bind_scroll_wheel_tree(r)
+                ),
+                add="+",
+            )
         except Exception:
             pass
-        for child in widget.winfo_children():
-            UIComponents._bind_mousewheel_to_canvas(child, canvas)
+
+    @staticmethod
+    def _bind_scroll_wheel_tree(region):
+        """macOS 触摸板滚轮常只发给焦点控件：进入区域时 focus 到 Canvas，并递归绑定滚轮。"""
+        container = region.get("container")
+        canvas = region.get("canvas")
+        if container is None or canvas is None:
+            return
+        try:
+            if not container.winfo_exists() or not canvas.winfo_exists():
+                return
+        except Exception:
+            return
+
+        marker = "_acoutest_wheel_tree_id"
+        region_id = id(region)
+
+        def _on_enter(_event=None):
+            try:
+                root = container.winfo_toplevel()
+                root._acoutest_active_scroll_region = region
+                if platform.system() == "Darwin":
+                    canvas.focus_set()
+            except Exception:
+                pass
+
+        def _on_wheel(event):
+            if event.state & 0x0004:
+                return
+            try:
+                owned = getattr(event.widget, "_acoutest_scroll_canvas", None)
+                if owned is not None and owned is not canvas:
+                    inner = UIComponents._find_scroll_region(event.widget)
+                    if inner and inner is not region:
+                        return
+            except Exception:
+                pass
+            UIComponents._canvas_yview_scroll(canvas, event)
+            return "break"
+
+        def _bind_tree(widget):
+            try:
+                owned = getattr(widget, "_acoutest_scroll_canvas", None)
+                if owned is not None and owned is not canvas:
+                    return
+            except Exception:
+                pass
+            if isinstance(widget, (tk.Text, tk.Listbox)):
+                UIComponents._bind_mousewheel_to_yview(widget)
+                return
+            try:
+                if isinstance(widget, ttk.Treeview):
+                    UIComponents._bind_mousewheel_to_yview(widget)
+                    return
+            except Exception:
+                pass
+            try:
+                if getattr(widget, marker, None) != region_id:
+                    setattr(widget, marker, region_id)
+                    widget.bind("<Enter>", _on_enter, add="+")
+                    UIComponents._bind_vertical_wheel_events(widget, _on_wheel)
+            except Exception:
+                pass
+            try:
+                for child in widget.winfo_children():
+                    _bind_tree(child)
+            except Exception:
+                pass
+
+        _bind_tree(container)
+
+    @staticmethod
+    def _find_scroll_region(widget):
+        matches = []
+        for region in UIComponents._scroll_regions:
+            container = region.get("container")
+            if container is None:
+                continue
+            try:
+                if not container.winfo_exists():
+                    continue
+            except Exception:
+                continue
+            w = widget
+            while w is not None:
+                if w == container:
+                    matches.append(region)
+                    break
+                try:
+                    w = w.master
+                except Exception:
+                    break
+        if not matches:
+            return None
+        return max(matches, key=lambda r: UIComponents._widget_depth(r["container"]))
+
+    @staticmethod
+    def _dispatch_global_mousewheel(event):
+        """全局滚轮分发（bind_all 兜底）：配合 Enter/focus 方案覆盖 macOS 触摸板。"""
+        if event.state & 0x0004:
+            return
+        try:
+            widget = event.widget
+            root = widget.winfo_toplevel()
+        except Exception:
+            return
+
+        region = getattr(root, "_acoutest_active_scroll_region", None)
+        if region:
+            try:
+                ctn = region.get("container")
+                if ctn is None or not ctn.winfo_exists():
+                    region = None
+            except Exception:
+                region = None
+
+        if not region:
+            try:
+                under = root.winfo_containing(event.x_root, event.y_root)
+                if under:
+                    widget = under
+                region = UIComponents._find_scroll_region(widget)
+            except Exception:
+                return
+
+        if not region:
+            return
+
+        container = region["container"]
+        w = widget
+        while w is not None:
+            if isinstance(w, (tk.Text, tk.Listbox)):
+                UIComponents._yview_scroll(w, event)
+                return "break"
+            try:
+                if isinstance(w, ttk.Treeview):
+                    UIComponents._yview_scroll(w, event)
+                    return "break"
+            except Exception:
+                pass
+            if w == container:
+                break
+            try:
+                w = w.master
+            except Exception:
+                break
+
+        canvas = region.get("canvas")
+        if canvas is not None:
+            try:
+                if canvas.winfo_exists():
+                    UIComponents._canvas_yview_scroll(canvas, event)
+                    return "break"
+            except Exception:
+                pass
+
+        yview = region.get("yview")
+        if yview is not None:
+            try:
+                if yview.winfo_exists():
+                    UIComponents._yview_scroll(yview, event)
+                    return "break"
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ensure_global_mousewheel_on(root):
+        if getattr(root, "_acoutest_global_wheel", False):
+            return
+        root._acoutest_global_wheel = True
+
+        def _dispatch(event):
+            return UIComponents._dispatch_global_mousewheel(event)
+
+        def _dispatch_linux(event):
+            return UIComponents._dispatch_global_mousewheel(event)
+
+        UIComponents._bind_vertical_wheel_all(root, _dispatch)
+        for seq in UIComponents._LINUX_WHEEL_EVENTS:
+            try:
+                root.bind_all(seq, _dispatch_linux, add="+")
+            except Exception:
+                pass
+
+        if platform.system() == "Darwin":
+            def _track_motion(event):
+                try:
+                    top = event.widget.winfo_toplevel()
+                    under = top.winfo_containing(event.x_root, event.y_root)
+                    if not under:
+                        return
+                    region = UIComponents._find_scroll_region(under)
+                    if region:
+                        top._acoutest_active_scroll_region = region
+                        canvas_ref = region.get("canvas")
+                        if canvas_ref is not None and canvas_ref.winfo_exists():
+                            canvas_ref.focus_set()
+                except Exception:
+                    pass
+
+            root.bind_all("<Motion>", _track_motion, add="+")
+
+        # ttk 子控件需 bind_class 兜底；macOS 触摸板务必包含 TouchpadScroll
+        for cls in (
+            "TButton", "TLabel", "TEntry", "TFrame", "TLabelframe",
+            "TCheckbutton", "TRadiobutton", "TCombobox", "TNotebook",
+            "Button", "Label", "Entry", "Frame", "Labelframe", "Listbox", "Text", "Canvas",
+        ):
+            UIComponents._bind_vertical_wheel_class(root, cls, _dispatch)
+            for seq in UIComponents._LINUX_WHEEL_EVENTS:
+                try:
+                    root.bind_class(cls, seq, _dispatch_linux, add="+")
+                except Exception:
+                    pass
+
+    def _ensure_global_mousewheel(self):
+        root = getattr(self, "root", None) or getattr(self, "parent", None)
+        if root is not None:
+            UIComponents._ensure_global_mousewheel_on(root)
+
+    @staticmethod
+    def _is_touchpad_scroll_event(event):
+        return str(getattr(event, "type", "")) == UIComponents._TOUCHPAD_SCROLL_TYPE
+
+    @staticmethod
+    def _unpack_touchpad_delta_y(packed_delta):
+        raw = int(packed_delta) & 0xFFFFFFFF
+        delta_y = raw & 0xFFFF
+        if delta_y >= 0x8000:
+            delta_y -= 0x10000
+        return delta_y
+
+    @staticmethod
+    def _touchpad_delta_y(event):
+        delta = getattr(event, "delta", 0)
+        try:
+            widget = event.widget
+            parts = widget.tk.call("tk::PreciseScrollDeltas", delta)
+            if len(parts) > 1:
+                return int(parts[1])
+        except Exception:
+            pass
+        return UIComponents._unpack_touchpad_delta_y(delta)
+
+    @staticmethod
+    def _wheel_event_once(event):
+        """同一滚轮/触摸板事件可能被 widget + bind_class + bind_all 重复处理，此处去重。"""
+        try:
+            widget = event.widget
+            root = widget.winfo_toplevel()
+            key = (event.time, event.serial, event.delta, str(event.type), str(widget))
+            if getattr(root, "_acoutest_wheel_dedupe", None) == key:
+                return False
+            root._acoutest_wheel_dedupe = key
+        except Exception:
+            pass
+        return True
+
+    @staticmethod
+    def _vertical_wheel_units(event):
+        """计算纵向滚动步数（正=向下，负=向上）；0 表示本次不滚动。"""
+        if not UIComponents._wheel_event_once(event):
+            return 0
+
+        num = getattr(event, "num", None)
+        if num == 4:
+            return -2
+        if num == 5:
+            return 2
+
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return 0
+
+        if UIComponents._is_touchpad_scroll_event(event):
+            # event.serial 在 TouchpadScroll 下为 Tk 的 %# 计数器，用于节流
+            if (int(getattr(event, "serial", 0)) % UIComponents._TOUCHPAD_THROTTLE) != 0:
+                return 0
+            delta_y = UIComponents._touchpad_delta_y(event)
+            if delta_y == 0:
+                return 0
+            step = int(round(-delta_y / float(UIComponents._TOUCHPAD_UNIT_DIVISOR)))
+            if step == 0:
+                step = -1 if delta_y > 0 else 1
+            cap = UIComponents._TOUCHPAD_MAX_STEP
+            return max(-cap, min(cap, step))
+
+        if platform.system() == "Darwin":
+            step = int(-delta)
+            if step == 0:
+                step = -1 if delta > 0 else 1
+            return max(-3, min(3, step))
+
+        step = int(-1 * (delta / 120))
+        if step == 0:
+            step = -1 if delta > 0 else 1
+        return step
+
+    @staticmethod
+    def _canvas_yview_scroll(canvas, event):
+        """滚轮/触摸板驱动 Canvas 纵向滚动（Windows / macOS / Linux）。"""
+        try:
+            step = UIComponents._vertical_wheel_units(event)
+            if step:
+                canvas.yview_scroll(step, "units")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _yview_scroll(widget, event):
+        """滚轮/触摸板驱动 Text、Listbox 等带 yview 的控件纵向滚动。"""
+        try:
+            step = UIComponents._vertical_wheel_units(event)
+            if step:
+                widget.yview_scroll(step, "units")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _bind_mousewheel_to_canvas(widget, canvas):
+        """注册可滚动区域，由全局滚轮分发在按钮/标签上也能滚动（尤其 macOS ttk）。"""
+        container = widget
+        while container is not None:
+            try:
+                if getattr(container, "_acoutest_scroll_canvas", None) is canvas:
+                    break
+                container = container.master
+            except Exception:
+                break
+        else:
+            container = widget
+        try:
+            root = container.winfo_toplevel()
+            UIComponents._ensure_global_mousewheel_on(root)
+        except Exception:
+            pass
+        UIComponents._register_scroll_region(container, canvas=canvas)
+
+    @staticmethod
+    def _bind_mousewheel_to_yview(widget):
+        """为 Text / Listbox 等控件绑定滚轮纵向滚动。"""
+        marker_attr = "_acoutest_wheel_yview_id"
+        widget_id = id(widget)
+
+        def _handler(event):
+            UIComponents._yview_scroll(widget, event)
+            return "break"
+
+        try:
+            if getattr(widget, marker_attr, None) == widget_id:
+                return
+            setattr(widget, marker_attr, widget_id)
+            UIComponents._bind_vertical_wheel_events(widget, _handler)
+        except Exception:
+            pass
 
     def _find_elevoc_src_dir(self) -> str:
         """
@@ -1111,6 +1599,9 @@ class UIComponents:
         if getattr(self, "_elevoc_state", None):
             return self._elevoc_state
 
+        if not elevoc_supported():
+            raise RuntimeError(elevoc_platform_error())
+
         workdir = self._prepare_elevoc_workdir()
         src_dir = getattr(self, "_elevoc_src_dir", "")
         dll_path = os.path.join(workdir, "soft_encryption.dll")
@@ -1164,7 +1655,9 @@ class UIComponents:
         ttk.Label(
             header,
             text=(
-                "流程：读取设备 SN → 调用 soft_encryption.dll 生成 license → 写回 unifykeys(elevockey)。\n"
+                ("【macOS/Linux】U 盘烧 key 依赖 Windows 版 soft_encryption.dll，本机无法生成 license；"
+                 "「sn烧key」页仍可通过 adb 读写 unifykeys。\n\n" if not elevoc_supported() else "")
+                + "流程：读取设备 SN → 调用 soft_encryption.dll 生成 license → 写回 unifykeys(elevockey)。\n"
                 "提示：该 DLL 可能不支持中文路径，本工具会自动在临时英文目录运行所需文件。"
             ),
             style="Muted.TLabel",
@@ -1278,7 +1771,7 @@ class UIComponents:
                 messagebox.showerror("错误", str(e))
                 return
             try:
-                os.startfile(p)  # type: ignore[attr-defined]
+                open_folder(p)
             except Exception as e:
                 messagebox.showerror("错误", f"打开目录失败：{type(e).__name__}: {e}")
 
@@ -1301,7 +1794,7 @@ class UIComponents:
                 messagebox.showinfo("打开日志", "未找到 elevoc_log.txt。\n可检查：\n1) " + workdir + "\n2) elevoc_ukey 目录下是否有该文件。")
                 return
             try:
-                os.startfile(p)  # type: ignore[attr-defined]
+                open_path(p)
             except Exception as e:
                 messagebox.showerror("错误", f"打开日志失败：{type(e).__name__}: {e}")
 
@@ -1470,7 +1963,7 @@ class UIComponents:
     def setup_sn_key_burn_tab(self, parent):
         """sn烧key：按 sn烧key.bat 的逻辑集成（写入 unifykeys:elevockey）"""
         nb = ttk.Notebook(parent)
-        nb.pack(fill="both", expand=True, padx=10, pady=10)
+        nb.pack(fill="both", expand=True, padx=6, pady=6)
 
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="烧elevockey")
@@ -1869,115 +2362,79 @@ class UIComponents:
         """设置声学测试标签页"""
         # 创建子标签页
         acoustic_notebook = ttk.Notebook(parent)
-        acoustic_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        acoustic_notebook.pack(fill="both", expand=True, padx=6, pady=6)
 
         if is_sub_tab_enabled("声学测试", "气密性测试"):
-            airtight_frame = ttk.Frame(acoustic_notebook)
-            acoustic_notebook.add(airtight_frame, text="气密性测试")
-            self.setup_airtightness_tab(airtight_frame)
+            self._add_scroll_sub_tab(acoustic_notebook, "气密性测试", self.setup_airtightness_tab)
 
         if is_sub_tab_enabled("声学测试", "震音测试"):
-            jitter_frame = ttk.Frame(acoustic_notebook)
-            acoustic_notebook.add(jitter_frame, text="震音测试")
-            self.setup_jitter_tab(jitter_frame)
+            self._add_scroll_sub_tab(acoustic_notebook, "震音测试", self.setup_jitter_tab)
 
         if is_sub_tab_enabled("声学测试", "扫频测试"):
-            sweep_frame = ttk.Frame(acoustic_notebook)
-            acoustic_notebook.add(sweep_frame, text="扫频测试")
-            self.setup_sweep_tab(sweep_frame)
+            self._add_scroll_sub_tab(acoustic_notebook, "扫频测试", self.setup_sweep_tab)
 
     def setup_hardware_tab(self, parent):
         """设置硬件测试标签页"""
         # 创建子标签页
         hardware_notebook = ttk.Notebook(parent)
-        hardware_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        hardware_notebook.pack(fill="both", expand=True, padx=6, pady=6)
         
         if is_sub_tab_enabled("硬件测试", "麦克风测试"):
-            mic_frame = ttk.Frame(hardware_notebook)
-            hardware_notebook.add(mic_frame, text="麦克风测试")
-            self.setup_mic_tab(mic_frame)
+            self._add_scroll_sub_tab(hardware_notebook, "麦克风测试", self.setup_mic_tab)
 
         if is_sub_tab_enabled("硬件测试", "雷达检查"):
-            radar_frame = ttk.Frame(hardware_notebook)
-            hardware_notebook.add(radar_frame, text="雷达检查")
-            self.setup_radar_tab(radar_frame)
+            self._add_scroll_sub_tab(hardware_notebook, "雷达检查", self.setup_radar_tab)
 
         if is_sub_tab_enabled("硬件测试", "喇叭测试"):
-            speaker_frame = ttk.Frame(hardware_notebook)
-            hardware_notebook.add(speaker_frame, text="喇叭测试")
-            self.setup_speaker_tab(speaker_frame)
+            self._add_scroll_sub_tab(hardware_notebook, "喇叭测试", self.setup_speaker_tab)
 
         if is_sub_tab_enabled("硬件测试", "多声道测试"):
-            multichannel_frame = ttk.Frame(hardware_notebook)
-            hardware_notebook.add(multichannel_frame, text="多声道测试")
-            self.setup_multichannel_tab(multichannel_frame)
+            self._add_scroll_sub_tab(hardware_notebook, "多声道测试", self.setup_multichannel_tab)
 
     def setup_debug_tab(self, parent):
         """设置音频调试标签页"""
         # 创建子标签页
         debug_notebook = ttk.Notebook(parent)
-        debug_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        debug_notebook.pack(fill="both", expand=True, padx=6, pady=6)
         
         if is_sub_tab_enabled("音频调试", "Loopback和Ref测试"):
-            loopback_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(loopback_frame, text="Loopback和Ref测试")
-            self.setup_loopback_tab(loopback_frame)
+            self._add_scroll_sub_tab(debug_notebook, "Loopback和Ref测试", self.setup_loopback_tab)
 
         if is_sub_tab_enabled("音频调试", "HAL录音"):
-            hal_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(hal_frame, text="HAL录音")
-            self.setup_hal_recording_tab(hal_frame)
+            self._add_scroll_sub_tab(debug_notebook, "HAL录音", self.setup_hal_recording_tab)
 
         if is_sub_tab_enabled("音频调试", "Logcat日志"):
-            logcat_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(logcat_frame, text="Logcat日志")
-            self.setup_logcat_tab(logcat_frame)
+            self._add_scroll_sub_tab(debug_notebook, "Logcat日志", self.setup_logcat_tab)
 
         if is_sub_tab_enabled("音频调试", "唤醒监测"):
-            hotword_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(hotword_frame, text="唤醒监测")
-            self.setup_hotword_monitor_tab(hotword_frame)
+            self._add_scroll_sub_tab(debug_notebook, "唤醒监测", self.setup_hotword_monitor_tab)
 
         if is_sub_tab_enabled("音频调试", "语料生成"):
-            corpus_gen_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(corpus_gen_frame, text="语料生成")
-            self.setup_wake_corpus_generator_tab(corpus_gen_frame)
+            self._add_scroll_sub_tab(debug_notebook, "语料生成", self.setup_wake_corpus_generator_tab)
 
         if is_sub_tab_enabled("音频调试", "系统指令"):
-            syscmd_frame = ttk.Frame(debug_notebook)
-            debug_notebook.add(syscmd_frame, text="系统指令")
-            self.setup_system_cmd_tab(syscmd_frame)
+            self._add_scroll_sub_tab(debug_notebook, "系统指令", self.setup_system_cmd_tab)
 
     def setup_common_tab(self, parent):
         """设置常用功能标签页"""
         # 创建子标签页
         common_notebook = ttk.Notebook(parent)
-        common_notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        common_notebook.pack(fill="both", expand=True, padx=6, pady=6)
         
         if is_sub_tab_enabled("常用功能", "遥控器"):
-            remote_frame = ttk.Frame(common_notebook)
-            common_notebook.add(remote_frame, text="遥控器")
-            self.setup_remote_tab(remote_frame)
+            self._add_scroll_sub_tab(common_notebook, "遥控器", self.setup_remote_tab)
 
         if is_sub_tab_enabled("常用功能", "本地播放"):
-            playback_frame = ttk.Frame(common_notebook)
-            common_notebook.add(playback_frame, text="本地播放")
-            self.setup_local_playback_tab(playback_frame)
+            self._add_scroll_sub_tab(common_notebook, "本地播放", self.setup_local_playback_tab)
 
         if is_sub_tab_enabled("常用功能", "截图功能"):
-            screenshot_frame = ttk.Frame(common_notebook)
-            common_notebook.add(screenshot_frame, text="截图功能")
-            self.setup_screenshot_tab(screenshot_frame)
+            self._add_scroll_sub_tab(common_notebook, "截图功能", self.setup_screenshot_tab)
 
         if is_sub_tab_enabled("常用功能", "账号登录"):
-            account_login_frame = ttk.Frame(common_notebook)
-            common_notebook.add(account_login_frame, text="账号登录")
-            self.setup_account_login_tab(account_login_frame)
+            self._add_scroll_sub_tab(common_notebook, "账号登录", self.setup_account_login_tab)
 
         if is_sub_tab_enabled("常用功能", "OpenClaw"):
-            openclaw_frame = ttk.Frame(common_notebook)
-            common_notebook.add(openclaw_frame, text="OpenClaw")
-            self.setup_openclaw_tab(openclaw_frame)
+            self._add_scroll_sub_tab(common_notebook, "OpenClaw", self.setup_openclaw_tab)
 
     def setup_openclaw_tab(self, parent):
         """OpenClaw 对接状态与日志面板。"""
@@ -2233,6 +2690,7 @@ class UIComponents:
         # 设备参数设置 - 使用网格布局
         grid_frame = ttk.Frame(settings_frame)
         grid_frame.pack(fill="x", padx=10, pady=10)
+        grid_frame.columnconfigure(1, weight=1)
         
         # 录制设备ID
         ttk.Label(grid_frame, text="录制设备ID:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
@@ -2272,20 +2730,21 @@ class UIComponents:
         ttk.Label(grid_frame, text="保存路径:").grid(row=4, column=0, sticky="e", padx=5, pady=5)
         self.loopback_save_path_var = tk.StringVar(value=get_output_dir(DIR_LOOPBACK))
         path_frame = ttk.Frame(grid_frame)
-        path_frame.grid(row=4, column=1, columnspan=3, sticky="w", padx=5, pady=5)
+        path_frame.grid(row=4, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
+        path_frame.columnconfigure(0, weight=1)
         
-        path_entry = ttk.Entry(path_frame, textvariable=self.loopback_save_path_var, width=25)
-        path_entry.pack(side="left", padx=2)
+        path_entry = ttk.Entry(path_frame, textvariable=self.loopback_save_path_var)
+        path_entry.grid(row=0, column=0, sticky="ew", padx=2)
         
         browse_button = ttk.Button(path_frame, text="浏览...", 
                                    command=self.browse_loopback_save_path, width=8, 
                                    style="Small.TButton")
-        browse_button.pack(side="left", padx=2)
+        browse_button.grid(row=0, column=1, padx=2)
         
         folder_button = ttk.Button(path_frame, text="打开文件夹", 
                                    command=self.open_loopback_folder, width=10,
                                    style="Small.TButton")
-        folder_button.pack(side="left", padx=2)
+        folder_button.grid(row=0, column=2, padx=2)
         
         # 音频文件部分
         audio_frame = ttk.LabelFrame(frame, text="音频文件")
@@ -2313,9 +2772,10 @@ class UIComponents:
 
         default_path_frame = ttk.Frame(audio_frame)
         default_path_frame.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).pack(side="left", padx=(10, 6))
+        default_path_frame.columnconfigure(1, weight=1)
+        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).grid(row=0, column=0, sticky="w", padx=(10, 6))
         default_path_entry = ttk.Entry(default_path_frame, textvariable=self.default_loopback_audio_path_var)
-        default_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        default_path_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         default_path_entry.config(state="readonly")
 
         def _open_loopback_default_folder():
@@ -2329,11 +2789,12 @@ class UIComponents:
             command=_open_loopback_default_folder,
             width=8,
         )
-        open_default_folder_btn.pack(side="left", padx=(0, 10))
+        open_default_folder_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
         
         # 自定义音频选项
         custom_frame = ttk.Frame(audio_frame)
         custom_frame.pack(fill="x", padx=10, pady=5)
+        custom_frame.columnconfigure(1, weight=1)
         
         custom_radio = ttk.Radiobutton(
             custom_frame, 
@@ -2341,13 +2802,13 @@ class UIComponents:
             variable=self.audio_source_var,
             value="custom"
         )
-        custom_radio.pack(side="left", padx=10)
+        custom_radio.grid(row=0, column=0, sticky="w", padx=10)
         
         self.file_path_var = tk.StringVar(value="未选择文件")
-        ttk.Label(custom_frame, textvariable=self.file_path_var, width=20).pack(side="left", padx=5, fill="x", expand=True)
+        ttk.Label(custom_frame, textvariable=self.file_path_var).grid(row=0, column=1, sticky="ew", padx=5)
         
         browse_button = ttk.Button(custom_frame, text="浏览...", command=self.browse_audio_file, width=8)
-        browse_button.pack(side="right", padx=10)
+        browse_button.grid(row=0, column=2, sticky="e", padx=10)
         
         # 按钮区域
         button_frame = ttk.Frame(frame)
@@ -2513,8 +2974,8 @@ class UIComponents:
             print("初始化 mic_info_var")
         
         # 创建主框架（使用 ttk：更现代、字体/间距可统一、按钮默认灰色）
-        main_frame = ttk.Frame(parent, padding=(16, 16))
-        main_frame.pack(fill="both", expand=True)
+        main_frame = ttk.Frame(parent, padding=(12, 10))
+        main_frame.pack(fill="x", anchor="n")
         
         # 标题
         title_label = ttk.Label(main_frame, text="麦克风测试", style="Header.TLabel")
@@ -3241,7 +3702,7 @@ class UIComponents:
         canvas.bind("<B1-Motion>", motion)
         canvas.bind("<ButtonRelease-1>", release)
         canvas.bind("<Double-Button-1>", dbl)
-        canvas.bind("<MouseWheel>", wheel)
+        UIComponents._bind_vertical_wheel_events(canvas, wheel)
 
     def _show_waveform_frequency_analysis_dialog(
         self, parent, wav_path, t0, t1, channels, sample_rate, used_full_file, base_name
@@ -3574,9 +4035,13 @@ class UIComponents:
             playback_samples = downmixed
             playback_base_path = ""  # 下混后需生成临时播放文件
             playback_note = f"（播放兼容：原始 {channels} 声道已下混为 2 声道，波形显示保持原始通道）"
+        # 按通道数自适应窗口与画布高度，避免 8ch/10ch 等被底部裁切
+        canvas_h = min(720, max(360, 40 + channels * 50))
+        win_h = min(920, max(560, canvas_h + 200))
         win = tk.Toplevel(getattr(self, "root", None) or getattr(self, "parent", None) or self)
         win.title(f"{title} - {os.path.basename(file_path)}")
-        win.geometry("1040x620")
+        win.geometry(f"1040x{win_h}")
+        win.minsize(820, min(win_h, 480))
         # 与主窗口一致的图标（AcouTest logo）
         try:
             base_dir = self._get_runtime_base_dir()
@@ -3588,7 +4053,7 @@ class UIComponents:
             for path in png_paths:
                 if path and os.path.exists(path):
                     try:
-                        icon_img = tk.PhotoImage(file=path)
+                        icon_img = load_tk_photoimage(win, path)
                         win.iconphoto(True, icon_img)
                         win._icon_image = icon_img
                         break
@@ -3659,10 +4124,14 @@ class UIComponents:
         wave_row.pack(side="top", fill="both", expand=True)
         hscroll = ttk.Scrollbar(canvas_wrap, orient="horizontal")
         hscroll.pack(side="bottom", fill="x")
-        canvas = tk.Canvas(wave_row, bg="#101010", height=520, highlightthickness=0, xscrollcommand=hscroll.set)
+        vscroll = ttk.Scrollbar(wave_row, orient="vertical")
+        vscroll.pack(side="right", fill="y")
+        canvas = tk.Canvas(wave_row, bg="#101010", height=canvas_h, highlightthickness=0, xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
         canvas.pack(side="left", fill="both", expand=True)
-        db_canvas = tk.Canvas(wave_row, bg="#0f1510", width=74, height=520, highlightthickness=1, highlightbackground="#2a2a2a")
+        db_panel_w = 88 if channels >= 8 else 74
+        db_canvas = tk.Canvas(wave_row, bg="#0f1510", width=db_panel_w, height=canvas_h, highlightthickness=1, highlightbackground="#2a2a2a", yscrollcommand=vscroll.set)
         db_canvas.pack(side="right", fill="y")
+        vscroll.config(command=lambda *args: (canvas.yview(*args), db_canvas.yview(*args)))
         
         state = {
             "zoom": None,
@@ -3779,7 +4248,13 @@ class UIComponents:
             top = 10
             ruler_h = 24
             tracks_top = top + ruler_h
-            track_h = max(60, (height - ruler_h) // channels)
+            available_h = max(80, height - ruler_h)
+            min_track_h = 30 if channels >= 8 else 36
+            max_track_h = 80
+            track_h = max(min_track_h, min(max_track_h, available_h // max(1, channels)))
+            total_tracks_h = track_h * channels
+            if total_tracks_h > available_h:
+                track_h = max(24, available_h // max(1, channels))
             if state["zoom"] is None:
                 fit_zoom = view_w / float(max(1, points))
                 state["zoom"] = max(0.01, min(64.0, fit_zoom))
@@ -3850,9 +4325,19 @@ class UIComponents:
                 t += time_step
             wc["text"](left + 4, top + ruler_h - 2, anchor="sw", fill="#8a8a8a", text="HMS", font=("Consolas", 8))
             
-            # dBFS 背景刻度固定：无论振幅缩放/增益如何，背景网格和右侧标尺都保持不变
-            db_levels = [-3, -6, -9, -12, -15]
-            min_label_gap = 10
+            # dBFS 背景刻度：随单轨高度自适应档位数，避免 8ch/10ch 时右侧文字叠在一起
+            def _choose_db_levels(track_height):
+                th = max(1, int(track_height))
+                if th >= 72:
+                    return [-3, -6, -9, -12, -15]
+                if th >= 54:
+                    return [-6, -12, -18]
+                if th >= 40:
+                    return [-6, -12]
+                if th >= 30:
+                    return [-6]
+                return []
+
             for ch in range(channels):
                 y0 = tracks_top + ch * track_h
                 y1 = y0 + track_h - 8
@@ -3864,8 +4349,8 @@ class UIComponents:
                 wc["line"](left + draw_l, center, left + draw_r, center, fill="#2a2a2a")
                 wc["text"](left + 4, y0 + 10, anchor="w", fill="#A0A0A0", text=f"CH{ch + 1}", font=("Consolas", 9))
                 
-                # dB 网格线（固定背景）
-                for db in db_levels:
+                # dB 网格线（与右侧标尺档位一致）
+                for db in _choose_db_levels(track_h):
                     ratio = 10 ** (db / 20.0)
                     y_up = center - base_amp * ratio
                     y_dn = center + base_amp * ratio
@@ -3904,6 +4389,12 @@ class UIComponents:
                     wc["line"](x, y_min, x, y_max, fill=color)
             
             canvas.config(scrollregion=(0, 0, left + draw_points + 20, tracks_top + track_h * channels + 10))
+            db_canvas.config(scrollregion=(0, 0, max(60, db_canvas.winfo_width()), tracks_top + track_h * channels + 10))
+            content_h = tracks_top + track_h * channels + 10
+            if content_h <= max(1, canvas.winfo_height()) + 2:
+                vscroll.pack_forget()
+            elif not vscroll.winfo_ismapped():
+                vscroll.pack(side="right", fill="y")
             
             # 固定右侧 dB 面板（不随横向滚动变化）
             db_w = max(60, db_canvas.winfo_width())
@@ -3916,27 +4407,29 @@ class UIComponents:
                 center = (y0 + y1) / 2.0
                 base_amp = max(8.0, (y1 - y0) * 0.45)
                 dc["rect"](0, y0, db_w, y1, outline="#2a2a2a")
-                last_label_y = None
-                # 右侧 dB 文本随振幅缩放/增益联动：
-                # 与 Adobe 观感一致：
-                # - 振幅放大(amp_scale 增大) -> 标签应变得更“负”
-                # - 振幅缩小(amp_scale 减小) -> 标签应变得更“正”
-                # 因此使用负号偏移；增益正值也按同方向处理（更“负”）
+                db_levels = _choose_db_levels(track_h)
+                min_label_gap = max(11, int(track_h * 0.38))
+                label_font = ("Consolas", 7 if track_h < 36 else 8)
+                placed_label_ys = []
+                # 右侧 dB 文本随振幅缩放/增益联动（与 Adobe 一致：放大更“负”）
                 db_offset = -(float(state.get("amp_db", 0.0)) + float(state.get("gain_db", 0.0)))
+
+                def _place_db_label(y_pos, text):
+                    yy = max(y0 + 3, min(y1 - 3, y_pos))
+                    if any(abs(yy - py) < min_label_gap for py in placed_label_ys):
+                        return
+                    placed_label_ys.append(yy)
+                    dc["text"](db_w - 4, yy, anchor="e", fill="#8fcf8f", text=text, font=label_font)
+
                 for db in db_levels:
                     ratio = 10 ** (db / 20.0)
                     y_up = center - base_amp * ratio
                     y_dn = center + base_amp * ratio
                     dc["line"](0, y_up, db_w, y_up, fill="#244224")
                     dc["line"](0, y_dn, db_w, y_dn, fill="#244224")
-                    if last_label_y is None or abs(y_up - last_label_y) >= min_label_gap:
-                        # 不再强行截断到 0 dB，避免大振幅时右侧刻度全部显示为 0
-                        shown_db = db + db_offset
-                        db_text = f"{shown_db:+.0f}"
-                        dc["text"](db_w - 4, y_up, anchor="e", fill="#8fcf8f", text=db_text, font=("Consolas", 8))
-                        dc["text"](db_w - 4, y_dn, anchor="e", fill="#8fcf8f", text=db_text, font=("Consolas", 8))
-                        last_label_y = y_up
-                dc["text"](db_w - 4, center, anchor="e", fill="#8fcf8f", text="-inf", font=("Consolas", 8))
+                    shown_db = db + db_offset
+                    _place_db_label(y_up, f"{shown_db:+.0f}")
+                _place_db_label(center, "-inf")
                 dc["text"](4, y0 + 2, anchor="w", fill="#6ea56e", text=f"CH{ch+1}", font=("Consolas", 8))
             
             # 新层画完再替换旧层，避免闪烁
@@ -4418,8 +4911,22 @@ class UIComponents:
         canvas.bind("<ButtonPress-1>", on_drag_start)
         canvas.bind("<B1-Motion>", on_drag_move)
         canvas.bind("<Control-MouseWheel>", on_ctrl_wheel)
+        try:
+            canvas.bind("<Control-TouchpadScroll>", on_ctrl_wheel)
+        except Exception:
+            pass
         canvas.bind("<Control-Button-4>", lambda e: on_ctrl_wheel(direction=1))
         canvas.bind("<Control-Button-5>", lambda e: on_ctrl_wheel(direction=-1))
+
+        def on_wheel_vertical(event):
+            if event.state & 0x0004:
+                return
+            self._canvas_yview_scroll(canvas, event)
+            self._canvas_yview_scroll(db_canvas, event)
+            return "break"
+
+        for _w in (canvas, db_canvas):
+            UIComponents._bind_vertical_wheel_events(_w, on_wheel_vertical)
         canvas.bind("<ButtonRelease-1>", on_click_release)
         canvas.bind("<Button-3>", clear_selection)
         canvas.bind("<Configure>", lambda _e: request_render(1))
@@ -5169,10 +5676,13 @@ class UIComponents:
         props_canvas.create_window((0, 0), window=self.props_container, anchor="nw")
         
         # 配置Canvas滚动区域
-        self.props_container.bind("<Configure>", lambda e: props_canvas.configure(scrollregion=props_canvas.bbox("all")))
-        # 录音属性列表支持鼠标滚轮滚动
-        self._bind_mousewheel_to_canvas(props_canvas, props_canvas)
-        self._bind_mousewheel_to_canvas(self.props_container, props_canvas)
+        props_frame._acoutest_scroll_canvas = props_canvas
+
+        def _on_props_container_configure(e=None):
+            props_canvas.configure(scrollregion=props_canvas.bbox("all"))
+
+        self.props_container.bind("<Configure>", _on_props_container_configure)
+        self._bind_mousewheel_to_canvas(props_frame, props_canvas)
 
         # 添加默认属性
         self.hal_props = {}  # 存储属性和对应的变量
@@ -5637,10 +6147,8 @@ class UIComponents:
             canvas.itemconfig(canvas_frame_id, width=e.width)
         frame.bind("<Configure>", _on_frame_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        scroll_container._acoutest_scroll_canvas = canvas
+        self._bind_mousewheel_to_canvas(scroll_container, canvas)
         
         desc = ttk.Label(
             frame,
@@ -5929,7 +6437,7 @@ class UIComponents:
         """设置喇叭测试选项卡"""
         # 创建框架
         frame = ttk.Frame(parent)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        frame.pack(fill="x", anchor="n", padx=8, pady=8)
         
         # 创建标题
         ttk.Label(frame, text="喇叭测试", style="Header.TLabel").pack(pady=10)
@@ -5963,18 +6471,19 @@ class UIComponents:
         # 自定义音频选择框架
         custom_audio_frame = ttk.Frame(audio_frame)
         custom_audio_frame.pack(fill="x", padx=10, pady=5)
+        custom_audio_frame.columnconfigure(1, weight=1)
         
-        ttk.Label(custom_audio_frame, text="音频文件:").pack(side="left", padx=5)
+        ttk.Label(custom_audio_frame, text="音频文件:").grid(row=0, column=0, sticky="w", padx=5)
         
         self.speaker_audio_var = tk.StringVar()
-        self.speaker_audio_entry = ttk.Entry(custom_audio_frame, textvariable=self.speaker_audio_var, width=40)
-        self.speaker_audio_entry.pack(side="left", padx=5)
+        self.speaker_audio_entry = ttk.Entry(custom_audio_frame, textvariable=self.speaker_audio_var)
+        self.speaker_audio_entry.grid(row=0, column=1, sticky="ew", padx=5)
         self.speaker_audio_entry.config(state="disabled")
         
         self.speaker_browse_button = ttk.Button(custom_audio_frame, text="浏览", 
                                          command=self.browse_speaker_audio,
                                          style="Small.TButton")
-        self.speaker_browse_button.pack(side="left", padx=5)
+        self.speaker_browse_button.grid(row=0, column=2, sticky="e", padx=5)
         self.speaker_browse_button.config(state="disabled")
         
         # 默认音频文件状态
@@ -5994,10 +6503,11 @@ class UIComponents:
 
         default_path_frame = ttk.Frame(audio_frame)
         default_path_frame.pack(fill="x", padx=10, pady=(0, 5))
+        default_path_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).pack(side="left", padx=(5, 5))
+        ttk.Label(default_path_frame, text="默认音频路径:", font=("Arial", 9)).grid(row=0, column=0, sticky="w", padx=(5, 5))
         default_path_entry = ttk.Entry(default_path_frame, textvariable=self.default_speaker_audio_path_var)
-        default_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        default_path_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
         default_path_entry.config(state="readonly")
 
         # 打开所在文件夹
@@ -6008,7 +6518,7 @@ class UIComponents:
             command=lambda p=default_audio_path: self.open_containing_folder(p),
             width=8,
         )
-        open_default_folder_btn.pack(side="left", padx=(0, 5))
+        open_default_folder_btn.grid(row=0, column=2, sticky="e", padx=(0, 5))
         
         # 添加默认音频文件按钮
         self.add_default_audio_button = ttk.Button(default_status_frame, text="添加默认音频文件", 
@@ -6096,20 +6606,29 @@ class UIComponents:
         
         # 创建Canvas和Scrollbar，调整Scrollbar样式使其更明显
         self.logcat_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
-        # 注意：部分 Tk/ttk 版本的 ttk.Scrollbar 不支持 width 这个 widget option（打包时会报 unknown option "-width"）
-        # 这里不传 width，尽量通过 style/padding 控制视觉宽度。
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.logcat_canvas.yview)
-        
-        # 配置滚动条样式使其更加明显
-        self.style = ttk.Style()
-        self.style.configure(
-            "Logcat.Vertical.TScrollbar",
-            background="#bbbbbb",
-            troughcolor="#dddddd",
-            arrowcolor="#555555",
-            bordercolor="#999999",
-        )
-        scrollbar.configure(style="Logcat.Vertical.TScrollbar")
+        # macOS 系统 Tcl/Tk 下 ttk.Scrollbar 可能不支持事后 configure(style=...) 或自定义配色
+        style = self._ensure_app_ttk_style()
+        scrollbar_style = "Logcat.Vertical.TScrollbar"
+        try:
+            style.configure(
+                scrollbar_style,
+                background="#bbbbbb",
+                troughcolor="#dddddd",
+                arrowcolor="#555555",
+                bordercolor="#999999",
+            )
+            scrollbar = ttk.Scrollbar(
+                canvas_frame,
+                orient="vertical",
+                command=self.logcat_canvas.yview,
+                style=scrollbar_style,
+            )
+        except tk.TclError:
+            scrollbar = ttk.Scrollbar(
+                canvas_frame,
+                orient="vertical",
+                command=self.logcat_canvas.yview,
+            )
         
         self.logcat_canvas.configure(yscrollcommand=scrollbar.set)
         
@@ -6121,8 +6640,13 @@ class UIComponents:
         self.logcat_canvas_window = self.logcat_canvas.create_window((0, 0), window=self.logcat_props_frame, anchor="nw")
         
         # 配置Canvas滚动
-        self.logcat_props_frame.bind("<Configure>", lambda e: self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all")))
+        def _on_logcat_props_configure(e=None):
+            self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
+
+        canvas_frame._acoutest_scroll_canvas = self.logcat_canvas
+        self.logcat_props_frame.bind("<Configure>", _on_logcat_props_configure)
         self.logcat_canvas.bind("<Configure>", self.resize_logcat_props_frame)
+        self._bind_mousewheel_to_canvas(canvas_frame, self.logcat_canvas)
         
         # 定义默认属性列表 - 使用您提供的属性和值
         self.logcat_props = [
@@ -6359,7 +6883,7 @@ class UIComponents:
             "• 可选「Kardome HAL 分段录音」：每音量档用 vendor.media.audiohal.kardome.recording / download_files 控制设备侧录音，"
             "并在每档播完后 adb pull 到 output/wakeup_kardome_hal/ 下按 session 与音效、音量分子目录保存。\n"
             "界面「全程合计」= 整轨条数 × 音量档数 × 音效轮数（例如 150×6 档×1 轮音效=900），表示整轮测试若全部播完时的累计条数，不是「只播一遍 wav」的条数。\n"
-            "整轨时本机用 winsound 播 wav，进度条按文件头里的时长做「已播/总长」估算（与设备端进度无关）。\n\n"
+            "整轨时本机播放 wav（Windows: winsound；macOS: afplay；Linux: aplay），进度条按文件头里的时长做「已播/总长」估算（与设备端进度无关）。\n\n"
             "设备端需 wakeup_count/AudioPlayer.apk；Freebox/Homa 另需对应语料 APK，开始测试时会自动安装并拉起。\n"
             "音量按 0–25 区间逐档测试；可填音效模式（留空则仅按音量）。",
         )
@@ -7466,29 +7990,10 @@ class UIComponents:
             pass
 
     def _hotword_stop_local_wakeup_playback(self):
-        """停止/暂停时打断本机 wav（整轨异步 winsound 或 aplay 子进程）。"""
-        if platform.system() == "Windows":
-            try:
-                import winsound
-
-                winsound.PlaySound(None, winsound.SND_PURGE)
-            except Exception:
-                pass
+        """停止/暂停时打断本机 wav（Windows winsound / macOS afplay / Linux aplay）。"""
         proc = getattr(self, "_wakeup100_aplay_proc", None)
-        if proc is not None:
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=1.5)
-                    except Exception:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            self._wakeup100_aplay_proc = None
+        stop_local_wav_playback(proc)
+        self._wakeup100_aplay_proc = None
 
     def _hotword_clear_single_progress_ui(self):
         """停止/播完一轮本机 wav 后隐藏进度并取消定时刷新。"""
@@ -7566,9 +8071,8 @@ class UIComponents:
     def setup_hotword_monitor_tab(self, parent):
         """唤醒监测：按当前「唤醒语料库」匹配 logcat 关键字，统计唤醒次数，支持重置"""
         try:
-            _hw_style = ttk.Style()
-            # 唤醒监测页统一用小号按钮，避免与上方「开始监测」等视觉不一致
-            _hw_style.configure("Hotword.TButton", padding=(3, 1))
+            hw_style = self._ensure_app_ttk_style()
+            hw_style.configure("Hotword.TButton", padding=(3, 1))
         except Exception:
             pass
         frame = ttk.Frame(parent, padding=(8, 6))
@@ -9353,27 +9857,14 @@ class UIComponents:
                                 else:
                                     winsound.PlaySound(path, winsound.SND_FILENAME)
                             else:
-                                import subprocess as _sp
-
                                 if single_fb:
-                                    proc = _sp.Popen(
-                                        ["aplay", "-q", play_path],
-                                        stdout=_sp.DEVNULL,
-                                        stderr=_sp.DEVNULL,
-                                    )
+                                    proc = popen_local_wav(play_path)
                                     self._wakeup100_aplay_proc = proc
                                     while proc.poll() is None and not stop():
                                         time.sleep(0.12)
                                     single_fb_interrupted = bool(stop()) and (proc.poll() is None)
                                     if proc.poll() is None:
-                                        proc.terminate()
-                                        try:
-                                            proc.wait(timeout=1.5)
-                                        except Exception:
-                                            try:
-                                                proc.kill()
-                                            except Exception:
-                                                pass
+                                        stop_local_wav_playback(proc)
                                     self._wakeup100_aplay_proc = None
                                     if single_fb_interrupted:
                                         try:
@@ -9389,7 +9880,7 @@ class UIComponents:
                                     else:
                                         self._wakeup100_single_local_offset_sec = 0.0
                                 else:
-                                    _sp.run(["aplay", "-q", path], timeout=7200, capture_output=True)
+                                    play_local_wav_blocking(path, timeout=7200)
                         except Exception:
                             pass
                         finally:
@@ -9718,12 +10209,7 @@ class UIComponents:
         except Exception:
             return
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":
-                subprocess.run(["open", save_dir], check=False)
-            else:
-                subprocess.run(["xdg-open", save_dir], check=False)
+            open_folder(save_dir)
         except Exception:
             pass
 
@@ -10475,29 +10961,13 @@ class UIComponents:
         except Exception:
             pass
         try:
-            if platform.system() == "Windows":
-                os.startfile(out_dir)
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", out_dir])
-            else:
-                subprocess.Popen(["xdg-open", out_dir])
+            open_folder(out_dir)
         except Exception as e:
             messagebox.showerror("错误", f"打开目录失败: {e}")
 
     def _find_python_cmd_for_wake_generator(self):
-        """返回可用的 Python 解释器命令（优先 python，其次 py -3）。"""
-        candidates = [["python"], ["py", "-3"], ["py"]]
-        kw = {"capture_output": True, "text": True, "timeout": 8}
-        if platform.system() == "Windows":
-            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        for cmd in candidates:
-            try:
-                r = subprocess.run(cmd + ["-c", "import sys;print(sys.version)"], **kw)
-                if r.returncode == 0:
-                    return cmd
-            except Exception:
-                pass
-        return None
+        """返回可用的 Python 解释器命令（macOS/Linux 优先 python3）。"""
+        return find_python_cmd()
 
     def _resolve_wake_generator_script_path(self):
         """定位 generate_wake_word.py（开发态兜底，交付态不依赖）。"""
@@ -10663,44 +11133,22 @@ class UIComponents:
         self.root.after(0, _done)
 
     def setup_system_cmd_tab(self, parent):
-        """系统指令（独立子标签页）：整体可滚动，避免被固定界面遮住"""
-        # 外层：Canvas + 垂直滚动条，使整个系统指令界面可滚动
-        container = ttk.Frame(parent)
-        container.pack(fill="both", expand=True)
-        self._syscmd_main_canvas = tk.Canvas(container, highlightthickness=0)
-        syscmd_main_vsb = ttk.Scrollbar(container, orient="vertical", command=self._syscmd_main_canvas.yview)
-        inner = ttk.Frame(self._syscmd_main_canvas, padding=10)
-        inner.bind("<Configure>", lambda e: self._syscmd_main_canvas.configure(scrollregion=self._syscmd_main_canvas.bbox("all")))
-        self._syscmd_main_canvas_window = self._syscmd_main_canvas.create_window((0, 0), window=inner, anchor="nw")
-        self._syscmd_main_canvas.configure(yscrollcommand=syscmd_main_vsb.set)
-
-        def _on_syscmd_canvas_configure(event):
-            self._syscmd_main_canvas.itemconfig(self._syscmd_main_canvas_window, width=event.width)
-
-        self._syscmd_main_canvas.bind("<Configure>", _on_syscmd_canvas_configure)
-        syscmd_main_vsb.pack(side="right", fill="y")
-        self._syscmd_main_canvas.pack(side="left", fill="both", expand=True)
-        # 鼠标在系统指令面板上时滚轮可滚动
-        def _on_mousewheel(event):
-            self._syscmd_main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        self._syscmd_main_canvas.bind("<MouseWheel>", _on_mousewheel)
-        # Linux 使用 Button-4/5
-        self._syscmd_main_canvas.bind("<Button-4>", lambda e: self._syscmd_main_canvas.yview_scroll(-3, "units"))
-        self._syscmd_main_canvas.bind("<Button-5>", lambda e: self._syscmd_main_canvas.yview_scroll(3, "units"))
-        self._setup_system_cmd_panel(inner)
-        # 内层及所有子控件也绑定滚轮，鼠标在面板任意位置滚轮即可滚动
-        self._bind_mousewheel_to_canvas(inner, self._syscmd_main_canvas)
+        """系统指令子标签页（纵向滚动由 _add_scroll_sub_tab 统一处理）。"""
+        self._setup_system_cmd_panel(parent)
 
     def _setup_system_cmd_panel(self, parent):
-        """系统指令面板内容（预设指令 + 自定义指令），置于可滚动容器内"""
+        """系统指令面板：预设指令 + 自定义指令。"""
+        style = self._ensure_app_ttk_style()
+        style.configure("SysCmd.TButton", font=(get_ui_font(), 9), padding=(10, 2))
+
         lf = ttk.LabelFrame(parent, text="系统指令")
-        lf.pack(fill="x", padx=5, pady=5)
+        lf.pack(fill="x", anchor="n", padx=8, pady=6)
 
         tip = ttk.Label(lf, text="点击按钮获取设备信息（弹窗支持 Ctrl+F 搜索/刷新/保存）", style="Muted.TLabel")
-        tip.pack(anchor="w", padx=8, pady=(6, 6))
+        tip.pack(anchor="w", padx=8, pady=(4, 3))
 
         btns = ttk.Frame(lf)
-        btns.pack(fill="x", padx=8, pady=(0, 8))
+        btns.pack(fill="x", padx=8, pady=(0, 4))
 
         # 预设指令；cmd 为 None 表示打开设备解锁弹窗，否则为 adb/shell 指令
         commands = [
@@ -10716,35 +11164,32 @@ class UIComponents:
             ("Bootloader 解锁 + root/remount", None),
         ]
 
-        for i, (label, cmd) in enumerate(commands):
-            r, c = divmod(i, 1)
+        for label, cmd in commands:
             if cmd is None:
-                b = ttk.Button(btns, text=label, style="Small.TButton", command=self.open_device_unlock_window)
+                b = ttk.Button(btns, text=label, style="SysCmd.TButton", command=self.open_device_unlock_window)
             else:
                 direct_run = cmd in ("reboot update", "reboot")
                 b = ttk.Button(
                     btns,
                     text=label,
-                    style="Small.TButton",
+                    style="SysCmd.TButton",
                     command=(
                         (lambda _cmd=cmd: self._syscmd_run_one(_cmd))
                         if direct_run
                         else (lambda _label=label, _cmd=cmd: self.open_system_cmd_window(_label, _cmd))
                     ),
                 )
-            b.grid(row=r, column=c, sticky="ew", pady=4)
-            btns.grid_columnconfigure(c, weight=1)
+            b.pack(fill="x", pady=1)
 
-        # 自定义指令：放在预设指令与设备解锁之间，添加后立即可见
         custom_lf = ttk.LabelFrame(lf, text="自定义指令（可新增/删除）")
-        custom_lf.pack(fill="x", padx=8, pady=(0, 8))
+        custom_lf.pack(fill="x", padx=8, pady=(0, 6))
 
         if not hasattr(self, "_syscmd_custom_list") or self._syscmd_custom_list is None:
             self._syscmd_custom_list = []
 
         self._syscmd_custom_var = getattr(self, "_syscmd_custom_var", tk.StringVar())
         row1 = ttk.Frame(custom_lf)
-        row1.pack(fill="x", padx=8, pady=(6, 4))
+        row1.pack(fill="x", padx=8, pady=(4, 3))
         ttk.Label(row1, text="指令:").pack(side="left")
         entry = ttk.Entry(row1, textvariable=self._syscmd_custom_var)
         entry.pack(side="left", fill="x", expand=True, padx=(6, 12))
@@ -10755,9 +11200,8 @@ class UIComponents:
         if not hasattr(self, "_syscmd_custom_buttons"):
             self._syscmd_custom_buttons = []
         btns_lf = ttk.LabelFrame(custom_lf, text="已添加的指令（点击按钮直接运行）")
-        btns_lf.pack(fill="x", padx=8, pady=(4, 4))
-        # 固定高度 + 垂直滚动条，内层 Frame 放按钮
-        self._syscmd_canvas = tk.Canvas(btns_lf, highlightthickness=0)
+        btns_lf.pack(fill="x", padx=8, pady=(3, 3))
+        self._syscmd_canvas = tk.Canvas(btns_lf, highlightthickness=0, height=72)
         syscmd_btn_scroll = ttk.Scrollbar(btns_lf, orient="vertical", command=self._syscmd_canvas.yview)
         self._syscmd_custom_btns_frame = ttk.Frame(self._syscmd_canvas)
         self._syscmd_custom_btns_frame.bind(
@@ -10771,9 +11215,10 @@ class UIComponents:
             self._syscmd_canvas.itemconfig(self._syscmd_canvas_window, width=event.width)
 
         self._syscmd_canvas.bind("<Configure>", _on_canvas_configure)
+        btns_lf._acoutest_scroll_canvas = self._syscmd_canvas
         syscmd_btn_scroll.pack(side="right", fill="y")
         self._syscmd_canvas.pack(side="left", fill="both", expand=True, padx=4, pady=4)
-        self._syscmd_canvas.configure(height=88)
+        self._bind_mousewheel_to_canvas(btns_lf, self._syscmd_canvas)
         self._syscmd_empty_lbl = ttk.Label(self._syscmd_custom_btns_frame, text="（添加后此处会显示指令按钮）", style="Muted.TLabel")
         self._syscmd_empty_lbl.pack(anchor="w")
         for cmd in self._syscmd_custom_list:
@@ -10786,11 +11231,12 @@ class UIComponents:
         list_lf.pack(fill="x", padx=8, pady=(4, 4))
         list_inner = ttk.Frame(list_lf)
         list_inner.pack(fill="x", padx=4, pady=4)
-        self._syscmd_listbox = tk.Listbox(list_inner, height=4, font=("Consolas", 9), selectmode="single")
+        self._syscmd_listbox = tk.Listbox(list_inner, height=5, font=("Consolas", 9), selectmode="single")
         syscmd_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self._syscmd_listbox.yview)
         self._syscmd_listbox.configure(yscrollcommand=syscmd_scroll.set)
         syscmd_scroll.pack(side="right", fill="y")
         self._syscmd_listbox.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel_to_yview(self._syscmd_listbox)
         for cmd in self._syscmd_custom_list:
             self._syscmd_listbox.insert(tk.END, cmd)
 
@@ -10810,7 +11256,7 @@ class UIComponents:
             style="Small.TButton",
             command=lambda _c=cmd: self._syscmd_run_one(_c),
         )
-        btn.pack(side="top", fill="x", padx=2, pady=2)
+        btn.pack(side="top", fill="x", padx=2, pady=1)
         if not hasattr(self, "_syscmd_custom_buttons"):
             self._syscmd_custom_buttons = []
         self._syscmd_custom_buttons.append(btn)
@@ -10959,7 +11405,7 @@ class UIComponents:
             ]:
                 if path and os.path.exists(path):
                     try:
-                        icon_img = tk.PhotoImage(file=path)
+                        icon_img = load_tk_photoimage(win, path)
                         win.iconphoto(True, icon_img)
                         win._icon_image = icon_img
                         break
@@ -11158,7 +11604,7 @@ class UIComponents:
             ]:
                 if path and os.path.exists(path):
                     try:
-                        icon_img = tk.PhotoImage(file=path)
+                        icon_img = load_tk_photoimage(win, path)
                         win.iconphoto(True, icon_img)
                         win._icon_image = icon_img
                         break
@@ -11393,6 +11839,59 @@ class UIComponents:
         btn_save.config(command=_save)
         btn_stop.config(state="disabled")
 
+    def _prop_value_parent_window(self):
+        return getattr(self, "root", None) or getattr(self, "parent", None)
+
+    def _edit_prop_value_interactive(self, prop_name, current_value, on_apply):
+        """弹窗修改属性值；on_apply(new_value) 负责写回 UI 与内部状态。"""
+        parent = self._prop_value_parent_window()
+        new_value = simpledialog.askstring(
+            "修改属性值",
+            f"属性: {prop_name}\n请输入新值:",
+            initialvalue=str(current_value),
+            parent=parent,
+        )
+        if new_value is None:
+            return
+        new_value = new_value.strip()
+        if not new_value:
+            messagebox.showwarning("警告", "属性值不能为空", parent=parent)
+            return
+        on_apply(new_value)
+
+    def _bind_prop_value_edit(self, widget, prop_name, get_value, set_value, status_callback=None):
+        """双击或右键「修改属性值」编辑属性值（单击仍仅切换勾选）。"""
+
+        def _apply_edit():
+            self._edit_prop_value_interactive(
+                prop_name,
+                get_value(),
+                lambda v: (
+                    set_value(v),
+                    status_callback(v) if status_callback else None,
+                ),
+            )
+
+        def _on_double_click(_event=None):
+            _apply_edit()
+            return "break"
+
+        def _on_context_menu(event):
+            menu = tk.Menu(widget, tearoff=0)
+            menu.add_command(label="修改属性值", command=_apply_edit)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    menu.grab_release()
+                except Exception:
+                    pass
+            return "break"
+
+        widget.bind("<Double-Button-1>", _on_double_click)
+        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            widget.bind(seq, _on_context_menu)
+
     def clean_logcat_delete_buttons(self):
         """清理Logcat属性列表中所有删除按钮"""
         try:
@@ -11412,31 +11911,40 @@ class UIComponents:
     
     def add_prop_to_list(self, prop_name, prop_value="1"):
         """将属性添加到列表显示"""
-        # 创建属性框架
         prop_frame = ttk.Frame(self.logcat_props_frame)
         prop_frame.pack(fill="x", padx=2, pady=1)
-        
-        # 复选框
+
         var = tk.BooleanVar(value=True)
         check = ttk.Checkbutton(prop_frame, variable=var, text="")
         check.pack(side="left", padx=(0, 2))
-        
-        # 属性名标签 - 使用更小的字体，显示为"属性名 属性值"
+
         prop_label = ttk.Label(prop_frame, text=f"{prop_name} {prop_value}", font=("Arial", 9))
         prop_label.pack(side="left", padx=(0, 2), fill="x", expand=True)
-        
-        # 保存属性信息
-        self.logcat_props_vars.append({
+
+        prop_record = {
             "name": prop_name,
             "var": var,
             "value": prop_value,
-            "frame": prop_frame
-        })
-        
-        # 更新Canvas滚动区域
+            "frame": prop_frame,
+            "label": prop_label,
+        }
+        self.logcat_props_vars.append(prop_record)
+
+        def _set_logcat_value(new_value):
+            prop_record["value"] = new_value
+            prop_label.config(text=f"{prop_name} {new_value}")
+
+        self._bind_prop_value_edit(
+            prop_label,
+            prop_name,
+            lambda: prop_record["value"],
+            _set_logcat_value,
+            lambda v: self.update_logcat_status(f"已更新属性: {prop_name}={v}"),
+        )
+
         self.logcat_props_frame.update_idletasks()
         self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
-    
+
     def add_logcat_prop(self):
         """添加日志属性"""
         prop_text = self.logcat_prop_var.get().strip()
@@ -11754,7 +12262,7 @@ class UIComponents:
         ttk.Label(
             quick_frame,
             text="点击按钮后会在设备上启动对应应用（前提：ADB已连接；部分应用需已安装）。",
-            style="Muted.TLabel" if "Muted.TLabel" in ttk.Style().theme_names() else "TLabel",
+            style="Muted.TLabel" if "Muted.TLabel" in self._ensure_app_ttk_style().theme_names() else "TLabel",
         ).pack(anchor="w", padx=10, pady=(6, 4))
 
         quick_canvas_wrap = ttk.Frame(quick_frame)
@@ -11785,30 +12293,8 @@ class UIComponents:
 
         quick_content.bind("<Configure>", _quick_on_content_configure, add=True)
         quick_canvas.bind("<Configure>", _quick_on_canvas_configure, add=True)
-
-        # 鼠标滚轮滚动（仅在鼠标位于该区域时生效）
-        def _quick_on_mousewheel(e):
-            try:
-                # Windows: e.delta 通常为 120 的倍数
-                quick_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            except Exception:
-                pass
-            return "break"
-
-        def _bind_wheel(_e=None):
-            try:
-                quick_canvas.bind_all("<MouseWheel>", _quick_on_mousewheel, add=True)
-            except Exception:
-                pass
-
-        def _unbind_wheel(_e=None):
-            try:
-                quick_canvas.unbind_all("<MouseWheel>")
-            except Exception:
-                pass
-
-        quick_canvas.bind("<Enter>", _bind_wheel, add=True)
-        quick_canvas.bind("<Leave>", _unbind_wheel, add=True)
+        quick_canvas_wrap._acoutest_scroll_canvas = quick_canvas
+        self._bind_mousewheel_to_canvas(quick_canvas_wrap, quick_canvas)
 
         apps_grid = ttk.Frame(quick_content)
         apps_grid.pack(fill="x", pady=(0, 6))
@@ -12100,13 +12586,8 @@ class UIComponents:
         self.tty_result_text.insert("1.0", "正在检查TTY设备...\n")
         
         try:
-            # 直接构建adb命令，避免递归调用
-            device_id = handler.device_var.get() if hasattr(handler, 'device_var') else ""
-            if device_id:
-                cmd = f"adb -s {device_id} shell ls -la /dev/tty*"
-            else:
-                cmd = "adb shell ls -la /dev/tty*"
-            
+            # 须在设备端展开通配符；macOS 本地 shell 会先展开 /dev/tty*（变成本机蓝牙串口等），导致误报
+            cmd = handler.get_adb_command("shell ls -la '/dev/tty*'")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -12410,12 +12891,7 @@ class UIComponents:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.hal_status_var.set(f"打开文件夹出错: {str(e)}")
             self.update_info_text(f"打开文件夹出错: {str(e)}")
@@ -12483,9 +12959,10 @@ class UIComponents:
 
         path_frame = ttk.Frame(frame)
         path_frame.pack(fill="x", pady=5)
-        ttk.Label(path_frame, text="保存路径:").pack(side="left")
+        path_frame.columnconfigure(1, weight=1)
+        ttk.Label(path_frame, text="保存路径:").grid(row=0, column=0, sticky="w")
         self.airtight_save_path_var = tk.StringVar(value=get_output_dir(DIR_AIRTIGHTNESS))
-        ttk.Entry(path_frame, textvariable=self.airtight_save_path_var, width=52).pack(side="left", padx=(8, 0), fill="x", expand=True)
+        ttk.Entry(path_frame, textvariable=self.airtight_save_path_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill="x", pady=8)
@@ -12525,7 +13002,7 @@ class UIComponents:
         )
         self.view_airtight_open_button.pack(side="left", padx=5)
         self.view_airtight_compare_button = ttk.Button(
-            btn_row1,
+            btn_row2,
             text="对比波形",
             width=9,
             style="Small.TButton",
@@ -12534,7 +13011,7 @@ class UIComponents:
         )
         self.view_airtight_compare_button.pack(side="left", padx=5)
         ttk.Button(
-            btn_row1, text="打开文件夹", width=9, style="Small.TButton", command=self.open_airtight_folder
+            btn_row2, text="打开文件夹", width=9, style="Small.TButton", command=self.open_airtight_folder
         ).pack(side="left", padx=5)
 
         status_frame = ttk.Frame(frame)
@@ -12556,29 +13033,31 @@ class UIComponents:
         manual_box.pack(fill="x", pady=(0, 5), before=status_frame)
         manual_row1 = ttk.Frame(manual_box)
         manual_row1.pack(fill="x", padx=8, pady=(6, 4))
-        ttk.Label(manual_row1, text="堵mic文件:").pack(side="left")
+        manual_row1.columnconfigure(1, weight=1)
+        ttk.Label(manual_row1, text="堵mic文件:").grid(row=0, column=0, sticky="w")
         self.airtight_du_manual_path_var = tk.StringVar(value="")
-        ttk.Entry(manual_row1, textvariable=self.airtight_du_manual_path_var, width=58).pack(side="left", padx=(6, 6), fill="x", expand=True)
+        ttk.Entry(manual_row1, textvariable=self.airtight_du_manual_path_var).grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Button(
             manual_row1,
             text="浏览",
             width=6,
             style="Small.TButton",
             command=lambda: self.browse_airtight_compare_file("du_mic"),
-        ).pack(side="left")
+        ).grid(row=0, column=2, sticky="e")
 
         manual_row2 = ttk.Frame(manual_box)
         manual_row2.pack(fill="x", padx=8, pady=(0, 6))
-        ttk.Label(manual_row2, text="不堵mic文件:").pack(side="left")
+        manual_row2.columnconfigure(1, weight=1)
+        ttk.Label(manual_row2, text="不堵mic文件:").grid(row=0, column=0, sticky="w")
         self.airtight_open_manual_path_var = tk.StringVar(value="")
-        ttk.Entry(manual_row2, textvariable=self.airtight_open_manual_path_var, width=58).pack(side="left", padx=(6, 6), fill="x", expand=True)
+        ttk.Entry(manual_row2, textvariable=self.airtight_open_manual_path_var).grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Button(
             manual_row2,
             text="浏览",
             width=6,
             style="Small.TButton",
             command=lambda: self.browse_airtight_compare_file("open_mic"),
-        ).pack(side="left")
+        ).grid(row=0, column=2, sticky="e")
 
         self._airtight_test_running = False
         self._airtight_stop_requested = False
@@ -12635,12 +13114,7 @@ class UIComponents:
         save_dir = self.airtight_save_path_var.get().strip() or get_output_dir(DIR_AIRTIGHTNESS)
         os.makedirs(save_dir, exist_ok=True)
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":
-                subprocess.run(["open", save_dir])
-            else:
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.airtight_status_var.set(f"打开文件夹失败: {e}")
             messagebox.showerror("错误", f"打开文件夹失败:\n{e}")
@@ -14546,12 +15020,7 @@ class UIComponents:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.loopback_status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
@@ -14658,12 +15127,7 @@ class UIComponents:
                 except Exception as mkdir_e:
                     messagebox.showerror("错误", f"目录不存在且无法创建：\n{folder_path}\n\n{mkdir_e}")
                     return
-            if platform.system() == "Windows":
-                os.startfile(folder_path)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", folder_path])
-            else:  # Linux
-                subprocess.run(["xdg-open", folder_path])
+            open_path(folder_path)
         except Exception as e:
             self.status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
@@ -14886,79 +15350,34 @@ class UIComponents:
 
         if prop_name in self.hal_props and hasattr(self.hal_props[prop_name], 'frame'):
             return  # 属性已存在
-        
-        # 创建属性行
+
         prop_frame = ttk.Frame(self.props_container)
         prop_frame.pack(fill="x", pady=1)
-        
-        # 创建复选框
+
         var = tk.BooleanVar(value=True)
-        var.frame = prop_frame  # 保存对应的frame引用
-        var.value = prop_value  # 保存属性值
+        var.frame = prop_frame
+        var.value = prop_value
         self.hal_props[prop_name] = var
-        
-        # 显示格式: [√] prop_name prop_value (中间是空格而不是等号)
-        cb = ttk.Checkbutton(prop_frame, text=f"{prop_name} {prop_value}", variable=var, style="Small.TCheckbutton")
-        cb.pack(side="left", padx=2, fill="x", expand=True)
 
+        cb = ttk.Checkbutton(prop_frame, variable=var, text="", style="Small.TCheckbutton")
+        cb.pack(side="left", padx=(2, 0))
 
-    def add_logcat_prop(self):
-        """添加日志属性"""
-        prop_text = self.logcat_prop_var.get().strip()
-        if not prop_text:
-            messagebox.showerror("错误", "请输入属性名称和值，格式为: 属性名 值")
-            return
-        
-        # 分割属性名和值
-        parts = prop_text.split()
-        if len(parts) < 2:
-            messagebox.showerror("错误", "格式错误，请输入属性名和值，例如: vendor.media.audiohal.log 1")
-            return
-        
-        prop_name = parts[0]
-        prop_value = parts[1]
-        
-        # 检查是否已存在
-        for prop in self.logcat_props_vars:
-            if prop["name"] == prop_name:
-                messagebox.showerror("错误", f"属性 {prop_name} 已存在")
-                return
-        
-        # 添加到列表
-        self.add_prop_to_list(prop_name, prop_value)
-        
-        # 清空输入框
-        self.logcat_prop_var.set("")
-        
-        self.update_logcat_status(f"已添加属性: {prop_name}={prop_value}")
-
-    def add_prop_to_list(self, prop_name, prop_value="1"):
-        """将属性添加到列表显示"""
-        # 创建属性框架
-        prop_frame = ttk.Frame(self.logcat_props_frame)
-        prop_frame.pack(fill="x", padx=2, pady=1)
-        
-        # 复选框
-        var = tk.BooleanVar(value=True)
-        check = ttk.Checkbutton(prop_frame, variable=var, text="")
-        check.pack(side="left", padx=1)
-        
-        # 属性名标签 - 使用更小的字体，显示为"属性名 属性值"
         prop_label = ttk.Label(prop_frame, text=f"{prop_name} {prop_value}", font=("Arial", 9))
         prop_label.pack(side="left", padx=2, fill="x", expand=True)
-        
-        # 保存属性信息
-        self.logcat_props_vars.append({
-            "name": prop_name,
-            "var": var,
-            "value": prop_value,
-            "frame": prop_frame
-        })
-        
-        # 更新Canvas滚动区域
-        self.logcat_props_frame.update_idletasks()
-        self.logcat_canvas.configure(scrollregion=self.logcat_canvas.bbox("all"))
-    
+        var.label = prop_label
+
+        def _set_hal_value(new_value):
+            var.value = new_value
+            prop_label.config(text=f"{prop_name} {new_value}")
+
+        self._bind_prop_value_edit(
+            prop_label,
+            prop_name,
+            lambda: var.value,
+            _set_hal_value,
+            lambda v: self.hal_status_var.set(f"已更新属性: {prop_name} {v}"),
+        )
+
     def update_logcat_status(self, message):
         """更新日志状态信息"""
         self.logcat_status_text.config(state="normal")
@@ -15050,12 +15469,7 @@ class UIComponents:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.screenshot_status_var.set(f"打开文件夹出错: {str(e)}")
             self.update_screenshot_info(f"打开文件夹出错: {str(e)}")
@@ -15580,12 +15994,7 @@ class UIComponents:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.sweep_status_var.set(f"打开文件夹出错: {str(e)}")
             self.update_sweep_info(f"打开文件夹出错: {str(e)}")

@@ -33,8 +33,9 @@ import tempfile
 from pathlib import Path
 
 import edge_tts
-import imageio_ffmpeg
 from edge_tts.exceptions import NoAudioReceived
+
+from platform_utils import subprocess_no_window_kwargs
 
 # Phrase as spoken (capitalization helps TTS articulate clearly).
 DEFAULT_TEXT = "OK Freebox"
@@ -101,7 +102,23 @@ async def move_wav_to_output(src: Path, dst: Path) -> None:
 
 
 def _ffmpeg() -> str:
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    """优先系统 ffmpeg（macOS 打包瘦身）；否则使用 imageio_ffmpeg 内置二进制。"""
+    if platform.system() == "Darwin":
+        found = shutil.which("ffmpeg")
+        if found:
+            return found
+        for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as e:
+        raise RuntimeError(
+            "未找到 ffmpeg。macOS 请先安装：brew install ffmpeg\n"
+            "Windows 打包版已内置 ffmpeg；开发环境可：pip install imageio-ffmpeg"
+        ) from e
 
 
 def mp3_bytes_to_wav(mp3_path: Path, wav_path: Path) -> None:
@@ -125,12 +142,7 @@ def mp3_bytes_to_wav(mp3_path: Path, wav_path: Path) -> None:
         "encoding": "utf-8",
         "errors": "replace",
     }
-    if platform.system() == "Windows":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
-        kwargs["startupinfo"] = startupinfo
+    kwargs.update(subprocess_no_window_kwargs())
     r = subprocess.run(cmd, **kwargs)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {r.stderr or r.stdout}")

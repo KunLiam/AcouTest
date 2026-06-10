@@ -3,7 +3,7 @@
 功能开关配置：控制哪些大类/子类在界面上显示。
 
 使用方式：
-- 发布给客户前：将不需要给客户的大类或子功能改为 False，然后执行 Packager.bat 打包。
+- 发布给客户前：将不需要给客户的大类或子功能改为 False，然后执行 **Packager.bat**（Windows）或 **Packager.sh**（macOS）打包。
 - 自己使用时：将需要的项设为 True，或直接使用“全部开启”的配置。
 
 True = 显示该功能
@@ -11,7 +11,7 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 
 # AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
 AUDIOPLAYER_APK_VERSION = "1.0.1"

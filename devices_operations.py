@@ -1,31 +1,38 @@
 import subprocess
 import threading
 import time
+import os
 import platform
 import tkinter as tk
 from tkinter import ttk, messagebox
+
+from platform_utils import resolve_adb_executable, quote_shell_arg
 
 class DeviceOperations:
     def __init__(self, parent):
         self.parent = parent
         self._adb_devices_poll_lock = False
 
+    def _adb_bin(self):
+        return resolve_adb_executable()
+
     def _run_adb_devices(self):
         """执行 adb devices（Windows 下无控制台闪窗）。"""
+        adb = self._adb_bin()
         if platform.system() == "Windows":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0
             create_no_window = 0x08000000
             return subprocess.run(
-                ["adb", "devices"],
+                [adb, "devices"],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 creationflags=create_no_window,
                 startupinfo=startupinfo,
             )
-        return subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+        return subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=10)
 
     @staticmethod
     def _parse_adb_devices_stdout(stdout):
@@ -85,8 +92,12 @@ class DeviceOperations:
             devices, online_devices = self._parse_adb_devices_stdout(result.stdout)
             self._apply_parsed_device_list(devices, online_devices)
         except Exception as e:
-            self._clear_devices_ui(f"刷新出错: {str(e)}")
-            print(f"刷新设备时出错: {str(e)}")
+            err = str(e)
+            if isinstance(e, FileNotFoundError) or ("not found" in err.lower() and "adb" in err.lower()):
+                self._clear_devices_ui("未找到 adb，请安装或设置 ACOUSTEST_ADB")
+            else:
+                self._clear_devices_ui(f"刷新出错: {err}")
+            print(f"刷新设备时出错: {err}")
 
     def refresh_devices_async(self):
         """后台执行 adb devices，在主线程更新 UI；用于定时轮询，避免阻塞界面。"""
@@ -140,7 +151,7 @@ class DeviceOperations:
         if selected_device:
             # 检查选择的设备是否在线
             try:
-                result = subprocess.run(['adb', 'devices'], capture_output=True, text=True, timeout=5)
+                result = subprocess.run([self._adb_bin(), "devices"], capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
                     lines = result.stdout.strip().split('\n')[1:]
                     device_online = False
@@ -181,6 +192,7 @@ class DeviceOperations:
     
     def get_adb_command(self, cmd):
         """获取完整的ADB命令"""
+        adb = quote_shell_arg(self._adb_bin())
         # adb root 后轮询可能把 selected_device 置空，但下拉框仍有序列号；无 -s 时多设备/离线易错
         dev = (getattr(self, "selected_device", None) or "").strip()
         if not dev and hasattr(self, "device_var"):
@@ -189,9 +201,9 @@ class DeviceOperations:
             except Exception:
                 dev = ""
         if dev:
-            full_cmd = f"adb -s {dev} {cmd}"
+            full_cmd = f"{adb} -s {dev} {cmd}"
         else:
-            full_cmd = f"adb {cmd}"
+            full_cmd = f"{adb} {cmd}"
         # 仅在 OpenClaw 触发上下文中记录 ADB 命令，避免污染普通手工操作日志
         try:
             if getattr(self, "_openclaw_action_context", "") and hasattr(self, "log_openclaw_adb"):
@@ -255,7 +267,7 @@ class DeviceOperations:
             # 实时检查设备在线状态
             try:
                 print("执行 adb devices 命令检查设备状态...")
-                result = subprocess.run(['adb', 'devices'], capture_output=True, text=True, timeout=10)
+                result = subprocess.run([self._adb_bin(), "devices"], capture_output=True, text=True, timeout=10)
                 print(f"adb devices 返回码: {result.returncode}")
                 print(f"adb devices 输出:\n{result.stdout}")
                 
@@ -372,7 +384,7 @@ class DeviceOperations:
             
             try:
                 # 执行ADB连接命令
-                cmd = f"adb connect {address}"
+                cmd = f"{quote_shell_arg(self._adb_bin())} connect {address}"
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                 
                 if "connected" in result.stdout.lower() or "already connected" in result.stdout.lower():
@@ -444,16 +456,21 @@ class DeviceOperations:
     def check_adb_environment(self):
         """检查ADB环境"""
         try:
-            # 检查ADB是否在PATH中
-            result = subprocess.run("where adb" if platform.system() == "Windows" else "which adb", 
-                                  shell=True, capture_output=True, text=True)
-            if result.returncode == 0:
-                adb_path = result.stdout.strip()
+            adb_path = self._adb_bin()
+            if adb_path != "adb" and os.path.isfile(adb_path):
                 print(f"ADB路径: {adb_path}")
                 return True
-            else:
-                print("ADB不在系统PATH中")
-                return False
+            result = subprocess.run(
+                "where adb" if platform.system() == "Windows" else "which adb",
+                shell=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print(f"ADB路径: {result.stdout.strip()}")
+                return True
+            print("ADB不在系统PATH中（可设置环境变量 ACOUSTEST_ADB 指向 adb）")
+            return False
         except Exception as e:
             print(f"检查ADB环境出错: {str(e)}")
             return False

@@ -12,6 +12,7 @@ import re
 import struct
 
 from optional_deps import try_import_pygame
+from platform_utils import open_folder
 from output_paths import (
     OUTPUT_ROOT,
     get_output_dir,
@@ -415,12 +416,7 @@ class TestOperations:
                     # 自动打开录音文件所在文件夹（用户要求：录制完成后自动打开）
                     try:
                         save_dir = os.path.dirname(os.path.abspath(local_file))
-                        if platform.system() == "Windows":
-                            os.startfile(save_dir)
-                        elif platform.system() == "Darwin":
-                            subprocess.run(["open", save_dir])
-                        else:
-                            subprocess.run(["xdg-open", save_dir])
+                        open_folder(save_dir)
                     except Exception as e:
                         print(f"自动打开文件夹失败: {e}")
                     
@@ -874,12 +870,7 @@ class TestOperations:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             error_msg = f"打开文件夹出错: {str(e)}"
             if hasattr(self, 'screenshot_status_var'):
@@ -1272,12 +1263,7 @@ class TestOperations:
             os.makedirs(save_dir, exist_ok=True)
         
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.sweep_status_var.set(f"打开文件夹出错: {str(e)}")
             self.update_sweep_info(f"打开文件夹出错: {str(e)}")
@@ -1800,12 +1786,7 @@ class TestOperations:
                 # 询问是否打开保存目录
                 if messagebox.askyesno("拉取完成", f"成功拉取 {success_count} 个录音文件到:\n{save_dir}\n\n是否打开保存目录？"):
                     # 打开保存目录
-                    if platform.system() == "Windows":
-                        os.startfile(save_dir)
-                    elif platform.system() == "Darwin":  # macOS
-                        subprocess.run(["open", save_dir])
-                    else:  # Linux
-                        subprocess.run(["xdg-open", save_dir])
+                    open_folder(save_dir)
             else:
                 self.hal_status_var.set("未成功拉取任何文件")
         
@@ -2420,12 +2401,7 @@ class TestOperations:
                 # 询问是否打开保存目录
                 if messagebox.askyesno("拉取完成", f"成功拉取 {success_count} 个录音文件到:\n{save_dir}\n\n是否打开保存目录？"):
                     # 打开保存目录
-                    if platform.system() == "Windows":
-                        os.startfile(save_dir)
-                    elif platform.system() == "Darwin":  # macOS
-                        subprocess.run(["open", save_dir])
-                    else:  # Linux
-                        subprocess.run(["xdg-open", save_dir])
+                    open_folder(save_dir)
             else:
                 self.custom_status_var.set("未成功拉取任何文件")
         
@@ -3214,12 +3190,7 @@ class TestOperations:
 
                 def _open_dir():
                     try:
-                        if platform.system() == "Windows":
-                            os.startfile(save_dir)
-                        elif platform.system() == "Darwin":
-                            subprocess.run(["open", save_dir])
-                        else:
-                            subprocess.run(["xdg-open", save_dir])
+                        open_folder(save_dir)
                     except Exception:
                         pass
 
@@ -3443,9 +3414,9 @@ class TestOperations:
                     self.speaker_status_var.set("错误: 请选择有效的音频文件")
                     return
             
-            # 推送音频文件到设备
+            # 推送音频文件到设备（系统喇叭测试应用读取 /sdcard/test.wav）
             self.speaker_status_var.set("正在推送音频文件...")
-            push_cmd = self.get_adb_command(f"push \"{audio_file}\" /sdcard/speaker_default.wav")
+            push_cmd = self.get_adb_command(f"push \"{audio_file}\" /sdcard/test.wav")
             result = subprocess.run(push_cmd, shell=True, capture_output=True, text=True)
             
             if result.returncode != 0:
@@ -3814,12 +3785,7 @@ class TestOperations:
             os.makedirs(save_dir, exist_ok=True)
     
         try:
-            if platform.system() == "Windows":
-                os.startfile(save_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", save_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", save_dir])
+            open_folder(save_dir)
         except Exception as e:
             self.logcat_status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")
@@ -4038,12 +4004,7 @@ class TestOperations:
         if not os.path.exists(out_dir):
             os.makedirs(out_dir, exist_ok=True)
         try:
-            if platform.system() == "Windows":
-                os.startfile(out_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", out_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", out_dir])
+            open_folder(out_dir)
         except Exception as e:
             self.status_var.set(f"打开文件夹出错: {str(e)}")
             messagebox.showerror("错误", f"打开文件夹时出错:\n{str(e)}")

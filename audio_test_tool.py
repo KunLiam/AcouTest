@@ -32,13 +32,19 @@ from feature_config import (
 )
 from control_api import AcouTestControlApi
 import updater_http
+from platform_utils import get_ui_font, open_folder, configure_macos_ttk_style, get_runtime_base_dir, load_tk_photoimage, safe_show_tk_window, schedule_macos_ui_repaint
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
         self.root = root
+        self._adb_device_poll_stop = False
+        self.control_api = None
+        # 尽早注册关闭回调，避免初始化过程中点关闭导致默认 destroy 后仍继续操作 root
+        self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.root.title(f"声测大师(AcouTest) v{APP_VERSION}")
-        self.root.geometry("750x650")
-        self.root.resizable(False, False)
+        self.root.geometry("800x680")
+        self.root.minsize(720, 580)
+        self.root.resizable(True, True)
 
         # pygame 是可选依赖：只用于“本地播放”
         # 在某些 PyInstaller + numpy 环境下导入可能崩溃，因此必须按需、可失败
@@ -52,14 +58,16 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         UIComponents.__init__(self, root)
         DeviceOperations.__init__(self, root)
         TestOperations.__init__(self, root)
+        # 尽早安装全局滚轮/触摸板滚动（macOS 需在子界面创建前就绪）
+        self._ensure_global_mousewheel()
         
         # 设置应用图标/logo - 更强健的版本
         try:
-            # 尝试多种可能的路径
+            base_dir = get_runtime_base_dir(os.path.abspath(__file__))
             possible_paths = [
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "AcouTest.png"),
+                os.path.join(base_dir, "logo", "AcouTest.png"),
                 os.path.join("logo", "AcouTest.png"),
-                os.path.join(sys._MEIPASS, "logo", "AcouTest.png") if hasattr(sys, "_MEIPASS") else None
+                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if hasattr(sys, "_MEIPASS") else None
             ]
             
             logo_loaded = False
@@ -67,8 +75,9 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 if path and os.path.exists(path):
                     print(f"找到logo: {path}")
                     try:
-                        icon_image = tk.PhotoImage(file=path)
-                        self.root.tk.call('wm', 'iconphoto', self.root._w, icon_image)
+                        icon_image = load_tk_photoimage(self.root, path)
+                        self.root.iconphoto(True, icon_image)
+                        self.root._icon_image_ref = icon_image
                         print(f"成功加载logo: {path}")
                         logo_loaded = True
                         break
@@ -92,8 +101,9 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 print(f"设置Windows图标出错: {str(e)}")
         
         # 设置样式（统一更耐看的默认灰色风格：不强制绿/红按钮）
-        self.style = ttk.Style()
-        font_family = "Microsoft YaHei UI" if platform.system() == "Windows" else "Arial"
+        self.style = ttk.Style(self.root)
+        configure_macos_ttk_style(self.style, self.root)
+        font_family = get_ui_font()
         self.style.configure("TButton", font=(font_family, 10), padding=(12, 6))
         self.style.configure("TLabel", font=(font_family, 10))
         self.style.configure("Header.TLabel", font=(font_family, 13, "bold"))
@@ -127,12 +137,32 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         
         # 创建界面
         self.create_widgets()
+
+        # 子页面构建过程中可能 new Style() 把 macOS 主题切回 aqua，最后再强制一次
+        configure_macos_ttk_style(self.style, self.root)
+        safe_show_tk_window(self.root)
+        schedule_macos_ui_repaint(self.root, self.style)
+
+        if getattr(sys, "frozen", False):
+            try:
+                log_path = os.path.join(get_runtime_base_dir(os.path.abspath(__file__)), "output", "startup.log")
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(f"theme={self.style.theme_use()}\n")
+                    f.write(f"children={len(self.root.winfo_children())}\n")
+                    if hasattr(self, "main_notebook"):
+                        f.write(f"tabs={len(self.main_notebook.tabs())}\n")
+                    from platform_utils import resolve_adb_executable
+                    f.write(f"adb={resolve_adb_executable()}\n")
+            except Exception:
+                pass
         
         # 检查ADB设备
+        if not self.root.winfo_exists():
+            return
         self.refresh_devices()
 
         # 定时后台刷新设备列表（换插 USB 后自动更新下拉框）；ACOUTEST_ADB_POLL_MS=0 可关闭
-        self._adb_device_poll_stop = False
         try:
             self._adb_device_poll_ms = int(os.environ.get("ACOUTEST_ADB_POLL_MS", "2500"))
         except Exception:
@@ -144,16 +174,12 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         self._setup_keyboard_adb_input()
 
         # 启动本地 HTTP 控制接口（供 OpenClaw 调用）
-        self.control_api = None
         self._start_control_api()
         self._schedule_control_api_indicator_refresh()
 
         # 启动时异步检查更新（不阻塞主界面）
         self._update_dialog = None
         self.root.after(1200, self._check_update_on_startup)
-
-        # 关闭窗口时，先停接口服务再退出
-        self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         
         # 在__init__方法的最后
         try:
@@ -785,12 +811,7 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
                 )
             if messagebox.askyesno("更新下载完成", message + "\n\n是否现在打开所在文件夹？"):
                 try:
-                    if platform.system() == "Windows":
-                        os.startfile(install_dir)
-                    elif platform.system() == "Darwin":
-                        subprocess.run(["open", install_dir])
-                    else:
-                        subprocess.run(["xdg-open", install_dir])
+                    open_folder(install_dir)
                 except Exception:
                     pass
         except Exception as e:
@@ -802,11 +823,9 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         
     def ensure_directories(self):
         """确保必要的目录结构存在"""
-        # Loopback/Ref 等测试录音已统一保存到 output/loopback/（见 output_paths），不再创建旧版 test/ 目录
-
-        # audio/ 作为用户可放置自定义文件的入口（文件夹可以为空）
-        if not os.path.exists("audio"):
-            os.makedirs("audio")
+        base = get_runtime_base_dir(os.path.abspath(__file__))
+        audio_dir = os.path.join(base, "audio")
+        os.makedirs(audio_dir, exist_ok=True)
 
     def _setup_keyboard_adb_input(self):
         """
@@ -970,14 +989,12 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         self.device_combobox.bind("<Down>", _refresh_before_dropdown)
         
         # 刷新按钮 - 调小字体
-        refresh_btn = ttk.Button(device_frame, text="刷新", command=self.refresh_devices, width=6)
+        refresh_btn = ttk.Button(device_frame, text="刷新", command=self.refresh_devices, width=6, style="Small.TButton")
         refresh_btn.pack(side="left", padx=(0, 5))
-        refresh_btn.configure(style="Small.TButton")
         
         # 网络连接按钮 - 调小字体
-        network_btn = ttk.Button(device_frame, text="网络连接", command=self.show_network_connect_dialog, width=8)
+        network_btn = ttk.Button(device_frame, text="网络连接", command=self.show_network_connect_dialog, width=8, style="Small.TButton")
         network_btn.pack(side="left", padx=(0, 5))
-        network_btn.configure(style="Small.TButton")
         
         # 软件信息：小问号图标 + 悬停提示「查看软件信息」+ 点击弹窗
         about_icon = tk.Label(
@@ -1018,20 +1035,15 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         about_icon.bind("<Enter>", _on_about_enter)
         about_icon.bind("<Leave>", _on_about_leave)
 
-        # 创建小字体样式
-        style = ttk.Style()
-        style.configure("Small.TButton", font=("Arial", 9))
-        
         # 主内容区域
         main_container = ttk.Frame(self.root)
-        main_container.pack(fill="both", expand=True, padx=20, pady=10)
+        main_container.pack(fill="both", expand=True, padx=12, pady=6)
         
         # 使用改进的分类标签页设计
         self.create_main_ui(main_container)
-        
-        # 状态栏
+        self.root.update_idletasks()
         status_bar = ttk.Frame(self.root)
-        status_bar.pack(fill="x", side="bottom", padx=20, pady=5)
+        status_bar.pack(fill="x", side="bottom", padx=12, pady=4)
         
         status_label = ttk.Label(status_bar, textvariable=self.status_var, font=("Arial", 9))
         status_label.pack(side="left")

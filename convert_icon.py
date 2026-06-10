@@ -54,10 +54,18 @@ try:
         img = square_img
         print(f"已调整为正方形: {size}x{size}")
     
-    # 保存为高质量PNG (用于备份)
+    # 保存为 Tk/PhotoImage 可识别的 8-bit RGB PNG（macOS 系统 Tcl 对 RGBA/大图兼容性差）
     png_path = os.path.join("logo", "AcouTest.png")
-    img.save(png_path, format="PNG")
-    print(f"已保存高质量PNG: {png_path}")
+    tk_img = Image.new("RGB", img.size, (255, 255, 255))
+    if img.mode == "RGBA":
+        tk_img.paste(img, mask=img.split()[3])
+    else:
+        tk_img.paste(img)
+    max_side = 512
+    if max(tk_img.size) > max_side:
+        tk_img.thumbnail((max_side, max_side), Image.LANCZOS)
+    tk_img.save(png_path, format="PNG", optimize=False)
+    print(f"已保存 Tk 兼容 PNG: {png_path} ({tk_img.size[0]}x{tk_img.size[1]})")
     
     # 创建多种尺寸的图标 - 从大到小排序
     sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
