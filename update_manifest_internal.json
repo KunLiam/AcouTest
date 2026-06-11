@@ -1,10 +1,12 @@
 {
-  "latest_version": "2.1.4",
-  "publish_date": "2026-06-10",
+  "latest_version": "2.1.5",
+  "publish_date": "2026-06-11",
   "notes": [
-    "macOS 适配：Packager.sh 打包 .app，修复空白窗、触摸板滚动与本机播放。",
-    "波形 10 通道/dBFS 显示优化；HAL/Logcat 属性支持双击或右键改值；系统指令布局收紧。"
+    "烧大象 key：sn 烧 elevockey 新增「校验 key」（logcat 流式抓取 + 重试 + 快照兜底）；运行日志改为自动换行，修复 macOS 重影。",
+    "大象算法库版本：logcat 抓取加强；logcat 未命中时从设备 elevoc .so 库 strings 补读 SDK/算法版本；cfg 仍读 ini。",
+    "macOS：Dock 圆角 .icns 图标；打包与窗口图标逻辑优化；触摸板滚动与 ADB 设备列表刷新改进。",
+    "界面：移除顶部「已连接」状态条；系统指令结果弹窗日志显示优化。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.4/AcouTest.v2.1.4.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.5/AcouTest.v2.1.5.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

@@ -150,15 +150,20 @@ def create_high_quality_logo():
     if not os.path.exists("logo"):
         os.makedirs("logo")
     
-    # 保存PNG
-    img.save("logo/AcouTest.png")
-    
-    # 创建正方形图标
-    icon_size = 512
+    # 保存原始 RGBA 源图（convert_icon 从此生成圆角 Dock 图标）
+    source_path = "logo/AcouTest_source.png"
+    icon_size = 1024
     icon_img = img.resize((icon_size, icon_size), Image.LANCZOS)
-    icon_img.save("logo/AcouTest_icon.png")
+    icon_img.save(source_path)
     
-    print("Logo已生成! 路径: logo/AcouTest.png")
+    print(f"Logo已生成! 路径: {source_path} (RGBA 源图)")
+    try:
+        from convert_icon import convert_all
+        convert_all(source_path=source_path)
+        print("已自动生成 AcouTest.png / .ico / .icns（macOS 圆角 Dock 图标）")
+    except Exception as exc:
+        print(f"convert_icon 跳过: {exc}")
+        print("请手动运行: python3 convert_icon.py")
 
 if __name__ == "__main__":
     create_high_quality_logo() 

@@ -16,6 +16,41 @@ class DeviceOperations:
     def _adb_bin(self):
         return resolve_adb_executable()
 
+    def _run_adb_start_server(self):
+        """启动 adb 守护进程（设备列表为空时重试用）。"""
+        adb = self._adb_bin()
+        try:
+            if platform.system() == "Windows":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                return subprocess.run(
+                    [adb, "start-server"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=0x08000000,
+                    startupinfo=startupinfo,
+                )
+            return subprocess.run([adb, "start-server"], capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+
+    def _fetch_device_list(self, retry_start_server: bool = True):
+        """执行 adb devices；无设备时可自动 start-server 再试一次。"""
+        result = self._run_adb_devices()
+        if result.returncode != 0:
+            return result, [], []
+
+        devices, online_devices = self._parse_adb_devices_stdout(result.stdout)
+        if not devices and retry_start_server:
+            self._run_adb_start_server()
+            time.sleep(0.4)
+            result = self._run_adb_devices()
+            if result.returncode == 0:
+                devices, online_devices = self._parse_adb_devices_stdout(result.stdout)
+        return result, devices, online_devices
+
     def _run_adb_devices(self):
         """执行 adb devices（Windows 下无控制台闪窗）。"""
         adb = self._adb_bin()
@@ -72,7 +107,11 @@ class DeviceOperations:
             self.device_var.set("")
             self.selected_device = None
             self.update_device_status_color("red")
-            self.root.after(0, lambda: self.device_status_var.set("未检测到设备"))
+            adb_path = self._adb_bin()
+            hint = "未检测到设备（请插 USB 并点刷新）"
+            if adb_path and adb_path != "adb" and os.path.isfile(adb_path):
+                hint = f"未检测到设备（adb 正常，请插 USB 线并点「刷新」）"
+            self.root.after(0, lambda: self.device_status_var.set(hint))
         print(f"刷新设备完成 - 在线设备: {online_devices}, 选中设备: {self.selected_device}")
 
     def _clear_devices_ui(self, status_message):
@@ -85,16 +124,15 @@ class DeviceOperations:
     def refresh_devices(self):
         """刷新设备列表（同步，供按钮与 API 立即刷新）。"""
         try:
-            result = self._run_adb_devices()
+            result, devices, online_devices = self._fetch_device_list()
             if result.returncode != 0:
-                self._clear_devices_ui("ADB命令失败或无设备")
+                self._clear_devices_ui("ADB 命令失败，请检查是否已安装 adb")
                 return
-            devices, online_devices = self._parse_adb_devices_stdout(result.stdout)
             self._apply_parsed_device_list(devices, online_devices)
         except Exception as e:
             err = str(e)
             if isinstance(e, FileNotFoundError) or ("not found" in err.lower() and "adb" in err.lower()):
-                self._clear_devices_ui("未找到 adb，请安装或设置 ACOUSTEST_ADB")
+                self._clear_devices_ui("未找到 adb，请安装 Android platform-tools 或设置 ACOUSTEST_ADB")
             else:
                 self._clear_devices_ui(f"刷新出错: {err}")
             print(f"刷新设备时出错: {err}")
@@ -116,8 +154,8 @@ class DeviceOperations:
         def work():
             payload = None
             try:
-                result = self._run_adb_devices()
-                payload = ("ok", result.returncode, result.stdout)
+                result, devices, online_devices = self._fetch_device_list()
+                payload = ("ok", result.returncode, devices, online_devices)
             except Exception as e:
                 payload = ("ex", str(e))
 
@@ -127,11 +165,10 @@ class DeviceOperations:
                         self._clear_devices_ui(f"刷新出错: {payload[1]}")
                         print(f"异步刷新设备出错: {payload[1]}")
                     else:
-                        _, rc, out = payload
+                        _, rc, d, o = payload
                         if rc != 0:
-                            self._clear_devices_ui("ADB命令失败或无设备")
+                            self._clear_devices_ui("ADB 命令失败，请检查是否已安装 adb")
                         else:
-                            d, o = self._parse_adb_devices_stdout(out)
                             self._apply_parsed_device_list(d, o)
                 finally:
                     self._adb_devices_poll_lock = False

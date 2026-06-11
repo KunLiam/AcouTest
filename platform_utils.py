@@ -58,6 +58,59 @@ def bootstrap_frozen_runtime_cwd() -> None:
         pass
 
 
+def iter_app_logo_paths(base_dir: Optional[str] = None) -> List[str]:
+    """应用图标 PNG 路径（macOS 优先圆角 AcouTest_icon.png）。"""
+    base_dir = base_dir or get_runtime_base_dir()
+    meipass = getattr(sys, "_MEIPASS", "") or ""
+    names = (
+        ["AcouTest_icon.png", "AcouTest.png"]
+        if IS_DARWIN
+        else ["AcouTest.png", "AcouTest_icon.png"]
+    )
+    roots = [base_dir, meipass, ""]
+    seen = set()
+    out: List[str] = []
+    for name in names:
+        for root in roots:
+            if root:
+                path = os.path.join(root, "logo", name)
+            else:
+                path = os.path.join("logo", name)
+            path = os.path.abspath(path)
+            if path not in seen and os.path.isfile(path):
+                seen.add(path)
+                out.append(path)
+    return out
+
+
+def apply_tk_window_icon(win, base_dir: Optional[str] = None, default_icon: bool = False) -> bool:
+    """
+    设置 Tk 窗口图标。
+    macOS 打包版若 default_icon=True 会用 PNG 覆盖 Dock 的 .icns（变方角白底），故主窗口应传 False 或不调用。
+    """
+    if IS_DARWIN and getattr(sys, "frozen", False) and default_icon:
+        return False
+    for path in iter_app_logo_paths(base_dir):
+        try:
+            icon_img = load_tk_photoimage(win, path)
+            win.iconphoto(default_icon, icon_img)
+            win._icon_image = icon_img
+            return True
+        except Exception:
+            continue
+    if IS_WINDOWS:
+        for ico_name in ("AcouTest.ico",):
+            for root in (base_dir or get_runtime_base_dir(), "", getattr(sys, "_MEIPASS", "") or ""):
+                ico_path = os.path.join(root, "logo", ico_name) if root else os.path.join("logo", ico_name)
+                if os.path.isfile(ico_path):
+                    try:
+                        win.iconbitmap(ico_path)
+                        return True
+                    except Exception:
+                        pass
+    return False
+
+
 def load_tk_photoimage(master, path: str):
     """加载窗口图标/图片（macOS 系统 Tk 对 PNG 支持差，优先走 Pillow）。"""
     import tkinter as tk

@@ -61,44 +61,15 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         # 尽早安装全局滚轮/触摸板滚动（macOS 需在子界面创建前就绪）
         self._ensure_global_mousewheel()
         
-        # 设置应用图标/logo - 更强健的版本
+        # macOS 打包版：不要用 PNG 覆盖 Dock 图标（保留 .app 内圆角 .icns）
         try:
+            from platform_utils import apply_tk_window_icon, get_runtime_base_dir
+
             base_dir = get_runtime_base_dir(os.path.abspath(__file__))
-            possible_paths = [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if hasattr(sys, "_MEIPASS") else None
-            ]
-            
-            logo_loaded = False
-            for path in possible_paths:
-                if path and os.path.exists(path):
-                    print(f"找到logo: {path}")
-                    try:
-                        icon_image = load_tk_photoimage(self.root, path)
-                        self.root.iconphoto(True, icon_image)
-                        self.root._icon_image_ref = icon_image
-                        print(f"成功加载logo: {path}")
-                        logo_loaded = True
-                        break
-                    except Exception as e:
-                        print(f"加载 {path} 失败: {e}")
-            
-            if not logo_loaded:
-                print("无法加载任何logo文件")
+            if not (platform.system() == "Darwin" and getattr(sys, "frozen", False)):
+                apply_tk_window_icon(self.root, base_dir, default_icon=True)
         except Exception as e:
             print(f"设置Logo时出错: {str(e)}")
-        
-        # 在Windows系统上使用.ico文件
-        if platform.system() == "Windows":
-            try:
-                ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "AcouTest.ico")
-                if os.path.exists(ico_path):
-                    self.root.iconbitmap(ico_path)
-                elif os.path.exists("logo/AcouTest.ico"):
-                    self.root.iconbitmap("logo/AcouTest.ico")
-            except Exception as e:
-                print(f"设置Windows图标出错: {str(e)}")
         
         # 设置样式（统一更耐看的默认灰色风格：不强制绿/红按钮）
         self.style = ttk.Style(self.root)

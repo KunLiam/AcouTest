@@ -120,15 +120,21 @@ rm -rf "dist/${APP_NAME}" "dist/${APP_NAME}.app" build "${SPEC_FILE}" 2>/dev/nul
 find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 find . -name '*.pyc' -delete 2>/dev/null || true
 
-echo "[Packager] Generating logo..."
+echo "[Packager] Generating logo + macOS rounded icon..."
 "$PYTHON" -c "from generate_high_quality_logo import create_high_quality_logo; create_high_quality_logo()"
 
+# generate_high_quality_logo 内部已调用 convert_icon；此处再执行一次确保 .icns 最新
 echo "[Packager] Converting icon..."
 "$PYTHON" convert_icon.py
 
 ICON_ARG=()
-if [[ -f "logo/AcouTest.icns" ]]; then
-  ICON_ARG=(--icon="logo/AcouTest.icns")
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ -f "logo/AcouTest.icns" ]]; then
+    ICON_ARG=(--icon="logo/AcouTest.icns")
+    echo "[Packager] Using macOS icon: logo/AcouTest.icns"
+  else
+    echo "[Packager] WARN: logo/AcouTest.icns missing; Dock icon may look square."
+  fi
 elif [[ -f "logo/AcouTest.ico" ]]; then
   ICON_ARG=(--icon="logo/AcouTest.ico")
 fi

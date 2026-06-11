@@ -107,7 +107,7 @@ exit 0
 
 
 def _copy_app_icon(root: Path, resources_dir: Path) -> None:
-    """复制 .icns 到 .app/Resources；若无 icns 则在 macOS 上从 PNG 生成。"""
+    """复制 .icns 到 .app/Resources；若无 icns 则在 macOS 上从 RGBA 源图生成。"""
     logo_dir = root / "logo"
     icns_src = logo_dir / "AcouTest.icns"
     icns_dst = resources_dir / "AppIcon.icns"
@@ -116,7 +116,21 @@ def _copy_app_icon(root: Path, resources_dir: Path) -> None:
         return
     if platform.system() != "Darwin":
         return
-    png = logo_dir / "AcouTest.png"
+
+    try:
+        from convert_icon import build_icns_from_rgba, load_logo_rgba, prepare_app_icon_rgba
+
+        src = logo_dir / "AcouTest_icon.png"
+        raw = load_logo_rgba(str(src) if src.is_file() else None)
+        app_icon = prepare_app_icon_rgba(raw)
+        if build_icns_from_rgba(app_icon, str(icns_dst)):
+            return
+    except Exception:
+        pass
+
+    png = logo_dir / "AcouTest_icon.png"
+    if not png.is_file():
+        png = logo_dir / "AcouTest.png"
     if not png.is_file():
         return
     iconset = resources_dir / "AppIcon.iconset"
@@ -125,10 +139,15 @@ def _copy_app_icon(root: Path, resources_dir: Path) -> None:
     iconset.mkdir(parents=True)
     size_map = {
         "icon_16x16.png": 16,
+        "icon_16x16@2x.png": 32,
         "icon_32x32.png": 32,
+        "icon_32x32@2x.png": 64,
         "icon_128x128.png": 128,
+        "icon_128x128@2x.png": 256,
         "icon_256x256.png": 256,
+        "icon_256x256@2x.png": 512,
         "icon_512x512.png": 512,
+        "icon_512x512@2x.png": 1024,
     }
     for name, px in size_map.items():
         subprocess.run(

@@ -901,36 +901,7 @@ class UIComponents:
         win.transient(root)
         win.grab_set()
         # 与主窗口一致的图标（AcouTest logo）
-        try:
-            base_dir = self._get_runtime_base_dir()
-            png_paths = [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
-            ]
-            for path in png_paths:
-                if path and os.path.exists(path):
-                    try:
-                        icon_img = tk.PhotoImage(file=path)
-                        win.iconphoto(True, icon_img)
-                        win._icon_image = icon_img  # 保持引用，避免被回收
-                        break
-                    except Exception:
-                        pass
-            if platform.system() == "Windows":
-                ico_paths = [
-                    os.path.join(base_dir, "logo", "AcouTest.ico"),
-                    os.path.join("logo", "AcouTest.ico"),
-                ]
-                for ico_path in ico_paths:
-                    if os.path.exists(ico_path):
-                        try:
-                            win.iconbitmap(ico_path)
-                            break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        self._apply_window_icon(win)
         f = ttk.Frame(win, padding=15)
         f.pack(fill="both", expand=True)
         # 版本号、作者、邮箱（标签与具体信息同一行横向展示）
@@ -1024,36 +995,11 @@ class UIComponents:
         return get_runtime_base_dir(os.path.abspath(__file__))
 
     def _apply_window_icon(self, win):
-        """给弹窗统一设置与主程序一致的图标（优先 exe 同级资源）。"""
+        """给弹窗统一设置与主程序一致的图标（子窗口不覆盖 macOS Dock）。"""
         try:
-            base_dir = self._get_runtime_base_dir()
-            png_paths = [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
-            ]
-            for path in png_paths:
-                if path and os.path.exists(path):
-                    try:
-                        icon_img = load_tk_photoimage(win, path)
-                        win.iconphoto(True, icon_img)
-                        win._icon_image = icon_img
-                        break
-                    except Exception:
-                        pass
+            from platform_utils import apply_tk_window_icon
 
-            if platform.system() == "Windows":
-                ico_paths = [
-                    os.path.join(base_dir, "logo", "AcouTest.ico"),
-                    os.path.join("logo", "AcouTest.ico"),
-                ]
-                for ico_path in ico_paths:
-                    if os.path.exists(ico_path):
-                        try:
-                            win.iconbitmap(ico_path)
-                            break
-                        except Exception:
-                            pass
+            apply_tk_window_icon(win, self._get_runtime_base_dir(), default_icon=False)
         except Exception:
             pass
 
@@ -1235,6 +1181,9 @@ class UIComponents:
             return
         try:
             widget = event.widget
+            # 已有独立滚轮绑定的 Text/Listbox 不再走全局，避免 macOS 双滚动重叠
+            if getattr(widget, "_acoutest_wheel_yview_id", None) is not None:
+                return
             root = widget.winfo_toplevel()
         except Exception:
             return
@@ -1309,6 +1258,11 @@ class UIComponents:
         def _dispatch_linux(event):
             return UIComponents._dispatch_global_mousewheel(event)
 
+        def _dispatch_text(event):
+            if getattr(event.widget, "_acoutest_log_widget", False):
+                return
+            return UIComponents._dispatch_global_mousewheel(event)
+
         UIComponents._bind_vertical_wheel_all(root, _dispatch)
         for seq in UIComponents._LINUX_WHEEL_EVENTS:
             try:
@@ -1340,10 +1294,11 @@ class UIComponents:
             "TCheckbutton", "TRadiobutton", "TCombobox", "TNotebook",
             "Button", "Label", "Entry", "Frame", "Labelframe", "Listbox", "Text", "Canvas",
         ):
-            UIComponents._bind_vertical_wheel_class(root, cls, _dispatch)
+            cls_dispatch = _dispatch_text if cls == "Text" else _dispatch
+            UIComponents._bind_vertical_wheel_class(root, cls, cls_dispatch)
             for seq in UIComponents._LINUX_WHEEL_EVENTS:
                 try:
-                    root.bind_class(cls, seq, _dispatch_linux, add="+")
+                    root.bind_class(cls, seq, _dispatch_linux if cls != "Text" else _dispatch_text, add="+")
                 except Exception:
                     pass
 
@@ -1573,6 +1528,832 @@ class UIComponents:
             return (r2.stdout or "").strip(), ""
         return "", (r2.stderr or r.stderr or "读取 elevockey 失败").strip()
 
+    _ELEVOC_VERIFY_LOG_RE = re.compile(
+        r"(?:Auto verify elevockey from unifykeys|Pre-activate elevockey before init)"
+        r":\s*(SUCCESS|FALSE)\b",
+        re.IGNORECASE,
+    )
+    _ELEVOC_SDK_VERSION_RE = re.compile(
+        r"(?:ele_sdk_version|Elevoc SDK Version)\s*:\s*(.+)",
+        re.IGNORECASE,
+    )
+    _ELEVOC_ALGO_VERSION_RE = re.compile(
+        r"(?:ele_algo_version|Elevoc Algo(?:rithm)? Version)\s*:\s*(.+)",
+        re.IGNORECASE,
+    )
+    _ELEVOC_SDK_VERSION_LOOSE_RE = re.compile(
+        r"(\d+\.\d+\.\d+\.\d+(?:[_\d]+)*_sdk(?:_[a-z0-9_]+)?)",
+        re.IGNORECASE,
+    )
+    _ELEVOC_ALGO_VERSION_LOOSE_RE = re.compile(
+        r"(\d+\.\d+\.\d+\.\d+(?:_\d+){1,3}_algo(?:_[a-z0-9_]+)?)",
+        re.IGNORECASE,
+    )
+    _ELEVOC_CFG_LINE_RE = re.compile(r"load cfg line\s*:\[(.*)\]", re.IGNORECASE)
+    _ELEVOC_CFG_PATH_RE = re.compile(r"set cfg path:\s*(.+)", re.IGNORECASE)
+    _ELEVOC_USING_CONFIG_RE = re.compile(r"Using config file:\s*(.+)", re.IGNORECASE)
+
+    @staticmethod
+    def _elevoc_version_line_wanted(raw: str) -> bool:
+        """version 模式需保留的行（版本 / cfg path / ini 行）。"""
+        if not raw or raw.startswith("--------- beginning"):
+            return False
+        if UIComponents._ELEVOC_SDK_VERSION_RE.search(raw):
+            return True
+        if UIComponents._ELEVOC_ALGO_VERSION_RE.search(raw):
+            return True
+        if UIComponents._ELEVOC_CFG_LINE_RE.search(raw):
+            return True
+        if UIComponents._ELEVOC_CFG_PATH_RE.search(raw):
+            return True
+        if UIComponents._ELEVOC_USING_CONFIG_RE.search(raw):
+            return True
+        if "Elevoc SDK Version" in raw or "ele_sdk_version" in raw:
+            return True
+        return "load cfg line" in raw
+
+    @staticmethod
+    def _elevoc_resolve_cfg_ini_path(lines) -> str:
+        """从 logcat 行解析 elevoc ini 路径。"""
+        _, _, _, _, _, cfg_path = UIComponents._parse_elevoc_log_lines_static(lines)
+        if cfg_path:
+            return cfg_path
+        for raw in lines or []:
+            m = UIComponents._ELEVOC_USING_CONFIG_RE.search(raw)
+            if m:
+                return m.group(1).strip()
+            m = UIComponents._ELEVOC_CFG_PATH_RE.search(raw)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _parse_elevoc_log_lines_static(lines):
+        sdk = ""
+        algo = ""
+        cfg = []
+        cfg_path = ""
+        matched_verify = ""
+        verify_status = ""
+        for raw in lines or []:
+            m = UIComponents._ELEVOC_SDK_VERSION_RE.search(raw)
+            if m and not sdk:
+                sdk = m.group(1).strip()
+            if not sdk and (
+                "Elevoc SDK Version" in raw or "ele_sdk_version" in raw or "elevoc_plugin" in raw
+            ):
+                m = UIComponents._ELEVOC_SDK_VERSION_LOOSE_RE.search(raw)
+                if m:
+                    sdk = m.group(1).strip()
+            m = UIComponents._ELEVOC_ALGO_VERSION_RE.search(raw)
+            if m and not algo:
+                algo = m.group(1).strip()
+            if not algo and (
+                "ele_algo_version" in raw or "Elevoc Algo" in raw or "elevoc_framework" in raw
+            ):
+                m = UIComponents._ELEVOC_ALGO_VERSION_LOOSE_RE.search(raw)
+                if m:
+                    algo = m.group(1).strip()
+            m = UIComponents._ELEVOC_CFG_PATH_RE.search(raw)
+            if m and not cfg_path:
+                cfg_path = m.group(1).strip()
+            m = UIComponents._ELEVOC_USING_CONFIG_RE.search(raw)
+            if m and not cfg_path:
+                cfg_path = m.group(1).strip()
+            m = UIComponents._ELEVOC_CFG_LINE_RE.search(raw)
+            if m:
+                cfg.append(m.group(1))
+            elif "load cfg line" in (raw or ""):
+                idx = raw.find(":[")
+                if idx >= 0 and raw.rstrip().endswith("]"):
+                    cfg.append(raw[idx + 2 : -1])
+            m = UIComponents._ELEVOC_VERIFY_LOG_RE.search(raw)
+            if m:
+                status = m.group(1).upper()
+                if "Auto verify elevockey" in raw:
+                    matched_verify = raw
+                    verify_status = status
+                elif not matched_verify or "Pre-activate elevockey" in matched_verify:
+                    matched_verify = raw
+                    verify_status = status
+        return sdk, algo, cfg, verify_status, matched_verify, cfg_path
+
+    def _elevoc_read_cfg_ini_from_device(self, serial: str, lines=None, log_fn=None) -> tuple:
+        """从设备读取 elevoc ini 文件内容；返回 (cfg_lines, cfg_path)。"""
+        serial = (serial or "").strip()
+        cfg_path = self._elevoc_resolve_cfg_ini_path(lines)
+        if not serial:
+            return [], cfg_path
+
+        if not cfg_path:
+            if log_fn:
+                log_fn("$ adb shell find /vendor/etc/elevoc -name '*.ini'\n")
+            rc, stdout, _stderr = self._run_subprocess_text(
+                [
+                    "adb", "-s", serial, "shell",
+                    "find /vendor/etc/elevoc -name '*.ini' 2>/dev/null | head -n 1",
+                ],
+                timeout_s=12,
+            )
+            if rc == 0 and stdout:
+                cfg_path = stdout.strip().splitlines()[0].strip()
+
+        if not cfg_path:
+            return [], ""
+
+        if log_fn:
+            log_fn(f"$ adb shell cat {cfg_path}\n")
+        rc, stdout, stderr = self._run_subprocess_text(
+            ["adb", "-s", serial, "shell", "cat", cfg_path],
+            timeout_s=15,
+        )
+        if rc != 0 or not stdout:
+            if log_fn and stderr:
+                log_fn(f"[stderr] {stderr.strip()}\n")
+            return [], cfg_path
+        ini_lines = [ln.rstrip() for ln in stdout.splitlines()]
+        return ini_lines, cfg_path
+
+    def _stop_logcat_process(self, proc):
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _decode_subprocess_bytes(data) -> str:
+        if not data:
+            return ""
+        if isinstance(data, str):
+            return data
+        return data.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _run_subprocess_text(argv, timeout_s=15):
+        """运行子进程并以 utf-8(replace) 解码输出，避免 logcat 二进制导致 UnicodeDecodeError。"""
+        result = subprocess.run(argv, capture_output=True, timeout=timeout_s)
+        stdout = UIComponents._decode_subprocess_bytes(result.stdout)
+        stderr = UIComponents._decode_subprocess_bytes(result.stderr)
+        return result.returncode, stdout, stderr
+
+    @staticmethod
+    def _log_text_font():
+        if platform.system() == "Darwin":
+            return ("Menlo", 10)
+        return ("Consolas", 9)
+
+    @staticmethod
+    def _bind_log_text_readonly(txt):
+        """日志 Text 只读：不切换 disabled，避免 macOS 行重叠渲染 bug。"""
+
+        def _block_edit(event):
+            if event.state & 0x4 and event.keysym.lower() in ("c", "a"):
+                return
+            if event.keysym in (
+                "Left", "Right", "Up", "Down", "Home", "End",
+                "Prior", "Next", "Shift_L", "Shift_R", "Control_L", "Control_R",
+                "Meta_L", "Meta_R", "Option_L", "Option_R",
+            ):
+                return
+            return "break"
+
+        if getattr(txt, "_acoutest_log_readonly_bound", False):
+            return
+        txt._acoutest_log_readonly_bound = True
+        txt.bind("<Key>", _block_edit, add="+")
+        try:
+            txt.configure(cursor="arrow")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _setup_log_text(parent, height=14):
+        """macOS 友好日志区：自动换行、仅纵向滚动。"""
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True, padx=6, pady=(4, 8))
+
+        txt = tk.Text(
+            frame,
+            wrap="word",
+            font=UIComponents._log_text_font(),
+            height=height,
+            undo=False,
+            exportselection=True,
+            highlightthickness=1,
+            highlightbackground="#cccccc",
+            borderwidth=0,
+            padx=6,
+            pady=6,
+        )
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        UIComponents._bind_log_text_readonly(txt)
+        UIComponents._bind_mousewheel_to_yview(txt)
+        try:
+            txt.bind("<Enter>", lambda _e, t=txt: t.focus_set(), add="+")
+        except Exception:
+            pass
+        txt._acoutest_log_widget = True
+        return frame, txt
+
+    @staticmethod
+    def _append_log_text(txt, content: str, scroll_to_end: bool = True):
+        """向日志 Text 追加内容（不切换 disabled）。"""
+        if not content:
+            return
+        UIComponents._bind_log_text_readonly(txt)
+        try:
+            at_bottom = txt.yview()[1] >= 0.98
+        except Exception:
+            at_bottom = scroll_to_end
+        txt.insert("end", content)
+        if scroll_to_end and at_bottom:
+            try:
+                txt.see("end")
+                if platform.system() == "Darwin":
+                    txt.update_idletasks()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _trim_log_text(txt, max_lines: int = 600, keep_lines: int = 350):
+        """裁剪过长日志，整块替换避免 macOS Text 重影。"""
+        try:
+            end_line = int(float(txt.index("end-1c").split(".")[0]))
+            if end_line <= max_lines:
+                return
+            tail = txt.get(f"{end_line - keep_lines + 1}.0", "end")
+            txt.delete("1.0", "end")
+            txt.insert("1.0", tail)
+            txt.see("end")
+            if platform.system() == "Darwin":
+                txt.update_idletasks()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _setup_scrollable_text(parent, height=14, wrap="none", font=("Consolas", 9)):
+        """带纵横滚动条的 Text；适合需要横向滚动的长行内容。"""
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True, padx=6, pady=(4, 8))
+
+        inner = ttk.Frame(frame)
+        inner.pack(fill="both", expand=True)
+
+        txt = tk.Text(
+            inner,
+            wrap=wrap,
+            font=font,
+            height=height,
+            undo=False,
+            exportselection=True,
+            highlightthickness=0,
+            borderwidth=1,
+        )
+        vsb = ttk.Scrollbar(inner, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+
+        txt.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        inner.grid_rowconfigure(0, weight=1)
+        inner.grid_columnconfigure(0, weight=1)
+
+        if wrap == "none":
+            hsb = ttk.Scrollbar(frame, orient="horizontal", command=txt.xview)
+            txt.configure(xscrollcommand=hsb.set)
+            hsb.pack(fill="x", pady=(4, 0))
+
+        UIComponents._bind_mousewheel_to_yview(txt)
+        try:
+            txt.bind("<Enter>", lambda _e, t=txt: t.focus_set(), add="+")
+        except Exception:
+            pass
+        txt._acoutest_log_widget = True
+        return frame, txt
+
+    @staticmethod
+    def _scroll_log_text_to_bottom(txt):
+        try:
+            txt.see("end")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _configure_readonly_log_text(txt):
+        """日志 Text 初始为 disabled（只读）。"""
+        if getattr(txt, "_acoutest_readonly_log", False):
+            return
+        txt._acoutest_readonly_log = True
+        try:
+            txt.config(state="disabled")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _append_readonly_text(txt, content: str, scroll_to_end: bool = True):
+        """向只读日志 Text 追加内容。"""
+        if not content:
+            return
+        UIComponents._configure_readonly_log_text(txt)
+        try:
+            at_bottom = txt.yview()[1] >= 0.98
+        except Exception:
+            at_bottom = scroll_to_end
+        txt.config(state="normal")
+        txt.insert("end", content)
+        txt.config(state="disabled")
+        if scroll_to_end and at_bottom:
+            try:
+                txt.see("end")
+            except Exception:
+                pass
+
+    def _read_pipe_line_timed(self, stream, timeout_sec=0.25):
+        """从子进程 stdout 读一行；None=超时无数据，''=EOF。"""
+        if stream is None:
+            return None
+        if platform.system() == "Windows":
+            holder = [None]
+
+            def _read():
+                holder[0] = stream.readline()
+
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout=timeout_sec)
+            if t.is_alive():
+                return None
+            val = holder[0]
+            return val if val else ""
+
+        import select
+
+        ready, _, _ = select.select([stream], [], [], timeout_sec)
+        if not ready:
+            return None
+        line = stream.readline()
+        if not line:
+            return ""
+        if isinstance(line, bytes):
+            return line.decode("utf-8", errors="replace")
+        return line
+
+    def _iter_logcat_stdout(self, proc, deadline):
+        """按 deadline 迭代 logcat 行，避免 readline 永久阻塞。"""
+        stream = getattr(proc, "stdout", None)
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            line = self._read_pipe_line_timed(stream, 0.25)
+            if line is None:
+                continue
+            if line == "":
+                time.sleep(0.05)
+                continue
+            yield line.rstrip("\n\r")
+
+    def _elevoc_merge_log_lines(self, collected: list, new_lines: list) -> list:
+        seen = set(collected)
+        for raw in new_lines or []:
+            line = (raw or "").rstrip("\n\r")
+            if line and line not in seen:
+                seen.add(line)
+                collected.append(line)
+        return collected
+
+    @staticmethod
+    def _elevoc_log_line_relevant(raw: str) -> bool:
+        if not raw:
+            return False
+        keys = (
+            "ELEVOCLOG",
+            "elevoc_plugin",
+            "ele_sdk_version",
+            "ele_algo_version",
+            "load cfg line",
+            "Auto verify elevockey",
+        )
+        return any(k in raw for k in keys)
+
+    @staticmethod
+    def _elevoc_line_is_essential(raw: str, mode: str) -> bool:
+        if not raw or raw.startswith("--------- beginning"):
+            return False
+        if mode == "verify":
+            return UIComponents._ELEVOC_VERIFY_LOG_RE.search(raw) is not None
+        if mode == "version":
+            return UIComponents._elevoc_version_line_wanted(raw)
+        return UIComponents._elevoc_log_line_relevant(raw)
+
+    def _elevoc_quick_dump(self, serial: str, mode: str, log_fn=None, verbose: bool = False) -> list:
+        """抓取最近 logcat 并过滤目标行；version 模式含全量兜底扫描。"""
+        def _log(msg: str):
+            if verbose and log_fn:
+                log_fn(msg)
+
+        dump_cmds = [
+            [
+                "adb", "-s", serial, "logcat", "-d", "-t", "1200", "-v", "threadtime",
+                "ELEVOCLOG:D", "ELEVOCLOG:I", "ELEVOCLOG:W",
+                "elevoc_plugin:I", "elevoc_plugin:D", "elevoc_plugin:W", "*:S",
+            ],
+        ]
+        if mode == "verify":
+            dump_cmds.append(
+                ["adb", "-s", serial, "logcat", "-d", "-t", "600", "-v", "brief"]
+            )
+        elif mode == "version":
+            dump_cmds.append(
+                ["adb", "-s", serial, "logcat", "-d", "-t", "800", "-b", "main", "-v", "threadtime"]
+            )
+
+        essential = []
+        for dump_cmd in dump_cmds:
+            _log(f"$ {' '.join(dump_cmd)}\n")
+            rc, stdout, stderr = self._run_subprocess_text(dump_cmd, timeout_s=25)
+            if rc != 0 and stderr and verbose and log_fn:
+                log_fn(f"[stderr] {stderr.strip()}\n")
+            for raw in (stdout or "").splitlines():
+                if mode == "version":
+                    if self._elevoc_version_line_wanted(raw):
+                        self._elevoc_merge_log_lines(essential, [raw])
+                elif self._elevoc_line_is_essential(raw, mode):
+                    self._elevoc_merge_log_lines(essential, [raw])
+            if mode == "verify":
+                _, _, _, verify, _, _ = self._parse_elevoc_log_lines(essential)
+                if verify in ("SUCCESS", "FALSE"):
+                    break
+            if mode != "version":
+                continue
+            sdk, algo, cfg, _, _, _ = self._parse_elevoc_log_lines(essential)
+            if sdk and (algo or cfg):
+                break
+        return essential
+
+    def _elevoc_poll_version_log(
+        self,
+        serial: str,
+        timeout_s: float = 15.0,
+        log_fn=None,
+    ) -> list:
+        """版本信息：killall audioserver 后轮询 logcat -d（macOS 过滤流式 logcat 不可靠）。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return []
+
+        def _log(msg: str):
+            if log_fn:
+                log_fn(msg)
+
+        timeout_s = max(10.0, float(timeout_s or 15.0))
+        _log("$ adb root\n")
+        self._run_subprocess_text(["adb", "-s", serial, "root"], timeout_s=12)
+        time.sleep(0.3)
+        _log("$ adb logcat -c\n")
+        self._run_subprocess_text(["adb", "-s", serial, "logcat", "-c"], timeout_s=8)
+        _log("$ adb shell killall audioserver\n")
+        self._run_subprocess_text(
+            ["adb", "-s", serial, "shell", "killall", "audioserver"],
+            timeout_s=8,
+        )
+        _log(f"等待版本日志（最长 {timeout_s:.0f}s）...\n")
+
+        essential = []
+        deadline = time.time() + timeout_s
+        poll_interval = 0.45
+        logged_sdk = False
+        logged_algo = False
+        dump_cmds = [
+            ["adb", "-s", serial, "logcat", "-d", "-t", "800", "-v", "brief"],
+            ["adb", "-s", serial, "logcat", "-d", "-t", "1200", "-v", "threadtime"],
+        ]
+
+        def _log_capture_progress():
+            nonlocal logged_sdk, logged_algo
+            sdk_p, algo_p, _, _, _, _ = self._parse_elevoc_log_lines(essential)
+            if sdk_p and not logged_sdk:
+                logged_sdk = True
+                _log("  → 已捕获: SDK\n")
+            if algo_p and not logged_algo:
+                logged_algo = True
+                _log("  → 已捕获: 算法\n")
+
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+            for dump_cmd in dump_cmds:
+                rc, stdout, _stderr = self._run_subprocess_text(dump_cmd, timeout_s=12)
+                if rc != 0 or not stdout:
+                    continue
+                for raw in stdout.splitlines():
+                    if self._elevoc_version_line_wanted(raw):
+                        self._elevoc_merge_log_lines(essential, [raw])
+                _log_capture_progress()
+                sdk, algo, cfg, _, _, _ = self._parse_elevoc_log_lines(essential)
+                if sdk and algo:
+                    return essential
+                if sdk and cfg:
+                    return essential
+                if algo and (time.time() + 2.0 >= deadline):
+                    return essential
+        return essential
+
+    def _elevoc_restart_audioserver(self, serial: str):
+        """多次 killall，提高 audioserver/大象插件重新加载成功率。"""
+        self._run_subprocess_text(
+            [
+                "adb", "-s", serial, "shell",
+                "killall audioserver; sleep 0.35; killall audioserver; sleep 0.35; killall audioserver; sleep 0.35",
+            ],
+            timeout_s=12,
+        )
+
+    def _elevoc_dump_verify_lines(self, serial: str) -> list:
+        """全量 dump logcat 并搜索校验行（不用 -t 限制，避免被后续日志挤出窗口）。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return []
+        dump_cmds = [
+            ["adb", "-s", serial, "logcat", "-d", "-v", "brief"],
+            ["adb", "-s", serial, "logcat", "-d", "-v", "threadtime"],
+        ]
+        auto = ""
+        pre = ""
+        for dump_cmd in dump_cmds:
+            rc, stdout, _stderr = self._run_subprocess_text(dump_cmd, timeout_s=20)
+            if rc != 0 or not stdout:
+                continue
+            for raw in stdout.splitlines():
+                if not UIComponents._ELEVOC_VERIFY_LOG_RE.search(raw):
+                    continue
+                if "Auto verify elevockey" in raw:
+                    auto = raw
+                elif "Pre-activate elevockey" in raw:
+                    pre = raw
+        picked = auto or pre
+        return [picked] if picked else []
+
+    def _elevoc_stream_verify_log(self, serial: str, timeout_s: float = 14.0) -> list:
+        """启动 logcat 流式监听 + 重启 audioserver，实时捕获校验日志。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return []
+
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["adb", "-s", serial, "logcat", "-v", "brief"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.15)
+            self._elevoc_restart_audioserver(serial)
+            deadline = time.time() + max(8.0, float(timeout_s or 14.0))
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    break
+                line = self._read_pipe_line_timed(proc.stdout, 0.25)
+                if line is None:
+                    continue
+                if line == "":
+                    continue
+                raw = line.rstrip("\n\r")
+                if UIComponents._ELEVOC_VERIFY_LOG_RE.search(raw):
+                    return [raw]
+        finally:
+            self._stop_logcat_process(proc)
+        return []
+
+    def _elevoc_poll_verify_log(self, serial: str, timeout_s: float = 20.0) -> list:
+        """校验 elevockey：流式监听 + 全量 dump + 重试 + logcat 兜底。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return []
+
+        timeout_s = max(12.0, float(timeout_s or 20.0))
+        self._run_subprocess_text(["adb", "-s", serial, "root"], timeout_s=12)
+        time.sleep(0.3)
+
+        # 校验前先快照 logcat：避免 logcat -c 清掉用户刚在终端看到的 SUCCESS
+        prescan = self._elevoc_dump_verify_lines(serial)
+
+        per_attempt = max(10.0, timeout_s / 2.0)
+        for attempt in range(2):
+            self._run_subprocess_text(["adb", "-s", serial, "logcat", "-c"], timeout_s=8)
+            lines = self._elevoc_stream_verify_log(serial, timeout_s=per_attempt)
+            if lines:
+                return lines
+            lines = self._elevoc_dump_verify_lines(serial)
+            if lines:
+                return lines
+            if attempt == 0:
+                time.sleep(0.8)
+
+        if prescan:
+            return prescan
+        return self._elevoc_dump_verify_lines(serial)
+
+    def _elevoc_capture_logs(
+        self,
+        serial: str,
+        mode: str = "version",
+        log_fn=None,
+        verbose: bool = False,
+    ) -> list:
+        """killall audioserver 后抓取目标 ELEVOC 日志（version 模式；verify 请用 _elevoc_poll_verify_log）。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return []
+
+        mode = (mode or "version").strip().lower()
+        if mode not in ("verify", "version"):
+            mode = "version"
+        if mode == "verify":
+            return self._elevoc_poll_verify_log(serial, timeout_s=20.0)
+        return self._elevoc_poll_version_log(serial, timeout_s=15.0, log_fn=log_fn)
+
+    def _elevoc_probe_sdk_version(self, serial: str, lines=None, log_fn=None) -> str:
+        """补抓 ele_sdk_version / Elevoc SDK Version（全量 logcat 扫描）。"""
+        sdk, _, _, _, _, _ = self._parse_elevoc_log_lines(lines or [])
+        if sdk:
+            return sdk
+
+        def _log(msg: str):
+            if log_fn:
+                log_fn(msg)
+
+        _log("检索 Elevoc SDK Version ...\n")
+        dump_cmds = [
+            ["adb", "-s", serial, "logcat", "-d", "-t", "1500", "-v", "brief"],
+            [
+                "adb", "-s", serial, "logcat", "-d", "-t", "2500", "-v", "threadtime",
+                "elevoc_plugin:I", "elevoc_plugin:D", "elevoc_plugin:W", "*:S",
+            ],
+            ["adb", "-s", serial, "logcat", "-d", "-t", "1500", "-b", "main", "-v", "threadtime"],
+        ]
+        for dump_cmd in dump_cmds:
+            rc, stdout, _stderr = self._run_subprocess_text(dump_cmd, timeout_s=22)
+            if rc != 0 or not stdout:
+                continue
+            batch = []
+            for raw in stdout.splitlines():
+                if (
+                    "Elevoc SDK Version" in raw
+                    or "ele_sdk_version" in raw
+                    or UIComponents._ELEVOC_SDK_VERSION_LOOSE_RE.search(raw)
+                ):
+                    batch.append(raw)
+            sdk, _, _, _, _, _ = self._parse_elevoc_log_lines(batch)
+            if sdk:
+                return sdk
+        return ""
+
+    def _elevoc_probe_algo_version(self, serial: str, lines=None, log_fn=None) -> str:
+        """补抓 ele_algo_version（全量 logcat 扫描）。"""
+        _, algo, _, _, _, _ = self._parse_elevoc_log_lines(lines or [])
+        if algo:
+            return algo
+
+        def _log(msg: str):
+            if log_fn:
+                log_fn(msg)
+
+        _log("检索 ele_algo_version ...\n")
+        dump_cmds = [
+            [
+                "adb", "-s", serial, "logcat", "-d", "-t", "2500", "-v", "threadtime",
+                "ELEVOCLOG:D", "ELEVOCLOG:I", "ELEVOCLOG:W", "*:S",
+            ],
+            ["adb", "-s", serial, "logcat", "-d", "-t", "1500", "-b", "main", "-v", "threadtime"],
+        ]
+        for dump_cmd in dump_cmds:
+            rc, stdout, _stderr = self._run_subprocess_text(dump_cmd, timeout_s=22)
+            if rc != 0 or not stdout:
+                continue
+            batch = []
+            for raw in stdout.splitlines():
+                if (
+                    "ele_algo_version" in raw
+                    or "Elevoc Algo" in raw
+                    or UIComponents._ELEVOC_ALGO_VERSION_LOOSE_RE.search(raw)
+                ):
+                    batch.append(raw)
+            _, algo, _, _, _, _ = self._parse_elevoc_log_lines(batch)
+            if algo:
+                return algo
+        return ""
+
+    def _elevoc_killall_and_dump_logcat(
+        self,
+        serial: str,
+        log_fn=None,
+        wait_s: float = 6.0,
+        retries: int = 2,
+        stream_timeout_s: float = 18.0,
+        mode: str = "version",
+        verbose: bool = False,
+    ) -> list:
+        """兼容旧调用：转调 _elevoc_capture_logs。"""
+        _ = wait_s, retries, stream_timeout_s
+        return self._elevoc_capture_logs(serial, mode=mode, log_fn=log_fn, verbose=verbose)
+
+    def _parse_elevoc_log_lines(self, lines):
+        return UIComponents._parse_elevoc_log_lines_static(lines)
+
+    def _fetch_elevoc_version_info(self, serial: str, timeout_s: int = 45, on_progress=None) -> str:
+        """killall audioserver 后抓取 SDK/算法版本与 cfg（支持 on_progress 实时输出）。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return "错误：请先选择设备"
+
+        parts = []
+
+        def _cap(msg):
+            parts.append(msg)
+            if on_progress:
+                on_progress(msg)
+
+        lines = self._elevoc_capture_logs(
+            serial,
+            mode="version",
+            log_fn=_cap,
+            verbose=False,
+        )
+
+        sdk_version, algo_version, cfg_lines, _, _, cfg_path = self._parse_elevoc_log_lines(lines)
+
+        if not cfg_lines:
+            _cap("读取设备 ini 配置...\n")
+            ini_lines, ini_path = self._elevoc_read_cfg_ini_from_device(serial, lines, log_fn=_cap)
+            if ini_lines:
+                cfg_lines = ini_lines
+                if ini_path:
+                    cfg_path = ini_path
+                _cap(f"  → ini 已读取（{len(cfg_lines)} 行）\n")
+
+        if not algo_version:
+            algo_version = self._elevoc_probe_algo_version(serial, lines, log_fn=_cap)
+            if algo_version:
+                _cap(f"  → ele_algo_version: {algo_version}\n")
+
+        if not sdk_version:
+            sdk_version = self._elevoc_probe_sdk_version(serial, lines, log_fn=_cap)
+            if sdk_version:
+                _cap(f"  → ele_sdk_version: {sdk_version}\n")
+
+        body = ["\n--- 版本 ---\n"]
+        if sdk_version:
+            body.append(f"ele_sdk_version: {sdk_version}\n")
+        else:
+            body.append("ele_sdk_version: （未捕获）\n")
+        if algo_version:
+            body.append(f"ele_algo_version: {algo_version}\n")
+        else:
+            body.append("ele_algo_version: （未捕获，设备可能未打印该日志）\n")
+
+        body.append("\n--- cfg ---\n")
+        if cfg_path:
+            body.append(f"# {cfg_path}\n")
+        if cfg_lines:
+            for item in cfg_lines:
+                body.append(f"{item}\n")
+        elif not cfg_path:
+            body.append("（未捕获 cfg 行）\n")
+
+        if not sdk_version or not cfg_lines:
+            body.append(
+                "\n提示: 若版本或 cfg 不完整，请确认设备已加载大象算法库；"
+                "可长按遥控器【语音键】授权 Google 远程语音唤醒后，点「刷新」重试。\n"
+            )
+
+        body_text = "".join(body)
+        _cap(body_text)
+        return "".join(parts)
+
+    def _verify_elevockey_from_logcat(
+        self,
+        serial: str,
+        append_fn=None,
+        timeout_s: int = 45,
+    ) -> tuple:
+        """killall audioserver 后 logcat -d 解析 elevoc_plugin 校验结果。"""
+        serial = (serial or "").strip()
+        if not serial:
+            return "MISSING", "", []
+
+        lines = self._elevoc_poll_verify_log(serial, timeout_s=float(timeout_s or 20))
+        _sdk, _algo, _cfg, verify_status, matched_line, _cfg_path = self._parse_elevoc_log_lines(lines)
+        if verify_status in ("SUCCESS", "FALSE"):
+            return verify_status, matched_line, lines
+        return "MISSING", matched_line, lines
+
     def _sync_elevoc_log_to_src(self):
         """把 TEMP 运行目录里的 elevoc_log.txt 同步回 elevoc_ukey 源目录（方便用户在 dist 里查看）。"""
         try:
@@ -1688,21 +2469,13 @@ class UIComponents:
         btn_burn.pack(side="right", padx=(6, 0))
         btn_uuid.pack(side="right", padx=(6, 0))
 
-        text_frame = ttk.Frame(frame)
+        text_frame = ttk.LabelFrame(frame, text="运行日志")
         text_frame.pack(fill="both", expand=True)
-        # 允许自动换行，长 key 不再“看不到”
-        txt = tk.Text(text_frame, wrap="word", font=("Consolas", 9))
-        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        txt.pack(side="left", fill="both", expand=True)
-        txt.config(state="disabled")
+        _, txt = self._setup_log_text(text_frame, height=14)
 
         def _append(s: str):
-            txt.config(state="normal")
-            txt.insert("end", s)
-            txt.see("end")
-            txt.config(state="disabled")
+            UIComponents._append_log_text(txt, s, scroll_to_end=True)
+            UIComponents._trim_log_text(txt)
 
         def _adb(serial: str, shell_cmd: str, timeout_s: int = 20):
             # shell_cmd 作为单个参数给 adb shell，避免 Windows shell 解析问题
@@ -1977,7 +2750,7 @@ class UIComponents:
             header,
             text=(
                 "功能：检查设备 unifykeys 是否支持 elevockey，并可新增/替换 elevockey。\n"
-                "流程：adb root → 检查 list → 读取当前值 → 输入新 elevockey → 写入 → 读回校验。"
+                "流程：adb root → 检查 list → 读取当前值 → 输入新 elevockey → 写入 → 读回校验 → 校验 key（logcat）。"
             ),
             style="Muted.TLabel",
         ).pack(anchor="w", padx=10, pady=8)
@@ -1998,9 +2771,12 @@ class UIComponents:
         btn_get_sn = ttk.Button(top, text="获取SN", style="Small.TButton")
         btn_support = ttk.Button(top, text="检查支持", style="Small.TButton")
         btn_read = ttk.Button(top, text="读取当前key", style="Small.TButton")
-        btn_get_sn.pack(side="right")
-        btn_support.pack(side="right", padx=(6, 0))
+        btn_verify = ttk.Button(top, text="校验key", style="Small.TButton")
+        # side=right：先 pack 的在最右；顺序为 获取SN | 检查支持 | 读取当前key | 校验key
+        btn_verify.pack(side="right")
         btn_read.pack(side="right", padx=(6, 0))
+        btn_support.pack(side="right", padx=(6, 0))
+        btn_get_sn.pack(side="right", padx=(6, 0))
 
         key_frame = ttk.LabelFrame(frame, text="写入 elevockey")
         key_frame.pack(fill="x", pady=(0, 8))
@@ -2011,16 +2787,9 @@ class UIComponents:
         btn_burn = ttk.Button(key_frame, text="写入/替换(烧key)", style="Small.TButton")
         btn_burn.pack(side="right", padx=(0, 10), pady=8)
 
-        text_frame = ttk.Frame(frame)
-        text_frame.pack(fill="both", expand=True)
-        txt = tk.Text(text_frame, wrap="none", font=("Consolas", 9))
-        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
-        hsb = ttk.Scrollbar(text_frame, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
-        txt.pack(side="left", fill="both", expand=True)
-        txt.config(state="disabled")
+        text_frame = ttk.LabelFrame(frame, text="运行日志")
+        text_frame.pack(fill="both", expand=True, pady=(0, 4))
+        _, txt = self._setup_log_text(text_frame, height=14)
 
         UNIFY_KEY_NAME_PATH = "/sys/class/unifykeys/name"
         UNIFY_KEY_READ_PATH = "/sys/class/unifykeys/read"
@@ -2028,11 +2797,9 @@ class UIComponents:
         UNIFY_KEY_LIST_PATH = "/sys/class/unifykeys/list"
         ELEVOC_KEY_NAME = "elevockey"
 
-        def _append(s: str):
-            txt.config(state="normal")
-            txt.insert("end", s)
-            txt.see("end")
-            txt.config(state="disabled")
+        def _append(s: str, scroll_to_end: bool = True):
+            UIComponents._append_log_text(txt, s, scroll_to_end=scroll_to_end)
+            UIComponents._trim_log_text(txt)
 
         def _serial() -> str:
             try:
@@ -2169,6 +2936,76 @@ class UIComponents:
             else:
                 raise RuntimeError("烧录失败：读回为空")
 
+        def _do_verify_key():
+            serial = _ensure_device()
+            if not serial:
+                return
+
+            status, matched, raw_lines = self._verify_elevockey_from_logcat(
+                serial, append_fn=None, timeout_s=20
+            )
+
+            result_parts = []
+            if matched:
+                result_parts.append(f"{matched}\n")
+            if status == "SUCCESS":
+                result_parts.append("校验结果: SUCCESS（大象 key 校验通过）\n")
+            elif status == "FALSE":
+                result_parts.append("校验结果: FALSE（大象 key 校验失败）\n")
+            else:
+                result_parts.append("未捕获 elevockey 校验日志。\n")
+                result_parts.append(
+                    "提示: 若 adb logcat 中已有 SUCCESS，可能是 audioserver 未重新加载大象插件。\n"
+                    "请长按遥控器【语音键】授权语音唤醒后，再点「校验key」；或等待 3 秒后重试。\n"
+                )
+                hint_lines = [
+                    raw for raw in (raw_lines or [])
+                    if raw and ("elevoc" in raw.lower() or "elevockey" in raw.lower())
+                ]
+                for raw in hint_lines[-3:]:
+                    result_parts.append(f"  {raw}\n")
+            result_text = "".join(result_parts)
+
+            def _show_verify_result():
+                _append(result_text, scroll_to_end=True)
+                if status == "SUCCESS":
+                    status_var.set("校验通过")
+                elif status == "FALSE":
+                    status_var.set("校验失败")
+                else:
+                    status_var.set("未捕获校验日志")
+                try:
+                    txt.update_idletasks()
+                    UIComponents._scroll_log_text_to_bottom(txt)
+                except Exception:
+                    pass
+
+                def _show_popup():
+                    if status == "SUCCESS":
+                        return
+                    elif status == "FALSE":
+                        messagebox.showerror(
+                            "校验失败",
+                            "大象 key 校验 FALSE。\n请确认 elevockey 已正确烧录。",
+                        )
+                    else:
+                        messagebox.showwarning(
+                            "未检测到校验日志",
+                            "未检测到 elevockey 自动校验日志。\n\n"
+                            "请长按遥控器【语音键】，授权 Google 远程语音唤醒功能后，再点击「校验 key」重试。",
+                        )
+
+                self.root.after(200, _show_popup)
+
+            self.root.after(0, _show_verify_result)
+
+        def _start_verify_key():
+            serial = _ensure_device()
+            if not serial:
+                return
+            _append("\n=== 校验 elevockey ===\n正在校验（约 5~15 秒）...\n")
+            _run_in_thread(_do_verify_key)
+
         def _run_in_thread(fn):
             def worker():
                 try:
@@ -2183,6 +3020,7 @@ class UIComponents:
         btn_get_sn.config(command=lambda: _run_in_thread(_do_get_sn))
         btn_support.config(command=lambda: _run_in_thread(_do_check_support))
         btn_read.config(command=lambda: _run_in_thread(_do_read_current))
+        btn_verify.config(command=_start_verify_key)
         btn_burn.config(command=lambda: _run_in_thread(_do_burn))
 
         # 初次进入自动填一次
@@ -4043,36 +4881,7 @@ class UIComponents:
         win.geometry(f"1040x{win_h}")
         win.minsize(820, min(win_h, 480))
         # 与主窗口一致的图标（AcouTest logo）
-        try:
-            base_dir = self._get_runtime_base_dir()
-            png_paths = [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
-            ]
-            for path in png_paths:
-                if path and os.path.exists(path):
-                    try:
-                        icon_img = load_tk_photoimage(win, path)
-                        win.iconphoto(True, icon_img)
-                        win._icon_image = icon_img
-                        break
-                    except Exception:
-                        pass
-            if platform.system() == "Windows":
-                ico_paths = [
-                    os.path.join(base_dir, "logo", "AcouTest.ico"),
-                    os.path.join("logo", "AcouTest.ico"),
-                ]
-                for ico_path in ico_paths:
-                    if os.path.exists(ico_path):
-                        try:
-                            win.iconbitmap(ico_path)
-                            break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        self._apply_window_icon(win)
         info = (
             f"文件: {file_path}\n"
             f"采样率: {sample_rate} Hz    通道数: {channels}    位宽: {sample_width * 8} bit    "
@@ -11181,6 +11990,17 @@ class UIComponents:
                 )
             b.pack(fill="x", pady=1)
 
+        ttk.Button(
+            btns,
+            text="大象算法库版本",
+            style="SysCmd.TButton",
+            command=lambda: self.open_system_cmd_window(
+                "大象算法库版本",
+                "killall audioserver + logcat ELEVOCLOG",
+                fetch_fn=self._fetch_elevoc_version_info,
+            ),
+        ).pack(fill="x", pady=1)
+
         custom_lf = ttk.LabelFrame(lf, text="自定义指令（可新增/删除）")
         custom_lf.pack(fill="x", padx=8, pady=(0, 6))
 
@@ -11372,10 +12192,10 @@ class UIComponents:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def open_system_cmd_window(self, title: str, shell_cmd: str):
-        """打开系统指令结果弹窗并执行"""
+    def open_system_cmd_window(self, title: str, shell_cmd: str, fetch_fn=None):
+        """打开系统指令结果弹窗并执行。fetch_fn(serial) 可替代 adb shell 一次性命令（如 logcat 抓取）。"""
         shell_cmd = (shell_cmd or "").strip()
-        if not shell_cmd:
+        if not shell_cmd and fetch_fn is None:
             messagebox.showerror("错误", "请输入要执行的系统指令（例如：dumpsys media.audio）")
             return
 
@@ -11396,31 +12216,7 @@ class UIComponents:
         win.title(f"{title} 结果")
         win.geometry("980x720")
         # 与主窗口一致的图标（声测大师 logo）
-        try:
-            base_dir = self._get_runtime_base_dir()
-            for path in [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
-            ]:
-                if path and os.path.exists(path):
-                    try:
-                        icon_img = load_tk_photoimage(win, path)
-                        win.iconphoto(True, icon_img)
-                        win._icon_image = icon_img
-                        break
-                    except Exception:
-                        pass
-            if platform.system() == "Windows":
-                for ico_path in [os.path.join(base_dir, "logo", "AcouTest.ico"), os.path.join("logo", "AcouTest.ico")]:
-                    if ico_path and os.path.exists(ico_path):
-                        try:
-                            win.iconbitmap(ico_path)
-                            break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        self._apply_window_icon(win)
         try:
             win.bind("<Enter>", lambda e: win.focus_set(), add=True)
         except Exception:
@@ -11429,7 +12225,7 @@ class UIComponents:
         topbar = ttk.Frame(win)
         topbar.pack(fill="x", padx=10, pady=(10, 6))
 
-        ttk.Label(topbar, text=f"命令：{shell_cmd}", style="Muted.TLabel").pack(side="left", fill="x", expand=True)
+        ttk.Label(topbar, text=f"命令：{shell_cmd or title}", style="Muted.TLabel").pack(side="left", fill="x", expand=True)
 
         # 控件：刷新/保存
         btn_refresh = ttk.Button(topbar, text="刷新", style="Small.TButton")
@@ -11452,59 +12248,95 @@ class UIComponents:
         # 文本区
         text_frame = ttk.Frame(win)
         text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        txt = tk.Text(text_frame, wrap="none", font=("Consolas", 9))
-        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=txt.yview)
-        hsb = ttk.Scrollbar(text_frame, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
-        txt.pack(side="left", fill="both", expand=True)
+        _, txt = self._setup_log_text(text_frame, height=24)
+        UIComponents._bind_log_text_readonly(txt)
 
         txt.tag_configure("hit", background="#ffe58a")
         txt.tag_configure("hit_cur", background="#ffd666")
 
-        state = {"last_output": "", "last_cmd": shell_cmd, "last_title": title, "cur_index": "1.0"}
+        state = {
+            "last_output": "",
+            "last_cmd": shell_cmd,
+            "last_title": title,
+            "cur_index": "1.0",
+            "fetch_fn": fetch_fn,
+            "stream_started": False,
+        }
 
-        def _set_text(content: str):
-            txt.config(state="normal")
-            txt.delete("1.0", "end")
-            txt.insert("1.0", content or "")
-            txt.config(state="disabled")
-            state["last_output"] = content or ""
+        def _set_text(content: str, append: bool = False):
+            if append:
+                txt.insert("end", content or "")
+            else:
+                txt.delete("1.0", "end")
+                txt.insert("1.0", content or "")
+            txt.see("end")
+            if platform.system() == "Darwin":
+                txt.update_idletasks()
+            state["last_output"] = txt.get("1.0", "end-1c")
             state["cur_index"] = "1.0"
 
         def _run_cmd_async():
             btn_refresh.config(state="disabled")
             btn_save.config(state="disabled")
+            state["stream_started"] = False
             _set_text("正在执行...\n")
+
+            def on_progress(msg: str):
+                def _ui():
+                    if not state["stream_started"]:
+                        txt.delete("1.0", "end")
+                        state["stream_started"] = True
+                    txt.insert("end", msg or "")
+                    try:
+                        if txt.yview()[1] >= 0.98:
+                            txt.see("end")
+                    except Exception:
+                        txt.see("end")
+                    if platform.system() == "Darwin":
+                        txt.update_idletasks()
+                    state["last_output"] = txt.get("1.0", "end-1c")
+
+                self.root.after(0, _ui)
 
             def worker():
                 try:
-                    # shell=False：避免 Windows 下 %xx/%s 被 cmd.exe 展开导致 input/text 类命令异常
-                    result = subprocess.run(
-                        ["adb", "-s", serial, "shell"] + shlex.split(state["last_cmd"]),
-                        capture_output=True,
-                        text=True,
-                    )
-                    out = (result.stdout or "")
-                    err = (result.stderr or "")
-                    if result.returncode != 0 and err:
-                        out = out + ("\n\n[stderr]\n" + err)
-                    elif err:
-                        out = out + ("\n\n[stderr]\n" + err)
+                    fn = state.get("fetch_fn")
+                    if fn:
+                        try:
+                            out = fn(serial, on_progress=on_progress)
+                        except TypeError:
+                            out = fn(serial)
+                    else:
+                        result = subprocess.run(
+                            ["adb", "-s", serial, "shell"] + shlex.split(state["last_cmd"]),
+                            capture_output=True,
+                            text=True,
+                        )
+                        out = (result.stdout or "")
+                        err = (result.stderr or "")
+                        if result.returncode != 0 and err:
+                            out = out + ("\n\n[stderr]\n" + err)
+                        elif err:
+                            out = out + ("\n\n[stderr]\n" + err)
                 except Exception as e:
                     out = f"执行失败：{type(e).__name__}: {e}"
 
-                self.root.after(0, lambda: (_set_text(out), btn_refresh.config(state="normal"), btn_save.config(state="normal")))
+                def _finish():
+                    if not state.get("stream_started"):
+                        _set_text(out or "")
+                    elif out and out != state.get("last_output"):
+                        state["last_output"] = out
+                    btn_refresh.config(state="normal")
+                    btn_save.config(state="normal")
+
+                self.root.after(0, _finish)
 
             threading.Thread(target=worker, daemon=True).start()
 
         def _highlight_all(needle: str):
-            txt.config(state="normal")
             txt.tag_remove("hit", "1.0", "end")
             txt.tag_remove("hit_cur", "1.0", "end")
             if not needle:
-                txt.config(state="disabled")
                 return
             start = "1.0"
             while True:
@@ -11514,14 +12346,12 @@ class UIComponents:
                 end = f"{pos}+{len(needle)}c"
                 txt.tag_add("hit", pos, end)
                 start = end
-            txt.config(state="disabled")
 
         def _find_next():
             needle = (find_var.get() or "").strip()
             if not needle:
                 return
             _highlight_all(needle)
-            txt.config(state="normal")
             pos = txt.search(needle, state["cur_index"], stopindex="end", nocase=True)
             if not pos:
                 pos = txt.search(needle, "1.0", stopindex="end", nocase=True)
@@ -11531,7 +12361,8 @@ class UIComponents:
                 txt.tag_add("hit_cur", pos, end)
                 txt.see(pos)
                 state["cur_index"] = end
-            txt.config(state="disabled")
+            if platform.system() == "Darwin":
+                txt.update_idletasks()
 
         def _on_ctrl_f(_e=None):
             try:
@@ -11595,31 +12426,7 @@ class UIComponents:
         win = tk.Toplevel(self.root)
         win.title("设备解锁（Bootloader）/root&remount")
         win.geometry("980x720")
-        try:
-            base_dir = self._get_runtime_base_dir()
-            for path in [
-                os.path.join(base_dir, "logo", "AcouTest.png"),
-                os.path.join("logo", "AcouTest.png"),
-                os.path.join(getattr(sys, "_MEIPASS", ""), "logo", "AcouTest.png") if getattr(sys, "frozen", False) else None,
-            ]:
-                if path and os.path.exists(path):
-                    try:
-                        icon_img = load_tk_photoimage(win, path)
-                        win.iconphoto(True, icon_img)
-                        win._icon_image = icon_img
-                        break
-                    except Exception:
-                        pass
-            if platform.system() == "Windows":
-                for ico_path in [os.path.join(base_dir, "logo", "AcouTest.ico"), os.path.join("logo", "AcouTest.ico")]:
-                    if ico_path and os.path.exists(ico_path):
-                        try:
-                            win.iconbitmap(ico_path)
-                            break
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        self._apply_window_icon(win)
         try:
             win.bind("<Enter>", lambda e: win.focus_set(), add=True)
         except Exception:
