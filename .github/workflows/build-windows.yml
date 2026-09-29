@@ -1,0 +1,79 @@
+name: Build Windows EXE
+
+# 在 GitHub 云端的 Windows 机器上跑 PyInstaller，产出与 Packager.bat 等价的 onefile exe。
+# macOS 无法交叉编译 Windows exe，本 workflow 用来替代本地 Packager.bat。
+on:
+  push:
+    branches:
+      - master_freebox
+    paths-ignore:
+      - "**/*.md"
+      - "release_notes.txt"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 只取根目录代码 + logo（audio/wakeup_count 等大资源打包不需要，跳过可大幅加快 checkout）
+      - name: Checkout (sparse)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            logo
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pygame pillow certifi edge-tts aiohttp imageio-ffmpeg
+
+      - name: Read APP_VERSION
+        id: ver
+        run: |
+          $v = python -c "from feature_config import APP_VERSION; print(APP_VERSION)"
+          if (-not $v) { throw "无法从 feature_config.py 读取 APP_VERSION" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "exe_name=AcouTest.v$v" >> $env:GITHUB_OUTPUT
+          Write-Host "[CI] APP_VERSION = $v"
+
+      # 参数与 Packager.bat 的 PyInstaller 调用保持一致（onefile / noconsole / noupx / 同一组 hidden-import）
+      - name: Build with PyInstaller
+        run: |
+          python -m PyInstaller --clean --noconsole --onefile --noupx `
+            --icon "logo/AcouTest.ico" `
+            --add-data "logo;logo" `
+            --hidden-import certifi `
+            --hidden-import updater_http `
+            --hidden-import generate_wake_word `
+            --hidden-import edge_tts `
+            --hidden-import edge_tts.exceptions `
+            --hidden-import imageio_ffmpeg `
+            --hidden-import asyncio `
+            --hidden-import asyncio.windows_events `
+            --hidden-import asyncio.windows_utils `
+            --hidden-import aiohttp `
+            --exclude-module numpy `
+            --name "${{ steps.ver.outputs.exe_name }}" `
+            main.py
+
+      - name: Verify output
+        run: |
+          $exe = "dist/${{ steps.ver.outputs.exe_name }}.exe"
+          if (-not (Test-Path $exe)) { throw "打包失败：未生成 $exe" }
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "[CI] Build OK: $exe ($mb MB)"
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: AcouTest-windows-v${{ steps.ver.outputs.version }}-${{ github.sha }}
+          path: dist/${{ steps.ver.outputs.exe_name }}.exe
+          if-no-files-found: error
+          retention-days: 30
