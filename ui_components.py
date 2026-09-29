@@ -6389,7 +6389,7 @@ class UIComponents:
             cid = "ok_google"
         try:
             if cid == "ok_google":
-                self.hotword_after_key_var.set("关闭助手(force-stop)")
+                self.hotword_after_key_var.set("关闭助手(stop-app)")
             elif cid == "magenta":
                 self.hotword_after_key_var.set("返回键(KEYCODE_BACK)")
                 if hasattr(self, "hotword_back_delay_var"):
@@ -7604,11 +7604,11 @@ class UIComponents:
         back_frame = ttk.Frame(rate_frame)
         back_frame.pack(anchor="w", padx=6, pady=(4, 2))
         ttk.Label(back_frame, text="唤醒后").pack(side="left")
-        self.hotword_after_key_var = tk.StringVar(value="关闭助手(force-stop)")
+        self.hotword_after_key_var = tk.StringVar(value="关闭助手(stop-app)")
         key_combo = ttk.Combobox(
             back_frame,
             textvariable=self.hotword_after_key_var,
-            values=["不关闭", "关闭助手(force-stop)", "返回键(KEYCODE_BACK)", "Home键(KEYCODE_HOME)"],
+            values=["不关闭", "关闭助手(stop-app)", "返回键(KEYCODE_BACK)", "Home键(KEYCODE_HOME)"],
             state="readonly",
             width=16,
         )
@@ -7619,7 +7619,7 @@ class UIComponents:
         delay_entry.pack(side="left")
         self._attach_hover_tooltip(
             key_combo,
-            "唤醒后操作。Google 默认 force-stop；magenta 在监测到唤醒 log 后按「延迟(s)」再按返回键（与界面计数同步，不等到 wav 播完）。",
+            "唤醒后操作。Google 默认 stop-app（adb shell am stop-app com.google.android.katniss）；magenta 在监测到唤醒 log 后按「延迟(s)」再按返回键（与界面计数同步，不等到 wav 播完）。",
         )
 
         # 单行统计 +「说明」紧跟其后，避免子 Frame expand 造成中间大块留白
@@ -10012,7 +10012,7 @@ class UIComponents:
             mode = "home"
         elif "返回" in key_choice or "BACK" in key_choice.upper():
             mode = "back"
-        elif "force-stop" in key_choice or "关闭助手" in key_choice:
+        elif "force-stop" in key_choice or "stop-app" in key_choice or "关闭助手" in key_choice:
             mode = "force_stop_voice"
         try:
             raw = (getattr(self, "hotword_back_delay_var", None) or tk.StringVar(value="2")).get()
@@ -10098,7 +10098,7 @@ class UIComponents:
             return False
 
     def _hotword_send_after_key(self, device_id, delay_sec=None, log_append=None, restore_audioplayer_after=False):
-        """按界面「唤醒后」与「延迟(s)」向设备发送返回/Home 或 force-stop（在调用线程内 sleep 后同步执行）。"""
+        """按界面「唤醒后」与「延迟(s)」向设备发送返回/Home 或 stop-app 关闭助手（在调用线程内 sleep 后同步执行）。"""
         try:
             key_choice = (getattr(self, "hotword_after_key_var", None) or tk.StringVar(value="不关闭")).get()
         except Exception:
@@ -10123,9 +10123,9 @@ class UIComponents:
         if platform.system() == "Windows":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            if "force-stop" in key_choice or "关闭助手" in key_choice:
-                cmd = adb_prefix + ["shell", "am", "force-stop", "com.google.android.katniss"]
-                label = "force-stop katniss"
+            if "force-stop" in key_choice or "stop-app" in key_choice or "关闭助手" in key_choice:
+                cmd = adb_prefix + ["shell", "am", "stop-app", "com.google.android.katniss"]
+                label = "stop-app katniss"
             else:
                 keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
                 cmd = adb_prefix + ["shell", "input", "keyevent", keycode]
@@ -10133,7 +10133,9 @@ class UIComponents:
             subprocess.run(cmd, **kwargs)
             if log_append:
                 log_append("唤醒后: 延迟 %.1fs 已发送 %s" % (delay_sec, label))
-            if restore_audioplayer_after and not ("force-stop" in key_choice or "关闭助手" in key_choice):
+            if restore_audioplayer_after and not (
+                "force-stop" in key_choice or "stop-app" in key_choice or "关闭助手" in key_choice
+            ):
                 self._hotword_restore_audioplayer_background(dev_id, log_append=log_append)
         except Exception as e:
             if log_append:
@@ -10285,15 +10287,17 @@ class UIComponents:
                                 getattr(self, "device_var", None) and self.device_var.get() or ""
                             ).strip()
 
-                            use_force_stop = "force-stop" in key_choice or "关闭助手" in key_choice
+                            use_stop_app = (
+                                "force-stop" in key_choice or "stop-app" in key_choice or "关闭助手" in key_choice
+                            )
 
-                            def _close_assistant_later(dev_id, force_stop_only, keycode):
+                            def _close_assistant_later(dev_id, stop_app_only, keycode):
                                 try:
-                                    if force_stop_only:
+                                    if stop_app_only:
                                         if dev_id:
-                                            cmd = f"adb -s {dev_id} shell am force-stop com.google.android.katniss"
+                                            cmd = f"adb -s {dev_id} shell am stop-app com.google.android.katniss"
                                         else:
-                                            cmd = "adb shell am force-stop com.google.android.katniss"
+                                            cmd = "adb shell am stop-app com.google.android.katniss"
                                     else:
                                         if dev_id:
                                             cmd = f"adb -s {dev_id} shell input keyevent {keycode}"
@@ -10303,7 +10307,7 @@ class UIComponents:
                                 except Exception:
                                     pass
 
-                            if use_force_stop:
+                            if use_stop_app:
                                 root.after(int(delay_sec * 1000), lambda d=device_id: _close_assistant_later(d, True, None))
                             else:
                                 keycode = "KEYCODE_HOME" if ("Home" in key_choice or "KEYCODE_HOME" in key_choice) else "KEYCODE_BACK"
