@@ -11,6 +11,9 @@ on:
       - "release_notes.txt"
   workflow_dispatch:
 
+permissions:
+  contents: write # 需要写权限才能创建/更新 Release 并上传 exe
+
 jobs:
   build:
     runs-on: windows-latest
@@ -70,10 +73,49 @@ jobs:
           $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
           Write-Host "[CI] Build OK: $exe ($mb MB)"
 
-      - name: Upload exe
+      # Artifact 是 zip 包，Chrome 安全浏览常直接拦掉，仅作备份保留
+      - name: Upload artifact (backup)
         uses: actions/upload-artifact@v4
         with:
           name: AcouTest-windows-v${{ steps.ver.outputs.version }}-${{ github.sha }}
           path: dist/${{ steps.ver.outputs.exe_name }}.exe
           if-no-files-found: error
           retention-days: 30
+
+      # 发到滚动预发布 tag `ci-<分支名>`，给出公开直链（不占用正式版 v<版本号> tag）
+      - name: Publish to rolling pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # pwsh 7.4 默认把外部命令非零退出当异常抛出，这里关掉，改为手工判 $LASTEXITCODE
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $tag = "ci-${{ github.ref_name }}"
+          $exe = "dist/${{ steps.ver.outputs.exe_name }}.exe"
+
+          # 先删旧的同名预发布（含 tag），保证附件始终是本次构建的产物；首次运行时删除失败属正常
+          gh release delete $tag --yes --cleanup-tag
+          if ($LASTEXITCODE -ne 0) { Write-Host "[CI] 预发布 $tag 不存在或删除失败，继续新建" }
+
+          $notes = @"
+          分支 ``${{ github.ref_name }}`` 的最新云端构建，**非正式发布版**。
+
+          - APP_VERSION: ``${{ steps.ver.outputs.version }}``
+          - commit: ${{ github.sha }}
+          - 构建记录: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          固定下载直链（每次构建覆盖为最新）：
+          ``${{ github.server_url }}/${{ github.repository }}/releases/download/$tag/${{ steps.ver.outputs.exe_name }}.exe``
+
+          exe 未做代码签名，浏览器或 Windows SmartScreen 可能提示未知发布者，选择保留/仍要运行即可。
+          "@
+
+          gh release create $tag $exe `
+            --prerelease `
+            --target ${{ github.sha }} `
+            --title "CI 构建 v${{ steps.ver.outputs.version }} (${{ github.ref_name }})" `
+            --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create 失败（退出码 $LASTEXITCODE）" }
+
+          Write-Host "[CI] 下载直链: ${{ github.server_url }}/${{ github.repository }}/releases/download/$tag/${{ steps.ver.outputs.exe_name }}.exe"
