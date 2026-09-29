@@ -209,6 +209,19 @@ sync_dir elevoc_ukey dist/elevoc_ukey
 sync_dir wakeup_count dist/wakeup_count
 
 echo "[Packager] Done. dist is ready to zip for delivery."
-echo "[Packager] macOS: program is inside dist/${APP_NAME}.app (double-click to run)"
-echo "[Packager] Also zip audio/, output/, etc. next to the .app for full features."
-echo "[Packager] Or: ./dist/启动测试工具.command"
+echo "[Packager] macOS: double-click dist/${APP_NAME}.app"
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  NOTARIZE_READY=0
+  if [[ -n "${APPLE_APP_PASSWORD:-}" && -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    NOTARIZE_READY=1
+  elif [[ -n "${NOTARY_API_KEY_PATH:-}" && -n "${NOTARY_API_KEY_ID:-}" && -n "${NOTARY_API_ISSUER:-}" ]]; then
+    NOTARIZE_READY=1
+  fi
+  if [[ "${PACKAGER_NOTARIZE:-1}" == "1" && "$NOTARIZE_READY" == "1" && -d "dist/${APP_NAME}.app" ]]; then
+    echo "[Packager] Notarizing dist/${APP_NAME}.app ..."
+    ./macos_sign_notarize.sh "dist/${APP_NAME}.app"
+  elif [[ "$NOTARIZE_READY" == "0" ]]; then
+    echo "[Packager] Skip notarize (set APPLE_APP_PASSWORD or NOTARY_API_KEY_* to auto-notarize)."
+  fi
+fi

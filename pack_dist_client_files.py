@@ -86,7 +86,6 @@ def _write_mac_launcher(dist: Path, launch_rel: str, launch_mode: str, app_bundl
 cd "$(dirname "$0")"
 echo "正在启动声测大师(AcouTest)..."
 open "./{app_bundle_name}"
-exit 0
 '''
     elif launch_mode == "open":
         body = f'''#!/bin/bash
@@ -256,52 +255,71 @@ def _create_macos_app_bundle(dist: Path, root: Path, app_base: str, ver: str) ->
     _write_info_plist(app_path / "Contents" / "Info.plist", app_base, ver)
     _copy_app_icon(root, resources_dir)
     _slim_macos_frameworks(frameworks_dir)
-
-    subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", str(app_path)],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    _sign_macos_app(app_path)
 
     shutil.rmtree(onedir_folder)
     print(f"[pack_dist] embedded onedir into {app_name}/Contents/MacOS/ (removed dist/{app_base}/)")
     return app_name
 
 
+def _macos_sign_identity() -> str:
+    """Developer ID 证书（环境变量）或 ad-hoc 临时签名。"""
+    import os
+
+    env_id = os.environ.get("APPLE_DEVELOPER_ID", "").strip()
+    if env_id:
+        return env_id
+    if platform.system() != "Darwin":
+        return "-"
+    try:
+        out = subprocess.check_output(
+            ["security", "find-identity", "-v", "-p", "codesigning"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "-"
+    for line in out.splitlines():
+        if "Developer ID Application:" in line:
+            start = line.find('"')
+            end = line.rfind('"')
+            if start >= 0 and end > start:
+                return line[start + 1 : end]
+    return "-"
+
+
+def _sign_macos_app(app_path: Path) -> None:
+    identity = _macos_sign_identity()
+    sign_args = ["codesign", "--force", "--deep"]
+    if identity != "-":
+        sign_args += ["--options", "runtime", "--timestamp"]
+    sign_args += ["--sign", identity, str(app_path)]
+    result = subprocess.run(sign_args, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[pack_dist] WARN: codesign failed: {result.stderr.strip() or result.stdout.strip()}")
+        return
+    label = identity if identity != "-" else "ad-hoc"
+    print(f"[pack_dist] signed {app_path.name} ({label})")
+
+
 def _write_mac_readme(dist: Path, app_bundle_name: str | None) -> None:
     readme = dist / "Mac使用说明.txt"
-    if app_bundle_name:
-        open_hint = f"双击「{app_bundle_name}」（Finder 种类为「应用程序」）"
-    else:
-        open_hint = "双击「启动测试工具.command」"
+    app_name = app_bundle_name or "AcouTest.v*.app"
     readme.write_text(
         f"""声测大师(AcouTest) — macOS 使用说明
 ========================================
 
-【推荐打开方式】
-  {open_hint}
+1. 完整解压 zip 到文件夹（勿在压缩包内直接打开）
+2. 双击「{app_name}」或「启动测试工具.command」
 
-【备选方式】
-  双击「启动测试工具.command」
+请保持以下文件夹与 .app 在同一目录：
+  audio/          测试音频
+  output/         测试数据输出
+  elevoc_ukey/    烧 key 相关（若有）
+  wakeup_count/   唤醒监测相关（若有）
 
-【目录说明】
-  程序本体已内置在上述 .app 中，无需单独的 AcouTest.v* 文件夹。
-
-  请保持以下资源文件夹与 .app 放在同一目录（交付 zip 时请一并解压）：
-    audio/          测试音频
-    logo/           图标（可选，程序内已带一份）
-    output/         测试数据输出（运行后自动写入）
-    elevoc_ukey/    烧 key 相关（若有）
-    wakeup_count/   唤醒监测相关（若有）
-
-  首次打开若提示「无法验证开发者」，请：
-  系统设置 → 隐私与安全性 → 仍要打开
-
-  语料生成需要本机已安装 ffmpeg（一次性）：
-    brew install ffmpeg
-
-  U盘烧 key 功能仅支持 Windows，Mac 上其它功能可正常使用。
+语料生成需本机安装 ffmpeg：brew install ffmpeg
+U盘烧 key 仅支持 Windows。
 """,
         encoding="utf-8",
     )

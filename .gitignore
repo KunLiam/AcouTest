@@ -29,3 +29,7 @@ Desktop.ini
 .venv/
 
 
+
+# Xcode 本地用户状态（不提交）
+xcuserdata/
+*.xcuserstate
