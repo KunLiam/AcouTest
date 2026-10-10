@@ -32,7 +32,8 @@ from feature_config import (
 )
 from control_api import AcouTestControlApi
 import updater_http
-from platform_utils import get_ui_font, open_folder, configure_macos_ttk_style, get_runtime_base_dir, load_tk_photoimage, safe_show_tk_window, schedule_macos_ui_repaint
+import i18n
+from platform_utils import get_ui_font, open_folder, configure_macos_ttk_style, get_runtime_base_dir, load_tk_photoimage, safe_show_tk_window, schedule_macos_ui_repaint, install_notebook_settle_on_switch, install_toplevel_reveal_after_layout
 
 class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
     def __init__(self, root):
@@ -60,6 +61,10 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         TestOperations.__init__(self, root)
         # 尽早安装全局滚轮/触摸板滚动（macOS 需在子界面创建前就绪）
         self._ensure_global_mousewheel()
+        # 切换页签时一次性排好版，避免第一次点进页签时按钮/行肉眼可见地拉伸变形
+        install_notebook_settle_on_switch(self.root)
+        # 弹窗布局算完再显示，避免打开时框/按钮先小后大地重新适配
+        install_toplevel_reveal_after_layout()
         
         # macOS 打包版：不要用 PNG 覆盖 Dock 图标（保留 .app 内圆角 .icns）
         try:
@@ -266,6 +271,18 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
             self.root.after(ms, tick)
         except Exception:
             pass
+
+    def toggle_language(self):
+        """中文 / English 一键切换：立即生效，不重启、不中断正在进行的测试。"""
+        to_english = not i18n.is_english()
+        try:
+            i18n.switch_language(self.root, "en" if to_english else "zh")
+        except Exception as e:
+            print(f"[i18n] 切换语言失败: {e}")
+            return
+        lang_btn = getattr(self, "lang_btn", None)
+        if lang_btn is not None:
+            lang_btn.configure(text="中文" if to_english else "English")
 
     def _on_app_close(self):
         """应用关闭清理。"""
@@ -966,6 +983,16 @@ class AudioTestTool(UIComponents, DeviceOperations, TestOperations):
         # 网络连接按钮 - 调小字体
         network_btn = ttk.Button(device_frame, text="网络连接", command=self.show_network_connect_dialog, width=8, style="Small.TButton")
         network_btn.pack(side="left", padx=(0, 5))
+
+        # 语言切换：中文界面显示「English」，英文界面显示「中文」，点击后立即切换
+        lang_btn = self.lang_btn = ttk.Button(
+            device_frame,
+            text="中文" if i18n.is_english() else "English",
+            command=self.toggle_language,
+            width=7,
+            style="Small.TButton",
+        )
+        lang_btn.pack(side="left", padx=(0, 5))
         
         # 软件信息：小问号图标 + 悬停提示「查看软件信息」+ 点击弹窗
         about_icon = tk.Label(

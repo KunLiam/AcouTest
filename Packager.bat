@@ -46,6 +46,16 @@ set "VER="
 for /f "delims=" %%i in ('python -c "from feature_config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%i"
 if "%VER%"=="" set "VER=1.0"
 set "EXE_NAME=AcouTest.v%VER%"
+REM UI language: set PACKAGER_LANG=en to build an English-default package (AcouTest-EN.vX.exe).
+if exist "i18n_build_default.py" del /F /Q "i18n_build_default.py" >nul 2>&1
+set "PI_LANG_HIDDEN="
+if /I "%PACKAGER_LANG%"=="en" (
+    set "EXE_NAME=AcouTest-EN.v%VER%"
+    > "i18n_build_default.py" echo DEFAULT_LANGUAGE = "en"
+    set "PI_LANG_HIDDEN=--hidden-import i18n_build_default"
+    echo [Packager] Language: English build ^(PACKAGER_LANG=en^)
+)
+set "PACKAGER_APP_BASE=%EXE_NAME%"
 set "USE_ONEDIR=0"
 if /I "%PACKAGER_ONEDIR%"=="1" set "USE_ONEDIR=1"
 set "DIST_EXE=dist\%EXE_NAME%.exe"
@@ -82,6 +92,9 @@ python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTes
     --hidden-import certifi ^
     --hidden-import updater_http ^
     --hidden-import generate_wake_word ^
+    --hidden-import i18n ^
+    --hidden-import i18n_en ^
+    !PI_LANG_HIDDEN! ^
     --hidden-import edge_tts ^
     --hidden-import edge_tts.exceptions ^
     --hidden-import imageio_ffmpeg ^
@@ -93,6 +106,7 @@ python -m PyInstaller --clean --noconsole !PI_MODE! --noupx --icon="logo\AcouTes
     --name "%EXE_NAME%" ^
     main.py
 
+if exist "i18n_build_default.py" del /F /Q "i18n_build_default.py" >nul 2>&1
 if not exist "!DIST_EXE!" goto PACK_FAIL
 
 echo [Packager] Build OK: !DIST_EXE!

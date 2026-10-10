@@ -33,3 +33,6 @@ Desktop.ini
 # Xcode 本地用户状态（不提交）
 xcuserdata/
 *.xcuserstate
+
+# 英文包打包时临时生成
+i18n_build_default.py

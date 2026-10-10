@@ -2442,6 +2442,8 @@ class UIComponents:
                 "提示：该 DLL 可能不支持中文路径，本工具会自动在临时英文目录运行所需文件。"
             ),
             style="Muted.TLabel",
+            wraplength=600,
+            justify="left",
         ).pack(anchor="w", padx=10, pady=8)
 
         # 按钮区：分两行，避免窗口稍窄时按钮文字被遮挡/省略
@@ -2764,14 +2766,15 @@ class UIComponents:
         # SN 展示（自动获取并填入）
         sn_var = tk.StringVar(value="")
         ttk.Label(top, text="设备SN:").pack(side="left", padx=(12, 6))
-        sn_entry = ttk.Entry(top, textvariable=sn_var, width=24, state="readonly")
+        sn_entry = ttk.Entry(top, textvariable=sn_var, width=20, state="readonly")
         sn_entry.pack(side="left")
 
         # 操作按钮
-        btn_get_sn = ttk.Button(top, text="获取SN", style="Small.TButton")
-        btn_support = ttk.Button(top, text="检查支持", style="Small.TButton")
-        btn_read = ttk.Button(top, text="读取当前key", style="Small.TButton")
-        btn_verify = ttk.Button(top, text="校验key", style="Small.TButton")
+        # width 为负数：按文字实际长度显示（至少 6 个字符宽），避免默认 11 字符宽把一行挤满
+        btn_get_sn = ttk.Button(top, text="获取SN", style="Small.TButton", width=-6)
+        btn_support = ttk.Button(top, text="检查支持", style="Small.TButton", width=-6)
+        btn_read = ttk.Button(top, text="读取当前key", style="Small.TButton", width=-6)
+        btn_verify = ttk.Button(top, text="校验key", style="Small.TButton", width=-6)
         # side=right：先 pack 的在最右；顺序为 获取SN | 检查支持 | 读取当前key | 校验key
         btn_verify.pack(side="right")
         btn_read.pack(side="right", padx=(6, 0))
@@ -7384,14 +7387,14 @@ class UIComponents:
         input_frame.pack(fill="x", padx=5, pady=5)
         
         ttk.Label(input_frame, text="属性:", font=("Arial", 9)).pack(side="left", padx=5)
-        self.logcat_prop_var = tk.StringVar()
-        prop_entry = ttk.Entry(input_frame, textvariable=self.logcat_prop_var, width=20)
-        prop_entry.pack(side="left", padx=5, fill="x", expand=True)
-        
+        # 按钮先靠右排，空间不够时压缩的是输入框而不是按钮
         add_button = ttk.Button(input_frame, text="添加", 
                               command=self.add_logcat_prop, style="Small.TButton",
                               width=4)
-        add_button.pack(side="left", padx=5)
+        add_button.pack(side="right", padx=5)
+        self.logcat_prop_var = tk.StringVar()
+        prop_entry = ttk.Entry(input_frame, textvariable=self.logcat_prop_var, width=12)
+        prop_entry.pack(side="left", padx=5, fill="x", expand=True)
         
         # 在属性输入区域之后添加全选/取消全选按钮
         select_buttons_frame = ttk.Frame(props_frame)
@@ -7850,6 +7853,8 @@ class UIComponents:
                     else:
                         if not multi_frm.winfo_manager():
                             multi_frm.pack(anchor="w", pady=(2, 0))
+                    # 展开/收起后立即排好版，避免下方区域分几次跳动
+                    multi_frm.master.update_idletasks()
             except Exception:
                 pass
         for w in (getattr(self, "hotword_wakeup100_per_count_entry", None), getattr(self, "hotword_wakeup100_interval_entry", None)):

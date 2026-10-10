@@ -31,6 +31,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import platform
 
+# 英文模式：在创建任何窗口之前给 Tk 装上翻译钩子（中文模式下不做任何事）
+import i18n
+
+i18n.install_tk_hooks()
+print(f"[i18n] 界面语言: {i18n.get_language()}")
+
 # Windows 下避免 subprocess 弹控制台窗口导致“闪屏”
 from windows_subprocess_patch import patch_subprocess_no_console
 patch_subprocess_no_console()

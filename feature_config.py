@@ -11,7 +11,12 @@ False = 不显示（相当于不编译进本次发布）
 """
 
 # ========== 应用版本号（主窗口标题、更新清单 exe 的 {version} 等；跑 sync_version_manifest.py 同步 JSON）==========
-APP_VERSION = "2.1.6"
+APP_VERSION = "2.1.7"
+
+# ========== 界面语言 ==========
+# 默认界面语言："zh" 中文 / "en" English。用户在主界面右上角点「English / 中文」切换后会记住自己的选择。
+# 打英文包时 Packager.sh 设 PACKAGER_LANG=en，会生成 i18n_build_default.py 覆盖这里的默认值，无需手动改。
+DEFAULT_LANGUAGE = "zh"
 
 # AudioPlayer.apk 在 PlayerDemo 等仓库上的 Release 版本号（与 APP_VERSION 无关，发版时手动改）。sync_version_manifest 用其替换 APK URL 里的 {version}。
 AUDIOPLAYER_APK_VERSION = "1.0.1"

@@ -1,11 +1,11 @@
 {
-  "latest_version": "2.1.6",
-  "publish_date": "2026-09-29",
+  "latest_version": "2.1.7",
+  "publish_date": "2026-10-10",
   "notes": [
-    "新增 Swift/macOS 版 AcouTest Xcode 工程骨架（SwiftUI 主界面、功能页、ADB 服务层）。",
-    "纳入音频资源、图标与 SWIFT_MIGRATION 迁移说明。",
-    "新增 macos_sign_notarize.sh，并调整 Packager/分发包脚本；忽略 Xcode 本地状态文件。"
+    "新增国际版：中文 / English 一键实时切换，不重启、不中断测试；可打默认英文包 AcouTest-EN。",
+    "英文界面文字防遮挡：按钮按文字长度放宽、超长说明自动换行、译文精简。",
+    "macOS：第一次进入测试项不再出现框重新适配/变形；弹窗布局算完再显示。"
   ],
-  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.6/AcouTest.v2.1.6.exe",
+  "download_url": "https://github.com/KunLiam/AcouTest/releases/download/v2.1.7/AcouTest.v2.1.7.exe",
   "wakeup_count_apk_url": "https://github.com/KunLiam/PlayerDemo/releases/download/v1.0.1/AudioPlayer.apk"
 }

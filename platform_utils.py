@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from typing import List, Optional
 IS_WINDOWS = platform.system() == "Windows"
 IS_DARWIN = platform.system() == "Darwin"
@@ -189,6 +190,234 @@ def safe_show_tk_window(root) -> bool:
         return True
     except Exception:
         return False
+
+
+def _settle_layout(widget, max_rounds: int = 6) -> None:
+    """
+    把 widget 及其可见子控件的布局一次算到最终状态。
+
+    每轮先 update_idletasks()，再对「绑定了 <Configure> 且尺寸与上次处理时不同」的控件
+    立即生成一次 <Configure>，让它们的尺寸适配逻辑同步执行；没有控件再变化时停止。
+    """
+    for _ in range(max_rounds):
+        widget.update_idletasks()
+        pending = []
+        stack = [widget]
+        while stack:
+            w = stack.pop()
+            try:
+                if not w.winfo_ismapped():
+                    continue
+                stack.extend(w.winfo_children())
+                if not w.bind("<Configure>"):
+                    continue
+                size = (w.winfo_width(), w.winfo_height())
+                if getattr(w, "_acoutest_settled_size", None) != size:
+                    pending.append((w, size))
+            except Exception:
+                continue
+        if not pending:
+            return
+        for w, size in pending:
+            try:
+                w._acoutest_settled_size = size
+                w.event_generate("<Configure>", width=size[0], height=size[1],
+                                 x=w.winfo_x(), y=w.winfo_y())
+            except Exception:
+                pass
+
+
+# 排版完成后再等这么久揭开遮罩（实测 30ms 不稳定，100ms 稳定）
+UNCOVER_DELAY_MS = 100
+
+
+def install_notebook_settle_on_switch(root) -> None:
+    """
+    切换 Notebook 页签时，立刻把新页面的布局一次性算完再交给系统绘制。
+
+    Tk 的页签第一次显示时，布局要分好几轮才算完（先按内容最小宽度排，再拉伸到占满窗口），
+    中间如果屏幕刷新了，就会看到按钮/行「拉长一下」或变形。
+    除了 update_idletasks() 能完成的排版，滚动区域等控件还要等 <Configure>（尺寸变化）事件
+    才把内容拉到窗口宽度，而这些事件是排队处理的、会晚于第一次绘制。
+    所以这里反复「排版 → 立即触发尺寸变化处理」，直到没有控件尺寸再变化，再交给系统绘制。
+
+    macOS 第一次显示某个页面时会分批绘制（约 0.3 秒，看起来像框在重新适配），
+    因此点击「从未显示过」的页签时，在切换之前先用纯背景色的无边框小窗口盖住内容区，
+    排版、绘制完成后再揭开，用户只看到最终布局。已显示过的页面不再遮罩。仅 macOS。
+    """
+    if root is None:
+        return
+    import tkinter as tk
+    from tkinter import ttk
+
+    def _cover_bg():
+        try:
+            return ttk.Style(root).lookup("TFrame", "background") or "#ececec"
+        except Exception:
+            return "#ececec"
+
+    def _mark_shown(widget):
+        """标记 widget 下当前可见的页签页面「已显示过」，以后再进入不需要遮罩。"""
+        stack = [widget]
+        while stack:
+            w = stack.pop()
+            try:
+                if isinstance(w, tk.Toplevel) and w is not widget:
+                    continue
+                if isinstance(w, ttk.Notebook) and w.select():
+                    w.nametowidget(w.select())._acoutest_shown = True
+                stack.extend(w.winfo_children())
+            except Exception:
+                continue
+
+    root.after_idle(lambda: _mark_shown(root))
+
+    overlay = {"win": None}
+
+    def _get_overlay():
+        """
+        遮罩用独立的无边框小窗口：macOS 上同一窗口里的 Frame 盖不住后画的控件，独立窗口一定在最上层。
+        使用 help 样式，显示时不抢主窗口焦点。
+        """
+        win = overlay["win"]
+        if win is not None:
+            return win
+        win = tk.Toplevel(root, bg=_cover_bg(), highlightthickness=0, borderwidth=0)
+        win.withdraw()
+        # 用 Tk 9 的 -stylemask 去掉标题栏（overrideredirect 在 macOS 上显示不及时，盖不住）
+        try:
+            root.tk.call("::tk::unsupported::MacWindowStyle", "style", win._w, "help", "none")
+        except Exception:
+            pass
+        try:
+            win.attributes("-stylemask", ())
+        except Exception:
+            win.overrideredirect(True)
+        try:
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        overlay["win"] = win
+        return win
+
+    def _on_press(event):
+        """
+        在 ttk 切换页签之前执行：如果点中的是从未显示过的页面，先把遮罩窗口真正显示到屏幕上。
+        必须抢在切换之前，因为切换后的排版过程中 macOS 就会分批把页面画出来。
+        """
+        nb = event.widget
+        try:
+            if getattr(nb, "_acoutest_cover", None) is not None or not nb.select():
+                return
+            try:
+                idx = nb.index(f"@{event.x},{event.y}")
+            except tk.TclError:
+                return
+            tabs = nb.tabs()
+            if not (0 <= idx < len(tabs)) or tabs[idx] == nb.select():
+                return
+            if str(nb.tab(idx, "state")) == "disabled":
+                return
+            target = nb.nametowidget(tabs[idx])
+            if getattr(target, "_acoutest_shown", False):
+                return
+            current = nb.nametowidget(nb.select())
+            area = (current.winfo_x(), current.winfo_y(), current.winfo_width(), current.winfo_height())
+            if area[2] <= 1 or area[3] <= 1:
+                return
+            win = _get_overlay()
+            x = nb.winfo_rootx() + area[0]
+            y = nb.winfo_rooty() + area[1]
+            win.geometry(f"{area[2]}x{area[3]}+{x}+{y}")
+            win.deiconify()
+            win.lift()
+            win.update_idletasks()
+            token = object()
+            nb._acoutest_cover = token
+            nb.after(1500, lambda: _uncover(nb) if getattr(nb, "_acoutest_cover", None) is token else None)
+        except Exception as e:
+            print(f"[layout] 页签遮罩失败: {e}")
+
+    def _uncover(nb):
+        if getattr(nb, "_acoutest_cover", None) is None:
+            return
+        nb._acoutest_cover = None
+        try:
+            nb.update_idletasks()
+            if overlay["win"] is not None:
+                overlay["win"].withdraw()
+        except Exception:
+            pass
+
+    def _settle(event):
+        nb = event.widget
+        try:
+            started = time.time()
+            page = nb.nametowidget(nb.select()) if nb.select() else nb
+            _settle_layout(page)
+            _mark_shown(page)
+            cost = time.time() - started
+            if cost > 0.8:
+                print(f"[layout] 页签排版较慢: {cost:.2f}s")
+        except Exception:
+            pass
+        # macOS 第一次绘制页面是分批画的（约 0.3 秒），等画完再揭开遮罩
+        if getattr(nb, "_acoutest_cover", None) is not None:
+            nb.after(UNCOVER_DELAY_MS, lambda: _uncover(nb))
+
+    try:
+        # 先执行遮罩，再执行 ttk 原有的点击切换逻辑
+        # （tkinter 对字符串脚本会忽略 add="+"，所以手动拼接两段脚本）
+        orig_press = root.bind_class("TNotebook", "<ButtonPress-1>")
+        if IS_DARWIN and orig_press:
+            root.bind_class("TNotebook", "<ButtonPress-1>", _on_press)
+            ours = root.bind_class("TNotebook", "<ButtonPress-1>")
+            root.bind_class("TNotebook", "<ButtonPress-1>", f"{ours}\n{orig_press}")
+        root.bind_class("TNotebook", "<<NotebookTabChanged>>", _settle, add="+")
+    except Exception as e:
+        print(f"[layout] 安装页签切换排版失败: {e}")
+
+
+_toplevel_reveal_installed = False
+
+
+def install_toplevel_reveal_after_layout(delay_ms: int = 30) -> None:
+    """
+    所有新弹窗（tk.Toplevel）先透明显示，等里面的控件布局全部算完再变成不透明。
+
+    弹窗里的内容是创建后分几轮排版的，直接显示时能看到框/按钮先小后大「重新适配」一下。
+    透明期间系统照常排版，用户看不到中间过程；显示出来时已经是最终布局。
+    """
+    global _toplevel_reveal_installed
+    if _toplevel_reveal_installed:
+        return
+    _toplevel_reveal_installed = True
+    import tkinter as tk
+
+    orig_init = tk.Toplevel.__init__
+
+    def _init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        try:
+            self.attributes("-alpha", 0.0)
+        except Exception:
+            return
+
+        def _reveal():
+            try:
+                if not self.winfo_exists():
+                    return
+                self.update_idletasks()
+                self.attributes("-alpha", 1.0)
+            except Exception:
+                pass
+
+        # 用定时器而不是 after_idle：弹窗内容通常在创建 Toplevel 之后才陆续加入，
+        # 定时器在本次事件处理结束、首轮排版之后才触发，此时再补齐剩余排版并显示。
+        self.after(delay_ms, _reveal)
+
+    tk.Toplevel.__init__ = _init
 
 
 def schedule_macos_ui_repaint(root, style=None, attempts: int = 6) -> None:

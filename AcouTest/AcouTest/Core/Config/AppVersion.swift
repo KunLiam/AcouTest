@@ -2,7 +2,7 @@ import Foundation
 
 /// 应用版本与更新通道（对应 feature_config.py）
 enum AppVersion {
-    static let current = "2.1.6"
+    static let current = "2.1.7"
     static let displayName = "声测大师(AcouTest)"
 }
 

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import platform
 import plistlib
 import shutil
@@ -328,7 +329,8 @@ U盘烧 key 仅支持 Windows。
 def main() -> None:
     root = Path(__file__).resolve().parent
     ver = getattr(feature_config, "APP_VERSION", "1.0")
-    app_base = f"AcouTest.v{ver}"
+    # Packager 打英文包时通过 PACKAGER_APP_BASE 传入 AcouTest-EN.vX
+    app_base = os.environ.get("PACKAGER_APP_BASE") or f"AcouTest.v{ver}"
     is_windows = platform.system() == "Windows"
     exe_name = f"{app_base}.exe" if is_windows else app_base
     dist = root / "dist"
